@@ -5,6 +5,9 @@ import { BrowserRouter } from "react-router-dom";
 import App from "./App";
 import { AuthGate } from "./components/auth";
 import "./index.css";
+import { watchSystemTheme } from "./theme";
+
+watchSystemTheme();
 
 const queryClient = new QueryClient({ defaultOptions: { queries: { retry: false, refetchOnWindowFocus: false } } });
 

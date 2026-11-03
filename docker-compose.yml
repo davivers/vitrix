@@ -1,0 +1,20 @@
+# Example: run Vitrix on a detections repository in ./detections
+#   docker compose run --rm vitrix init .      # first time: create the repo layout
+#   docker compose up                          # UI on http://localhost:8000
+services:
+  vitrix:
+    build: .
+    # The port is published on the loopback interface ONLY. Without `auth.enabled: true` in
+    # vitrix.yml the API has no authentication: never change this to "8000:8000" or 0.0.0.0.
+    ports:
+      - "127.0.0.1:8000:8000"
+    volumes:
+      - ./detections:/workspace      # rules, cases, datasets, vitrix.yml and .vitrix/ (accounts, drafts)
+    environment:
+      # Read from your shell / .env, never baked into the image.
+      - VITRIX_GITHUB_TOKEN
+    # Save locally (drafts) needs accounts here: in a container the server sees the Docker bridge IP, not
+    # loopback, so with accounts off drafts are refused. Set `auth:` -> `enabled: true` in vitrix.yml.
+    # Behind a reverse proxy with a real hostname: enable auth in vitrix.yml and add
+    #   - VITRIX_ALLOWED_HOSTS=vitrix.example.com
+    restart: unless-stopped

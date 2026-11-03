@@ -1,18 +1,72 @@
 import { useQuery } from "@tanstack/react-query";
-import { Plus, Search } from "lucide-react";
-import { useMemo, useState } from "react";
-import { Link, useNavigate } from "react-router-dom";
+import { CheckCircle2, ChevronDown, Plus, Search, XCircle } from "lucide-react";
+import { useEffect, useMemo, useRef, useState } from "react";
+import { Link, useNavigate, useSearchParams } from "react-router-dom";
 import { api } from "../api";
-import { HealthMeter, timeAgo } from "../components/dash";
+import { HealthMeter, StatTile, pct, timeAgo } from "../components/dash";
+import { FlowFunnel } from "../components/flow";
 import { Card, ErrorBox, LevelTag, PageHeader, StateBadge, TargetChip, btnPrimary } from "../components/ui";
-import type { State } from "../types";
+import type { QualityReport, State } from "../types";
+import { t } from "../i18n";
 
 const FILTERS: { value: "all" | State; label: string }[] = [
-  { value: "all", label: "All" },
-  { value: "ok", label: "Valid" },
-  { value: "warn", label: "Warnings" },
-  { value: "fail", label: "Failing" },
+  { value: "all", label: t("l_all") },
+  { value: "ok", label: t("l_valid") },
+  { value: "warn", label: t("l_warnings") },
+  { value: "fail", label: t("l_failing") },
 ];
+
+const STRIP_KEY = "vitrix.rules.gate-strip";
+const readStrip = () => {
+  try {
+    return localStorage.getItem(STRIP_KEY) !== "closed";
+  } catch {
+    return true;
+  }
+};
+
+/** Workspace-wide gate summary (moved here from the old Quality Gate page). */
+function GateStrip({ q, onBlocked, forceOpen }: { q: QualityReport; onBlocked: () => void; forceOpen: boolean }) {
+  const [open, setOpen] = useState(() => forceOpen || readStrip());
+  const toggle = () => {
+    setOpen(!open);
+    try {
+      localStorage.setItem(STRIP_KEY, open ? "closed" : "open");
+    } catch {
+      /* storage unavailable */
+    }
+  };
+  return (
+    <section aria-label={t("quality_gate_summary")} className="mb-5">
+      <button type="button" onClick={toggle} aria-expanded={open} className="mb-2 inline-flex items-center gap-1.5 text-[13px] font-semibold text-muted hover:text-text">
+        <ChevronDown size={14} className={open ? "" : "-rotate-90"} aria-hidden /> {t("quality_gate_summary")}
+      </button>
+      {open && (
+        <>
+          <div className="mb-4 grid gap-4 sm:grid-cols-2 xl:grid-cols-4">
+            <StatTile label={t("ready_to_publish")} value={`${q.summary.ready}/${q.summary.total}`} sub={t("ru_pct_set", { p: pct(q.summary.ready, q.summary.total) })} status={q.summary.blocked ? "warn" : "ok"} />
+            <button type="button" onClick={onBlocked} disabled={!q.summary.blocked} className="text-left disabled:cursor-default" aria-label={t("ru_show_blocked", { n: q.summary.blocked })}>
+              <StatTile label={t("blocked_2")} value={q.summary.blocked} sub={q.summary.blocked ? t("l_click_to_filter_the_table") : t("l_none_word")} status={q.summary.blocked ? "fail" : "ok"} />
+            </button>
+            <StatTile
+              label={t("average_health")}
+              value={q.summary.health === null ? "—" : `${q.summary.health}/100`}
+              sub={q.summary.stale ? t("ex_due_review", { n: q.summary.stale }) : t("ex_no_overdue")}
+              status={q.summary.health === null ? "none" : q.summary.health >= 90 ? "ok" : q.summary.health >= 70 ? "warn" : "fail"}
+            />
+            <StatTile
+              label={t("replay_datasets")}
+              value={q.datasets.length}
+              sub={q.datasets.length ? t("ru_no_regress", { n: q.datasets.filter((d) => d.passed).length }) : t("ru_none_ds")}
+              status={q.datasets.some((d) => !d.passed) ? "fail" : q.datasets.length ? "ok" : "none"}
+            />
+          </div>
+          <FlowFunnel q={q} />
+        </>
+      )}
+    </section>
+  );
+}
 
 export default function RulesPage() {
   const navigate = useNavigate();
@@ -20,42 +74,66 @@ export default function RulesPage() {
   const quality = useQuery({ queryKey: ["quality"], queryFn: api.quality });
   const [q, setQ] = useState("");
   const [filter, setFilter] = useState<"all" | State>("all");
+  const [gateFilter, setGateFilter] = useState<"all" | "blocked" | "ready">("all");
+  const [params] = useSearchParams();
+  const stripRef = useRef<HTMLDivElement>(null);
+
+  // /rules?view=gate (old /gate bookmarks): scroll to the summary and show the blocked rules, if any.
+  const viewGate = params.get("view") === "gate";
+  useEffect(() => {
+    if (!viewGate || !quality.data) return;
+    stripRef.current?.scrollIntoView({ block: "start" });
+    if (quality.data.summary.blocked) setGateFilter("blocked");
+  }, [viewGate, quality.data]);
 
   const gate = useMemo(() => new Map((quality.data?.rules ?? []).map((r) => [r.id, r])), [quality.data]);
 
   const rows = useMemo(() => {
     const needle = q.trim().toLowerCase();
-    return (data ?? []).filter(
+    const list = (data ?? []).filter(
       (r) =>
         (filter === "all" || r.state === filter) &&
+        (gateFilter === "all" || (gateFilter === "ready") === Boolean(gate.get(r.id)?.ready)) &&
         (!needle || [r.title, r.id, r.logsource ?? "", ...r.techniques, ...r.tactics].some((s) => s.toLowerCase().includes(needle))),
     );
-  }, [data, q, filter]);
+    // Gate view: blocked rules first, lowest health first.
+    return viewGate ? [...list].sort((a, b) => Number(gate.get(a.id)?.ready ?? true) - Number(gate.get(b.id)?.ready ?? true) || (gate.get(a.id)?.score ?? 100) - (gate.get(b.id)?.score ?? 100)) : list;
+  }, [data, q, filter, gateFilter, gate, viewGate]);
 
   return (
     <div className="mx-auto max-w-7xl px-4 py-8 sm:px-8">
       <PageHeader
-        title="Rules"
-        subtitle={data ? `${data.length} rules in the repository` : "Reading the repository…"}
+        title={viewGate ? t("l_quality_gate") : t("l_rules")}
+        subtitle={viewGate ? t("l_which_rules_can_be_published_block") : data ? t("ru_n_rules", { n: data.length }) : t("reading_the_repository")}
         actions={
           <Link to="/editor" className={btnPrimary}>
-            <Plus size={16} aria-hidden /> New rule
+            <Plus size={16} aria-hidden /> {t("new_rule")}
           </Link>
         }
       />
 
+      <div ref={stripRef}>
+        {quality.isLoading && <p className="mb-5 text-sm text-muted">{t("running_the_lifecycle_on_every_rule")}</p>}
+        {quality.error && (
+          <div className="mb-5">
+            <ErrorBox message={(quality.error as Error).message} />
+          </div>
+        )}
+        {quality.data && <GateStrip q={quality.data} forceOpen={viewGate} onBlocked={() => setGateFilter("blocked")} />}
+      </div>
+
       <div className="mb-4 flex flex-wrap items-center gap-3">
         <label className="relative">
-          <span className="sr-only">Search rules</span>
+          <span className="sr-only">{t("search_rules")}</span>
           <Search size={16} className="absolute left-3 top-1/2 -translate-y-1/2 text-subtle" aria-hidden />
           <input
             value={q}
             onChange={(e) => setQ(e.target.value)}
-            placeholder="Search by title, file, data source or technique"
+            placeholder={t("search_by_title_file_data_source_or_te")}
             className="w-80 max-w-full rounded-[10px] border border-line bg-surface py-2 pl-9 pr-3 text-sm text-text placeholder:text-subtle focus:border-accent/50"
           />
         </label>
-        <div className="flex gap-1 rounded-[10px] border border-line bg-surface p-1" role="group" aria-label="Filter by state">
+        <div className="flex gap-1 rounded-[10px] border border-line bg-surface p-1" role="group" aria-label={t("filter_by_state")}>
           {FILTERS.map((f) => (
             <button
               key={f.value}
@@ -68,6 +146,27 @@ export default function RulesPage() {
             </button>
           ))}
         </div>
+        {quality.data && (
+          <div className="flex gap-1 rounded-[10px] border border-line bg-surface p-1" role="group" aria-label={t("filter_by_gate")}>
+            {(
+              [
+                ["all", t("l_all")],
+                ["blocked", t("ru_f_blocked")],
+                ["ready", t("ru_f_ready")],
+              ] as const
+            ).map(([k, label]) => (
+              <button
+                key={k}
+                type="button"
+                aria-pressed={gateFilter === k}
+                onClick={() => setGateFilter(k)}
+                className={`rounded-md px-3 py-1.5 text-sm ${gateFilter === k ? "bg-accent-soft font-medium text-strong" : "text-muted hover:text-text"}`}
+              >
+                {label}
+              </button>
+            ))}
+          </div>
+        )}
       </div>
 
       {error && <ErrorBox message={(error as Error).message} />}
@@ -76,35 +175,35 @@ export default function RulesPage() {
         <table className="w-full min-w-[900px] text-left text-sm">
           <thead className="border-b border-line bg-surface text-[11.5px] uppercase tracking-wide text-subtle">
             <tr>
-              <th className="px-4 py-3 font-medium">Rule</th>
-              <th className="px-4 py-3 font-medium">Severity</th>
+              <th className="px-4 py-3 font-medium">{t("rule")}</th>
+              <th className="px-4 py-3 font-medium">{t("severity")}</th>
               <th className="px-4 py-3 font-medium">ATT&amp;CK</th>
-              <th className="px-4 py-3 font-medium">Final language</th>
-              <th className="px-4 py-3 font-medium">Tests</th>
-              <th className="px-4 py-3 font-medium">Health</th>
-              <th className="px-4 py-3 font-medium">Changed</th>
-              <th className="px-4 py-3 font-medium">State</th>
+              <th className="px-4 py-3 font-medium">{t("final_language")}</th>
+              <th className="px-4 py-3 font-medium">{t("tests")}</th>
+              <th className="whitespace-nowrap px-4 py-3 font-medium">{t("gate")}</th>
+              <th className="px-4 py-3 font-medium">{t("changed")}</th>
+              <th className="px-4 py-3 font-medium">{t("state")}</th>
             </tr>
           </thead>
           <tbody>
             {isLoading && (
               <tr>
                 <td colSpan={8} className="px-4 py-10 text-center text-muted">
-                  Loading…
+                  {t("loading")}
                 </td>
               </tr>
             )}
             {!isLoading && rows.length === 0 && !error && (
               <tr>
                 <td colSpan={8} className="px-4 py-10 text-center text-muted">
-                  {data?.length ? "No rule matches this filter." : "No rules in rules/. Create the first one with “New rule”."}
+                  {data?.length ? t("l_no_rule_matches_this_filter") : t("ru_empty")}
                 </td>
               </tr>
             )}
             {rows.map((r) => {
               const g = gate.get(r.id);
               return (
-                <tr key={r.id} onClick={() => navigate(`/editor/${r.id}`)} className="cursor-pointer border-b border-line last:border-0 hover:bg-accent/[0.07]">
+                <tr key={r.id} onClick={() => navigate(`/editor/${r.id}`)} className="cursor-pointer border-b border-line last:border-0 hover:bg-surface-2">
                   <td className="px-4 py-3">
                     <Link to={`/editor/${r.id}`} className="font-semibold text-strong hover:text-accent" onClick={(e) => e.stopPropagation()}>
                       {r.title || r.id}
@@ -123,8 +222,20 @@ export default function RulesPage() {
                       ))}
                     </span>
                   </td>
-                  <td className="px-4 py-3 tabular-nums">{r.tests.total ? `${r.tests.passed}/${r.tests.total}` : <span className="text-warn">no cases</span>}</td>
-                  <td className="px-4 py-3">{g ? <HealthMeter score={g.score} /> : <span className="text-subtle">—</span>}</td>
+                  <td className="px-4 py-3 tabular-nums">{r.tests.total ? `${r.tests.passed}/${r.tests.total}` : <span className="text-warn">{t("no_cases")}</span>}</td>
+                  <td className="whitespace-nowrap px-4 py-3">
+                    {g ? (
+                      <span className="flex flex-nowrap items-center gap-2">
+                        <span className={`inline-flex items-center gap-1 rounded-full px-2 py-0.5 text-xs font-semibold ${g.ready ? "bg-good-soft text-good" : "bg-bad-soft text-bad"}`}>
+                          {g.ready ? <CheckCircle2 size={12} aria-hidden /> : <XCircle size={12} aria-hidden />}
+                          {g.ready ? t("ru_row_ready") : t("ru_row_blocked")}
+                        </span>
+                        <HealthMeter score={g.score} />
+                      </span>
+                    ) : (
+                      <span className="text-subtle">—</span>
+                    )}
+                  </td>
                   <td className="px-4 py-3 text-xs text-muted">{g?.age_days !== null && g?.age_days !== undefined ? timeAgo(new Date(Date.now() - g.age_days * 86400000).toISOString()) : "—"}</td>
                   <td className="px-4 py-3">
                     <StateBadge state={r.state} />

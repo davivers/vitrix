@@ -1,164 +1,244 @@
-# Vitrix
+<div align="center">
 
-Detection-as-Code without depending on a SIEM. You write rules in [Sigma](https://sigmahq.io); Vitrix **validates**, **converts** them for several SIEMs, **tests** each rule with sample events, **replays** local logs, applies a **quality gate** and ships changes through your **real CI** — all local and inside your own pipeline.
+<picture>
+  <source media="(prefers-color-scheme: dark)" srcset="brand/vitrix-logo-on-dark.svg">
+  <img src="brand/vitrix-logo-on-light.svg" alt="Vitrix" width="300">
+</picture>
 
-> Version 0.1.0, alpha. Chosen name: Vitrix (domain and trademark still to be checked).
+**Write once. Detect on any SIEM.**
 
-**Write → Validate → Test → Replay → Analyze → Quality gate → Deploy**
+Detection-as-Code for [Sigma](https://sigmahq.io) rules: validate, test, replay, gate and ship through your own CI.
 
-## Getting started
+[![CI](https://github.com/davivers/vitrix/actions/workflows/ci.yml/badge.svg)](https://github.com/davivers/vitrix/actions/workflows/ci.yml)
+[![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
+[![Python 3.10-3.14](https://img.shields.io/badge/python-3.10%E2%80%933.14-3776AB.svg)](pyproject.toml)
+[![Status: alpha](https://img.shields.io/badge/status-alpha%200.1.0-orange.svg)](#limits-of-this-version)
 
-**This repository is the Vitrix product, not your detections.** You install Vitrix and run it inside your own detections repository (a Git repo with your Sigma rules):
+[Quickstart](#quickstart) · [Features](#features) · [Roles and security](#roles-and-security) · [CLI](#cli-cheat-sheet) · [Reference](#reference) · [Contributing](#contributing)
 
-**Requirements:** Python **3.10 to 3.14** (3.12 recommended) and Git. Python 3.15 is not supported yet: PyYAML has no prebuilt wheel for it, so pip would try to compile it and ask for Microsoft Visual C++. Always install into a virtual environment.
+</div>
 
-**Windows (PowerShell)** — one command per line; Windows PowerShell 5.1 does not accept `&&`:
+---
+
+## What is Vitrix
+
+Vitrix is a local tool for teams that keep detections as code. You write rules in Sigma; Vitrix checks them, converts them to the query language of each SIEM, runs your test cases and replays local logs against them. Nothing reaches your repository until a quality gate approves the rule and **your real CI passes for that exact commit**.
+
+It needs no SIEM and sends nothing off your machine (GitHub is the only optional connection).
+
+```mermaid
+flowchart LR
+    A[Write<br/>Sigma rule] --> B[Validate<br/>lint + convert]
+    B --> C[Test<br/>typed cases]
+    C --> D[Replay<br/>local logs]
+    D --> E{Quality gate<br/>health score}
+    E -- approved --> F[Publish<br/>push vitrix/* branch]
+    F --> G[Real CI passes<br/>same commit]
+    G --> H[Pull request]
+    E -. blocked .-> A
+```
+
+Not ready to publish? **Save locally** keeps a private draft (stored in `.vitrix/`, never in `rules/`) that you can reopen later from the Editor.
+
+## Quickstart
+
+Vitrix runs **inside your own detections repository**. This repository is the product, not your rules. `vitrix init` creates a detections repo with example rules, test cases, replay logs and a CI workflow.
+
+<details open>
+<summary><b>Option 1 - Docker</b> (no Python needed)</summary>
+
+```bash
+git clone https://github.com/davivers/vitrix && cd vitrix
+docker build -t vitrix .
+
+# first time: create a detections repo in ./detections
+mkdir detections
+docker run --rm -v "$PWD/detections:/workspace" vitrix init .
+
+# serve the UI at http://localhost:8000
+docker run --rm -p 127.0.0.1:8000:8000 -v "$PWD/detections:/workspace" -e VITRIX_GITHUB_TOKEN vitrix
+```
+
+With Compose (mounts `./detections`, publishes `127.0.0.1:8000`):
+
+```bash
+docker compose run --rm vitrix init .
+docker compose up
+```
+
+Other commands: `docker run --rm -v "$PWD/detections:/workspace" vitrix check --strict --gate` (also `replay`, `report`). On PowerShell use `${PWD}` instead of `$PWD`. Accounts and drafts live in `detections/.vitrix/`.
+
+**Save locally (drafts) in Docker needs accounts.** Inside a container the server sees the Docker bridge address, not loopback, so with accounts off drafts are refused. Turn accounts on in `detections/vitrix.yml` (`auth:` then `enabled: true`) and restart; the first person to register becomes the owner.
+
+</details>
+
+<details>
+<summary><b>Option 2 - Python virtual environment</b> (install scripts)</summary>
+
+Needs Python **3.10 to 3.14** (3.12 recommended) and Git. Python 3.15 is not supported yet (no PyYAML wheel).
+
+```bash
+# Linux / macOS
+git clone https://github.com/davivers/vitrix && cd vitrix
+scripts/install.sh
+. .venv/bin/activate
+vitrix init ../my-detections && cd ../my-detections
+vitrix serve                         # http://127.0.0.1:8000
+```
 
 ```powershell
-# 1. a virtual environment with Python 3.12 (the `py` launcher ships with Python for Windows)
-py install 3.12                 # only if `py -0` does not list 3.12 yet
-py -3.12 -m venv .venv
-.\.venv\Scripts\Activate.ps1    # if blocked: Set-ExecutionPolicy -Scope CurrentUser RemoteSigned
-
-# 2. install Vitrix (PyPI soon, for now straight from GitHub)
-pip install "vitrix[api] @ git+https://github.com/davivers/vitrix.git"
-
-# 3. create your detections repository: vitrix.yml, example rules, test cases, replay logs, CI workflow
-vitrix init my-detections
-cd my-detections
-
-# 4. work on it
-vitrix check --strict --gate    # lint + conversion + tests + replay + quality gate
-vitrix serve                    # the web UI on http://127.0.0.1:8000
-
-# 5. make it yours: commit, push to your own repository, then set github.repo in vitrix.yml
-git init
-git add -A
-git commit -m "Initial detections"
+# Windows (PowerShell 5.1 or 7; one command per line)
+git clone https://github.com/davivers/vitrix; cd vitrix
+powershell -File scripts\install.ps1
+.\.venv\Scripts\Activate.ps1         # if blocked: Set-ExecutionPolicy -Scope CurrentUser RemoteSigned
+vitrix init ..\my-detections; cd ..\my-detections
+vitrix serve                         # http://127.0.0.1:8000
 ```
 
-**Linux / macOS (bash, zsh):**
+Without cloning, install straight from GitHub: `scripts/install.sh "vitrix[api] @ git+https://github.com/davivers/vitrix"` (Windows: `scripts\install.ps1 -Target "vitrix[api] @ git+https://github.com/davivers/vitrix"`).
+`vitrix: command not found` means the virtual environment is not active; activate it in each new terminal.
+
+</details>
+
+<details>
+<summary><b>Option 3 - From source</b> (developing Vitrix)</summary>
 
 ```bash
-python3.12 -m venv .venv && . .venv/bin/activate
-pip install "vitrix[api] @ git+https://github.com/davivers/vitrix.git"
-vitrix init my-detections && cd my-detections
+git clone https://github.com/davivers/vitrix && cd vitrix
+python -m venv .venv && . .venv/bin/activate     # Windows: .\.venv\Scripts\Activate.ps1
+pip install -e ".[dev]"
+vitrix init ../scratch-detections && cd ../scratch-detections    # this repo's root has no detections
 vitrix check --strict --gate && vitrix serve
-git init && git add -A && git commit -m "Initial detections"
 ```
 
-`vitrix: command not found` / `not recognized` means the install failed or the virtual environment is not active (activate it again in each new terminal).
+UI development: `cd web && npm install && npm run dev` (port 5173, proxies `/api` to :8000).
 
-`vitrix init` copies a small template: two example Sigma rules with typed test cases, an attack-simulation dataset with expectations, a `vitrix.yml` with every option documented, and `.github/workflows/vitrix.yml` (the CI that validates each change). Edit or delete the examples. To publish from the UI (CI first, then the pull request) see [Publishing](#publishing-real-ci-first-then-the-pull-request).
+</details>
 
-| Command | What it does |
-|---|---|
-| `vitrix init [dir] [--force]` | Creates a new detections repository from the template. Never overwrites without `--force`. |
-| `vitrix lint [--strict]` | Schema, types, modifiers, regex, condition, metadata, ATT&CK tags and duplicated logic. `--strict` fails on warnings. |
-| `vitrix convert [-t target] [--stdout]` | Converts to the targets in `vitrix.yml` and writes `dist/` (with `manifest.json`). |
-| `vitrix test` | Runs `cases/` with the local evaluator. |
-| `vitrix check [--strict] [--gate] [--markdown FILE]` | Lint + convert + test for CI; `--gate` adds replay and the quality gate; `--markdown "$GITHUB_STEP_SUMMARY"` publishes the summary. |
-| `vitrix gate` | The lifecycle and the quality gate, rule by rule, with a health score. |
-| `vitrix replay [dataset] [-f file]` | Runs the rules against logs in `datasets/` and checks the expected match counts. |
-| `vitrix report [--format md\|json] [-o file]` | Quality gate, tests, coverage, data sources, replay and Git history in one document. |
-| `vitrix targets` | Lists the available SIEMs. |
-| `vitrix serve [--port N]` | Local API and web UI. |
+### Connect to GitHub (to publish)
 
-Exit codes: `0` all good, `1` rule failures, `2` usage or configuration error.
-
-## Web UI
-
-`vitrix serve` opens the API and the UI at `http://127.0.0.1:8000`. The UI ships compiled inside the package: no Node needed to use it.
-
-| Group | Screens |
-|---|---|
-| Overview | **Operational** (pipeline, path to publication, needs-attention list, coverage, CI, PRs, recent changes) and **Executive** (ATT&CK coverage over time, ready to publish, health, time to merge, contributors, data sources, gaps) |
-| Detections | **Rules** (with health score and last change), **Editor** and **Regex Workbench** |
-| Validation | **Test Suites** (rule list + case viewer), **Log Replay**, **MITRE Coverage** (column and pie charts, data sources, ATT&CK Navigator export), **Quality Gate** and **Reports** |
-| System | **Team** (members, roles, invites, audit log), **Connections** (GitHub and SIEMs) and **Settings** (edits `vitrix.yml`, validates it and ships it through CI) |
-
-CI and PR numbers only appear when GitHub is connected; otherwise the screen says what is missing instead of showing invented data. Charts use one violet series or a categorical palette validated for the dark background, always with the numbers written (never colour alone). The sidebar ends with the **account menu** (avatar, name, role; Team, Settings, Connections, Change password, Sign out).
-
-### The Editor
-
-Everything about one rule in one place: live validation, the **quality gate inside the editor**, the queries per SIEM, test cases by kind, **impact analysis** (the edited rule vs. the saved one on the same datasets) and the **audit trail** from Git history.
-
-The gate **approves** a rule: no blocking check fails *and* its health score reaches `quality_gate.min_score` (default 80). The editor shows *Approved* or *Not approved*, the score against the required minimum on a 0–100 bar, the lifecycle track and every check. Only an approved rule can be published.
-
-### Publishing: real CI first, then the pull request
-
-A pull request can only be opened after the repository's **real CI (GitHub Actions) has passed for the exact commit**. Local tests are not enough.
-
-1. **Local quality gate** must pass (the server refuses to send a blocked rule).
-2. **Validate in CI**: Vitrix pushes a `vitrix/...` branch with one commit; your workflow runs on it.
-3. **Open pull request**: unlocked only when every workflow run for that commit succeeded. The server checks this again right before opening the PR (and that the branch still points to the validated commit), so the UI cannot skip it.
-
-Nothing is written to the local disk. The workflow must run on `vitrix/**` branches; the one `vitrix init` puts in your repository (`.github/workflows/vitrix.yml`) does.
-
-```yaml
-# vitrix.yml
-github:
-  repo: my-org/detections
-  base: main       # default: main
-  path: ""         # project folder inside the repository, if not the root
-  workflow: vitrix # optional: only runs of this workflow count as CI validation
-```
-
-The token comes from the environment of `vitrix serve`, never from `vitrix.yml`:
+Create `your-org/your-repo` empty on GitHub, then, inside your detections folder:
 
 ```bash
-export VITRIX_GITHUB_TOKEN=github_pat_...   # or GITHUB_TOKEN
+gh auth login                        # once; Vitrix uses the GitHub CLI token
+vitrix connect your-org/your-repo    # git remote + token + push access + workflow, one check at a time
 vitrix serve
 ```
 
-A fine-grained token limited to the repository is enough: **Contents** and **Pull requests** (read/write), **Actions** (read).
+`vitrix connect` prints the exact command for the first missing step; run it until everything is checked. Without the CLI, put a fine-grained token (Contents and Pull requests read/write, Actions read) in `VITRIX_GITHUB_TOKEN`. `vitrix.yml` has a `github:` section for overrides; `github: false` turns GitHub off.
 
-For development: `cd web && npm install && npm run dev` (proxy to the API on :8000); `npm run build` compiles into `src/vitrix/ui/` (commit the result).
+## Features
 
-## Workspace: several people, one tenant
+| Feature | What it gives you |
+|---|---|
+| **Editor** | One rule, everything live: validation, queries per SIEM, test cases, quality gate, **Replay** on local datasets (matches vs expectations, matched events, timing) and impact vs the saved rule |
+| **Quality gate** | Blocking checks plus a 0-100 health score; a rule is approved only with no blocker and a score at or above `min_score` (default 80) |
+| **Test cases** | Typed cases (positive, negative, false positive, edge) run by a local evaluator; exclusions are proven |
+| **Log replay** | Run rules on JSON/JSONL/YAML logs with `<dataset>.expect.yml` regression expectations |
+| **MITRE ATT&CK coverage** | Matrix of tactics and techniques from your rule tags, drill-down to rules, ATT&CK Navigator export |
+| **CI-first publishing** | Pushes a `vitrix/*` branch; the pull request opens only after the real CI passed for that exact commit (checked again server-side) |
+| **Local drafts** | "Save locally" keeps work in progress in `.vitrix/drafts.db`; list, reopen, delete from the Editor |
+| **Multi-SIEM output** | Splunk SPL, Microsoft KQL, Elastic EQL and more via pySigma; the final language is chosen per rule |
+| **Regex Workbench** | Test regexes safely (subprocess + timeout); open to every role |
+| **Dashboards and reports** | Operational and Executive views, Git-history trends, Markdown/JSON reports |
+| **Team and audit** | Roles, invites, audit log; light and dark themes (choose in the user menu) |
 
-By default Vitrix is a single local user. Turn on accounts to let a team work in the same workspace (one workspace = one detection repository):
+### Screenshots
+
+![Editor: live validation, quality gate and replay](docs/images/editor.png)
+
+![MITRE ATT&CK coverage matrix](docs/images/coverage.png)
+
+![Rules with gate status](docs/images/rules.png)
+
+## Roles and security
+
+Accounts are opt-in (`auth.enabled: true` in `vitrix.yml`). One server is one workspace. The **first account becomes the owner**; after that registration is **by invitation only** (an invite is a single-use link bound to one email).
+
+| Role | Can do |
+|---|---|
+| `viewer` | Read everything; use pure-compute tools (Regex Workbench, validate, replay, impact); open the Editor read-only (Save and Publish are disabled) |
+| `editor` | Everything a viewer can, plus save local drafts and publish rules through CI |
+| `admin` | Plus Settings, Connections and inviting people |
+| `owner` | Plus managing admins and the workspace |
+
+Role changes apply on the next request; people are not signed out.
+
+> **Warning.** Without `auth.enabled: true` the API has **no authentication**: keep it on `127.0.0.1` (the default; the Docker examples publish `127.0.0.1:8000` only). Never expose it without auth. To go beyond localhost: enable auth in `vitrix.yml`, put TLS or a reverse proxy in front, and set `VITRIX_ALLOWED_HOSTS=<public hostname>` (plus `VITRIX_PUBLIC_URL` and `VITRIX_COOKIE_SECURE=1` where applicable). The GitHub token comes only from the environment, never from `vitrix.yml`.
+
+Sessions are opaque tokens in an `HttpOnly`, `SameSite=Lax` cookie (only the hash is stored); passwords use salted scrypt; every action lands in the audit log. Regexes from users run in a subprocess with a timeout.
+
+## CLI cheat sheet
+
+| Command | What it does |
+|---|---|
+| `vitrix init [dir] [--force]` | Create a detections repository from the template (never overwrites without `--force`) |
+| `vitrix connect [owner/repo]` | Link the folder to GitHub and CI; checks each step |
+| `vitrix lint [--strict]` | Schema, modifiers, regex, condition, ATT&CK tags, duplicated logic |
+| `vitrix convert [-t target] [--stdout]` | Convert to the configured SIEMs and write `dist/` |
+| `vitrix test` | Run `cases/` with the local evaluator |
+| `vitrix check [--strict] [--gate] [--markdown FILE]` | Lint + convert + test for CI; `--gate` adds replay and the quality gate |
+| `vitrix gate` | Lifecycle and quality gate per rule, with health score |
+| `vitrix replay [dataset] [-f file]` | Run rules on logs and check expected match counts |
+| `vitrix report [--format md\|json] [-o file]` | Full report in one document |
+| `vitrix targets` | List available SIEM targets |
+| `vitrix serve [--host H] [--port N]` | Local API and web UI |
+
+Exit codes: `0` ok, `1` rule failures, `2` usage or configuration error.
+
+## Configuration
+
+`vitrix init` writes a documented `vitrix.yml`. The essentials:
 
 ```yaml
-# vitrix.yml
+schema_version: 1
+rules_dir: rules
+cases_dir: cases
+datasets_dir: datasets
+targets: [splunk, kql, elastic-eql]
+default_target: splunk
+quality_gate:
+  min_positive: 1
+  min_negative: 1
+  min_score: 80
 auth:
-  enabled: true
-  allow_signup: false   # after the first account, registration is by invitation
-  signup_role: viewer   # role of self-registered people, if allow_signup is true
-  session_days: 14
+  enabled: false      # true = accounts, roles, invites
 ```
 
-- **Register and sign in** with email and password, or **with GitHub** (set `VITRIX_GITHUB_CLIENT_ID` and `VITRIX_GITHUB_CLIENT_SECRET` from a GitHub OAuth app whose callback is `<public url>/api/auth/github/callback`; behind a proxy also set `VITRIX_PUBLIC_URL`).
-- The **first account becomes the owner**. Owners and admins invite people from **Team**; an invite is a link bound to one email, single use, valid 7 days (Vitrix does not send emails).
-- **Roles**: `viewer` reads everything; `editor` adds the Editor tools, Regex Workbench, replay and publishing rules through CI; `admin` adds Settings changes, members, invites and the audit log; `owner` adds granting owners. The last owner can never be removed or demoted.
-- Every action lands in the **audit log** (sign-ins, invites, role changes, rules sent to CI, pull requests). Commits pushed for CI carry a `Submitted-by:` trailer with the person who used the UI (plus `Co-authored-by` when their GitHub account is linked).
-- The account menu at the bottom of the sidebar has Team, Settings, Connections, Change password and Sign out.
+## Project layout
 
-Security: passwords use salted scrypt; sessions are random opaque tokens in an `HttpOnly`, `SameSite=Lax` cookie (only their hash is stored, a new one on every login, revoked on logout and password change); 5 failed sign-ins lock an email+IP pair for 5 minutes; GitHub sign-in checks an OAuth `state` and links an existing account only through a **verified** GitHub email, and the GitHub token is discarded. Data lives in `.vitrix/vitrix.db` (git-ignored). Set `VITRIX_COOKIE_SECURE=1` (or serve over HTTPS) so the cookie is `Secure`, `VITRIX_ALLOWED_HOSTS` to the host name people use, and `VITRIX_TRUST_PROXY=1` only behind a proxy you control. Serve it over HTTPS (a reverse proxy) when it leaves localhost.
-
-## Layout
-
-Your detections repository (what `vitrix init` creates):
+Your detections repository (created by `vitrix init`):
 
 ```
-vitrix.yml              project configuration
-rules/                  Sigma rules (source of truth)
-cases/                  test cases, same path as the rule
-datasets/               logs for replay, with <name>.expect.yml expectations
-dist/                   compiled queries (generated by CI, do not edit)
-.github/workflows/      the CI that validates every change (vitrix.yml)
-.vitrix/                accounts database when auth is on (git-ignored)
+vitrix.yml          configuration           rules/      Sigma rules (source of truth)
+cases/              test cases (same path)  datasets/   replay logs + <name>.expect.yml
+dist/               compiled queries (CI)   .github/    the CI workflow
+.vitrix/            accounts and drafts (git-ignored)
 ```
 
-This repository (the product):
+This repository (the product): `src/vitrix/` engine, API, compiled UI and project template; `web/` UI source (React, TypeScript, Tailwind); `tests/`; `brand/`; `Dockerfile`, `docker-compose.yml`, `scripts/`.
 
+## Contributing
+
+```bash
+pip install -e ".[dev]"
+pytest
+ruff check src tests && bandit -c pyproject.toml -r src -q
+cd web && npm install && npm run typecheck && npm run build   # build goes to src/vitrix/ui/: commit it
 ```
-src/vitrix/             the engine, the API, the compiled UI (ui/) and the project template (template/)
-web/                    UI source code (React + TypeScript + Tailwind)
-tests/                  tests of the engine, the API, auth and the user journey
-brand/                  logo and palette
-.github/workflows/ci.yml   tests, lint/security, UI build check and a fresh-install user journey
-```
+
+Everything (code, UI, docs) is in English. Every behaviour change needs a test. CI runs tests, lint and security, checks the UI build is up to date, and installs a built wheel in a fresh venv (`init`, `check --gate`, `replay`, serve).
+
+## License
+
+MIT. See [LICENSE](LICENSE).
+
+---
+
+## Reference
+
+Detailed reference for rules, targets and the API.
+
 ## Test cases
 
 For `rules/windows/x.yml` the engine reads `cases/windows/x.yml`:
@@ -298,24 +378,3 @@ API limits:
 - **ATT&CK validation** checks the format of tactics and techniques, not their existence in MITRE's data.
 - **Deploy:** there are no adapters to push rules to a SIEM yet. The result is the `dist/` built by CI.
 
-## Developing Vitrix itself
-
-```bash
-git clone https://github.com/davivers/vitrix && cd vitrix
-pip install -e ".[dev]"                                   # engine + API + tests + lint (Python 3.10–3.14)
-pytest
-ruff check src tests && bandit -c pyproject.toml -r src -q
-
-cd web && npm install
-npm run dev          # UI on :5173, proxy to the API on :8000
-npm run typecheck && npm run build   # compiles into src/vitrix/ui/: commit the result
-```
-
-**Try it as a user would.** The repository root has no detections, so run Vitrix on a scratch copy made by `vitrix init`, outside this folder:
-
-```bash
-vitrix init ../scratch-detections && cd ../scratch-detections
-vitrix check --strict --gate && vitrix serve
-```
-
-The `user-journey` CI job does exactly this from a built wheel (install, `init`, `check --gate`, `replay`, serve). The example rules live in `src/vitrix/template/`; a leading `_` in a template file name becomes `.` when copied (`_github` → `.github`).

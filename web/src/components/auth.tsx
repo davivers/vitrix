@@ -5,6 +5,7 @@ import { api } from "../api";
 import AuthPage from "../pages/Auth";
 import type { Me, Role } from "../types";
 import { ErrorBox, btnSecondary } from "./ui";
+import { t } from "../i18n";
 
 const MeContext = createContext<Me | null>(null);
 
@@ -23,30 +24,36 @@ export const can = (me: Me, role: Role) => me.can[role] === true;
  */
 export function AuthGate({ children }: { children: ReactNode }) {
   const qc = useQueryClient();
-  const me = useQuery({ queryKey: ["me"], queryFn: api.me, staleTime: 60_000, retry: false });
+  const me = useQuery({ queryKey: ["me"], queryFn: api.me, staleTime: 30_000, retry: false, refetchOnWindowFocus: true, refetchInterval: 60_000 }); // roles can change while the page is open
 
   useEffect(() => {
     const onUnauthorized = () => {
       qc.clear(); // nothing from the previous session may stay in memory
       void qc.invalidateQueries({ queryKey: ["me"] });
     };
+    // 403 is not "logged out": the role may have changed, so only re-read who I am (no qc.clear()).
+    const onForbidden = () => void qc.invalidateQueries({ queryKey: ["me"] });
     window.addEventListener("vitrix:unauthorized", onUnauthorized);
-    return () => window.removeEventListener("vitrix:unauthorized", onUnauthorized);
+    window.addEventListener("vitrix:forbidden", onForbidden);
+    return () => {
+      window.removeEventListener("vitrix:unauthorized", onUnauthorized);
+      window.removeEventListener("vitrix:forbidden", onForbidden);
+    };
   }, [qc]);
 
   if (me.isLoading) {
     return (
       <div className="grid h-full place-items-center text-muted">
-        <Loader2 className="animate-spin" size={22} aria-label="Loading" />
+        <Loader2 className="animate-spin" size={22} aria-label={t("loading_2")} />
       </div>
     );
   }
-  if (me.error || !me.data) {
+  if (!me.data) { // a failed refetch keeps the previous data instead of replacing the app with an error
     return (
       <div className="mx-auto mt-24 max-w-md space-y-4 px-4">
-        <ErrorBox message={(me.error as Error | null)?.message ?? "Could not load the session."} />
+        <ErrorBox message={(me.error as Error | null)?.message ?? t("l_could_not_load_the_session")} />
         <button type="button" className={btnSecondary} onClick={() => me.refetch()}>
-          Try again
+          {t("try_again")}
         </button>
       </div>
     );

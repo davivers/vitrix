@@ -5,6 +5,7 @@ import { api } from "../api";
 import { Section, safeHref, timeAgo } from "../components/dash";
 import { ErrorBox, PageHeader, TARGET_CODE, TargetSwatch, btnSecondary } from "../components/ui";
 import type { Activity, GitHubStatus } from "../types";
+import { t } from "../i18n";
 
 type Tone = "ok" | "warn" | "fail" | "off";
 const TONE: Record<Tone, { cls: string; Icon: typeof CheckCircle2 }> = {
@@ -24,22 +25,17 @@ function Pill({ tone, children }: { tone: Tone; children: string }) {
 }
 
 function githubState(status: GitHubStatus | undefined, activity: Activity | undefined): [Tone, string] {
-  if (!status) return ["off", "Checking"];
-  if (!status.configured) return ["off", "Not configured"];
-  if (!status.token) return ["warn", "No token"];
-  if (!activity) return ["off", "Checking"];
-  return activity.available ? ["ok", "Connected"] : ["fail", "Connection error"];
+  if (!status) return ["off", t("l_checking")];
+  if (!status.configured) return ["off", t("l_not_configured")];
+  if (!status.token) return ["warn", t("l_no_token")];
+  if (!activity) return ["off", t("l_checking")];
+  return activity.available ? ["ok", t("l_connected")] : ["fail", t("l_connection_error")];
 }
 
-const SETUP = `# vitrix.yml
-github:
-  repo: my-org/detections
-  base: main
-  path: ""            # project folder inside the repository
-  workflow: vitrix    # workflow whose runs count as CI validation
-
-# in the terminal, before vitrix serve
-export VITRIX_GITHUB_TOKEN=github_pat_...`;
+const SETUP = `# in your detections folder (stop vitrix serve first)
+gh auth login                       # once: GitHub CLI login, used as the token
+vitrix connect your-org/your-repo   # links the folder and checks the CI, step by step
+vitrix serve`;
 
 function GitHubCard() {
   const status = useQuery({ queryKey: ["github"], queryFn: api.github });
@@ -56,13 +52,12 @@ function GitHubCard() {
         </span>
         <div className="min-w-0 flex-1 space-y-3 text-[13px]">
           <p className="text-muted">
-            Validates every change in the repository&apos;s real CI (GitHub Actions) and only then opens the pull request. It also reads open PRs, CI runs and time to merge for the
-            dashboards. One token for reading and writing; it never leaves the server.
+            {t("cn_intro")}
           </p>
           {status.error && <ErrorBox message={(status.error as Error).message} />}
           {status.data?.configured && (
             <dl className="grid grid-cols-[8rem_1fr] gap-y-1.5">
-              <dt className="text-subtle">Repository</dt>
+              <dt className="text-subtle">{t("repository")}</dt>
               <dd className="font-mono text-text">
                 {act?.available ? (
                   <a href={safeHref(act.repo.url)} target="_blank" rel="noreferrer" className="inline-flex items-center gap-1 hover:text-accent">
@@ -72,14 +67,16 @@ function GitHubCard() {
                   status.data.repo
                 )}
               </dd>
-              <dt className="text-subtle">Base branch</dt>
+              <dt className="text-subtle">{t("base_branch")}</dt>
               <dd className="font-mono text-text">{status.data.base}</dd>
-              <dt className="text-subtle">CI workflow</dt>
-              <dd className="font-mono text-text">{status.data.workflow ?? "any workflow"}</dd>
-              <dt className="text-subtle">Token</dt>
+              <dt className="text-subtle">{t("settings")}</dt>
+              <dd className="text-text">{status.data.source === "git remote" ? t("cn_detected") : t("cn_section")}</dd>
+              <dt className="text-subtle">{t("ci_workflow")}</dt>
+              <dd className="font-mono text-text">{status.data.workflow ?? t("cn_anywf")}</dd>
+              <dt className="text-subtle">{t("token")}</dt>
               <dd className="flex items-center gap-1.5 text-text">
                 {status.data.token ? <CheckCircle2 size={14} className="text-good" aria-hidden /> : <XCircle size={14} className="text-bad" aria-hidden />}
-                {status.data.token ? "set in the environment" : "VITRIX_GITHUB_TOKEN missing"}
+                {status.data.token ? t("cn_from", { src: status.data.token_source ?? "" }) : t("cn_missing")}
               </dd>
               {act?.available && (
                 <>
@@ -87,7 +84,7 @@ function GitHubCard() {
                   <dd className="truncate text-text">
                     <span className="font-mono">{act.head.sha.slice(0, 7)}</span> · {act.head.message}
                   </dd>
-                  <dt className="text-subtle">Last read</dt>
+                  <dt className="text-subtle">{t("last_read")}</dt>
                   <dd className="text-text">{timeAgo(act.fetched_at)}</dd>
                 </>
               )}
@@ -99,12 +96,12 @@ function GitHubCard() {
           )}
           {status.data?.configured && status.data.token && (
             <button type="button" onClick={() => test.refetch()} className={btnSecondary}>
-              <RefreshCw size={14} className={test.isFetching ? "animate-spin" : undefined} aria-hidden /> Test connection
+              <RefreshCw size={14} className={test.isFetching ? "animate-spin" : undefined} aria-hidden /> {t("test_connection")}
             </button>
           )}
           <p className="text-xs text-subtle">
-            Fine-grained token limited to the repository: Contents and Pull requests (read/write), Actions (read). The workflow must run on pushes to{" "}
-            <span className="font-mono">vitrix/**</span> branches.
+            {t("fine_grained_token_limited_to_the_repo")}{" "}
+            <span className="font-mono">vitrix/**</span> {t("branches")}
           </p>
         </div>
       </div>
@@ -115,38 +112,38 @@ function GitHubCard() {
 function SiemTargets() {
   const targets = useQuery({ queryKey: ["targets"], queryFn: api.targets });
   return (
-    <Section title="SIEMs" aside="local conversion with pySigma">
+    <Section title="SIEMs" aside={t("cn_local_conv")}>
       {targets.error && <ErrorBox message={(targets.error as Error).message} />}
       <ul className="grid gap-3 sm:grid-cols-2">
-        {(targets.data ?? []).map((t) => (
-          <li key={t.name} className="rounded-[12px] border border-line bg-surface p-4">
+        {(targets.data ?? []).map((tg) => (
+          <li key={tg.name} className="rounded-[12px] border border-line bg-surface p-4">
             <div className="mb-2 flex items-center justify-between gap-2">
               <span className="flex items-center gap-2 font-semibold text-strong">
-                <TargetSwatch target={t.name} />
-                {t.label}
+                <TargetSwatch target={tg.name} />
+                {tg.label}
               </span>
-              <Pill tone={t.active ? "ok" : "off"}>{t.active ? "Active" : "Available"}</Pill>
+              <Pill tone={tg.active ? "ok" : "off"}>{tg.active ? t("l_active") : t("l_available")}</Pill>
             </div>
             <dl className="grid grid-cols-[6rem_1fr] gap-y-1 text-[12.5px]">
-              <dt className="text-subtle">Target</dt>
+              <dt className="text-subtle">{t("target")}</dt>
               <dd className="font-mono text-text">
-                {t.name} · {TARGET_CODE[t.name] ?? t.extension.toUpperCase()}
+                {tg.name} · {TARGET_CODE[tg.name] ?? tg.extension.toUpperCase()}
               </dd>
-              <dt className="text-subtle">Conversion</dt>
+              <dt className="text-subtle">{t("conversion")}</dt>
               <dd className="flex items-center gap-1.5 text-text">
-                <CheckCircle2 size={13} className="text-good" aria-hidden /> local, no SIEM access
+                <CheckCircle2 size={13} className="text-good" aria-hidden /> {t("local_no_siem_access")}
               </dd>
-              <dt className="text-subtle">Deploy</dt>
+              <dt className="text-subtle">{t("deploy")}</dt>
               <dd className="flex items-center gap-1.5 text-muted">
-                <CircleDashed size={13} aria-hidden /> not available yet
+                <CircleDashed size={13} aria-hidden /> {t("not_available_yet")}
               </dd>
             </dl>
           </li>
         ))}
       </ul>
       <p className="mt-4 text-xs text-subtle">
-        Turn targets on or off in <span className="font-mono">targets</span> of vitrix.yml (Settings). Other SIEMs come in through plugins, using the{" "}
-        <span className="font-mono">vitrix.targets</span> entry point. The conversion output is the <span className="font-mono">dist/</span> built by CI.
+        {t("turn_targets_on_or_off_in")} <span className="font-mono">targets</span> {t("of_vitrix_yml_settings_other_siems_com")}{" "}
+        <span className="font-mono">vitrix.targets</span> {t("entry_point_the_conversion_output_is_t")} <span className="font-mono">dist/</span> {t("built_by_ci")}
       </p>
     </Section>
   );
@@ -155,7 +152,7 @@ function SiemTargets() {
 export default function ConnectionsPage() {
   return (
     <div className="mx-auto max-w-6xl px-4 py-8 sm:px-8">
-      <PageHeader title="Connections" subtitle="Integrations with the Git repository and the target SIEMs." />
+      <PageHeader title={t("connections")} subtitle={t("integrations_with_the_git_repository_a")} />
       <div className="grid gap-5">
         <GitHubCard />
         <SiemTargets />

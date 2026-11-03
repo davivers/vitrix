@@ -67,12 +67,15 @@ def evaluate_rule(
     has_exclusions: bool,
     replay_checks: list[dict],
     age_days: float | None = None,
+    governance: dict | None = None,
 ) -> dict:
     """Every check for one rule, the state of each stage and whether it is ready.
 
     `age_days`: days since the last change in Git (None = no history; the periodic review
-    check does not apply).
+    check does not apply). `governance`: governance.rule_governance() of the rule (owner,
+    review deadline, suppressions).
     """
+    gov = governance or {"owner": None, "review_by": None, "review_state": None, "suppressions": []}
     checks: list[Check] = []
 
     def add(id: str, stage: str, q: int, label: str, passed: bool | None, blocking: bool = True, detail: str = "") -> None:
@@ -136,6 +139,17 @@ def evaluate_rule(
     has_technique = any(t.startswith("attack.t") for t in tags)
     add("mitre", "analyze", 4, "Mapped to an ATT&CK technique", has_technique, blocking=gate.require_mitre,
         detail=", ".join(t[7:].upper() for t in tags if t.startswith("attack.t")) or "no attack.tXXXX tag")
+    sups = [s for s in gov["suppressions"] if s["state"] != "orphan"]
+    if sups:
+        undocumented = [s["selection"] for s in sups if s["state"] == "undocumented"]
+        add("suppressions_documented", "analyze", 3, "Every exclusion documented (vitrix.suppressions)", not undocumented,
+            blocking=gate.require_suppression_reason,
+            detail=f"no reason for: {', '.join(undocumented)}" if undocumented else f"{len(sups)} documented")
+        expired = [s for s in sups if s["state"] == "expired"]
+        add("suppressions_expired", "analyze", 3, "No expired exclusion", not expired, blocking=gate.block_expired_suppressions,
+            detail="; ".join(f"{s['selection']} expired {s['expires']}" for s in expired)
+            or (f"{len(sups)} active" if not any(s["expires"] for s in sups) else
+                "next expiry " + min(s["expires"] for s in sups if s["expires"])))
     add("data_quality", "analyze", 2, "Test data without quality problems", not case_warnings, blocking=False,
         detail="; ".join(p.message for p in case_warnings[:2]))
 
@@ -143,7 +157,14 @@ def evaluate_rule(
     status = doc.get("status")
     add("status", "gate", 5, "Publishable status", status not in gate.blocked_status,
         detail=f"status {status}" if status else "no status")
-    if gate.review_days:
+    # without require_owner a missing owner is not scored (the Governance page lists unowned rules)
+    add("owner", "gate", 5, "Has an owner (vitrix.owner)",
+        True if gov["owner"] else (False if gate.require_owner else None), blocking=gate.require_owner,
+        detail=gov["owner"] or "set vitrix.owner to the accountable team")
+    if gov["review_by"]:
+        add("review", "gate", 5, f"Review deadline {gov['review_by']}", gov["review_state"] != "overdue", blocking=False,
+            detail={"overdue": "review overdue", "due_soon": "review due within 30 days"}.get(gov["review_state"], "on schedule"))
+    elif gate.review_days:
         add("review", "gate", 5, f"Reviewed in the last {gate.review_days} days",
             None if age_days is None else age_days <= gate.review_days, blocking=False,
             detail="no Git history" if age_days is None else f"last changed {age_days:.0f} days ago")

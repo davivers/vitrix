@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import warnings
 from dataclasses import dataclass, field
 from pathlib import Path
 
@@ -34,6 +35,9 @@ class GateConfig:
     require_replay: bool = False  # True: the rule needs an expectation in some replay dataset
     review_days: int = 180  # recommend reviewing rules unchanged in Git for more than N days (0 = off)
     min_score: int = 80  # health score (0-100) a rule needs to be approved (0 = no threshold)
+    require_owner: bool = False  # True: a rule without vitrix.owner is blocked
+    require_suppression_reason: bool = False  # True: every exclusion needs vitrix.suppressions.<name>.reason
+    block_expired_suppressions: bool = True  # an exclusion past its vitrix.suppressions.<name>.expires blocks
 
 
 def _parse_gate(data: object) -> GateConfig:
@@ -67,11 +71,12 @@ class AuthConfig:
     """Accounts and workspace membership. Off by default: the local single-user mode is unchanged."""
 
     enabled: bool = False
-    allow_signup: bool = False  # False: after the first account, only invited people can register
-    signup_role: str = "viewer"  # role of self-registered people (when allow_signup is true)
     session_days: int = 14
     github_login: bool = True  # offer "Continue with GitHub" when VITRIX_GITHUB_CLIENT_ID/SECRET are set
     workspace_name: str = "Detection workspace"
+
+
+_RETIRED_AUTH_KEYS = ("allow_signup", "signup_role")
 
 
 def _parse_auth(data: object) -> AuthConfig:
@@ -81,6 +86,9 @@ def _parse_auth(data: object) -> AuthConfig:
         raise ConfigError("'auth' must be a mapping")
     auth = AuthConfig()
     for key, value in data.items():
+        if key in _RETIRED_AUTH_KEYS:  # registration is invite-only after the owner: old keys are ignored
+            warnings.warn(f"auth.{key} is no longer supported and is ignored (after the first account, people join by invitation only)", stacklevel=2)
+            continue
         if not hasattr(auth, key):
             raise ConfigError(f"auth.{key}: unknown option (use {', '.join(AuthConfig.__dataclass_fields__)})")
         default = getattr(auth, key)
@@ -93,8 +101,6 @@ def _parse_auth(data: object) -> AuthConfig:
         elif not isinstance(value, str) or not value.strip():
             raise ConfigError(f"auth.{key} must be a non-empty string")
         setattr(auth, key, value.strip() if isinstance(value, str) else value)
-    if auth.signup_role not in ("viewer", "editor"):
-        raise ConfigError("auth.signup_role must be viewer or editor (admins are promoted by the owner)")
     return auth
 
 
@@ -110,11 +116,13 @@ class Config:
     extra_pipelines: list[Path] = field(default_factory=list)
     require_cases: bool = True
     github: GitHubConfig | None = None  # repository for CI validation and pull requests
+    github_source: str | None = None  # "vitrix.yml", "git remote" (auto-detected) or None
     path: Path | None = None  # the vitrix.yml read (None = defaults, no file)
     datasets_dir: Path | None = None  # logs for replay (default: <root>/datasets)
     gate: GateConfig = field(default_factory=GateConfig)
     auth: AuthConfig = field(default_factory=AuthConfig)
     data_dir: Path | None = None  # accounts database etc. (default: <root>/.vitrix)
+    drafts_enabled: bool = True  # local drafts in <data_dir>/drafts.db (drafts.enabled)
 
     def rel(self, path: Path) -> str:
         """Path relative to the project root, for messages."""
@@ -181,10 +189,28 @@ def parse_config_text(text: str, root: Path, name: str = "vitrix.yml") -> Config
     if not isinstance(extra, list):
         raise ConfigError("'extra_pipelines' must be a list of paths")
 
-    try:
-        github = parse_github(data.get("github"))
-    except ValueError as exc:
-        raise ConfigError(str(exc)) from exc
+    raw_github = data.get("github")
+    github_source = "vitrix.yml"
+    if raw_github is False:  # `github: false` turns GitHub (and auto-detection) off
+        github, github_source = None, None
+    elif raw_github is None:  # not configured: use the git remote of this folder, if it is on GitHub
+        from .gitremote import detect
+
+        github = detect(root)
+        github_source = "git remote" if github else None
+    else:
+        try:
+            github = parse_github(raw_github)
+        except ValueError as exc:
+            raise ConfigError(str(exc)) from exc
+
+    raw_drafts = data.get("drafts")
+    if raw_drafts is None:
+        raw_drafts = {}
+    elif raw_drafts is False:  # `drafts: false` is shorthand for `drafts: {enabled: false}`
+        raw_drafts = {"enabled": False}
+    if not isinstance(raw_drafts, dict) or not isinstance(raw_drafts.get("enabled", True), bool):
+        raise ConfigError("'drafts' must be a mapping (or false) and drafts.enabled must be true or false")
 
     return Config(
         root=root,
@@ -197,8 +223,10 @@ def parse_config_text(text: str, root: Path, name: str = "vitrix.yml") -> Config
         extra_pipelines=[root / p for p in extra],
         require_cases=bool(data.get("require_cases", True)),
         github=github,
+        github_source=github_source,
         datasets_dir=root / data.get("datasets_dir", "datasets"),
         gate=_parse_gate(data.get("quality_gate")),
         auth=_parse_auth(data.get("auth")),
         data_dir=root / data.get("data_dir", ".vitrix"),
+        drafts_enabled=raw_drafts.get("enabled", True),
     )

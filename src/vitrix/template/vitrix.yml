@@ -43,26 +43,30 @@ quality_gate:
   review_days: 180                          # recommend reviewing rules unchanged for longer (0 = off)
   min_score: 80                             # health score (0-100) a rule needs to be approved (0 = no threshold)
 
-# GitHub: the repository that holds THESE detections (the one you push this folder to).
-# Vitrix validates every change in its real CI (GitHub Actions) and only then opens the
-# pull request; it also reads CI, PR and time-to-merge data for the dashboards.
-# The token comes from the environment: VITRIX_GITHUB_TOKEN (or GITHUB_TOKEN), with
-# Contents and Pull requests (read/write) and Actions (read). Never put the token here.
-# Uncomment and set your repository:
+# GitHub: NOTHING TO SET HERE when this folder is on GitHub. Run `vitrix connect your-org/your-repo`
+# once: it reads the repository from `git remote origin`, uses your `gh auth login` as the token,
+# and checks the CI workflow. Vitrix validates every change in the real CI (GitHub Actions) and
+# only then opens the pull request.
+# Only to override what is detected (or `github: false` to turn GitHub off):
 # github:
 #   repo: your-org/your-detections
 #   base: main
+#   path: ""           # the project folder inside the repository, if not the root
 #   workflow: vitrix   # the workflow in .github/workflows/vitrix.yml
+# The token is NEVER read from this file: `gh auth login`, or VITRIX_GITHUB_TOKEN in the environment.
 
 # Accounts: several people in one workspace (one workspace = this repository).
 # Off by default (single local user). The first account to register becomes the owner;
-# after that only invited people can join (or anyone, with allow_signup).
+# after that people can join ONLY by invitation (no open sign-up).
 # GitHub sign-in needs a GitHub OAuth app: set VITRIX_GITHUB_CLIENT_ID and
 # VITRIX_GITHUB_CLIENT_SECRET (callback: <public url>/api/auth/github/callback).
 # auth:
 #   enabled: true
-#   allow_signup: false
-#   signup_role: viewer      # viewer or editor, for self-registered people
 #   session_days: 14
 #   github_login: true
 #   workspace_name: Detection workspace
+
+# Local drafts: "Save draft" in the Editor keeps unfinished rules in .vitrix/drafts.db (never in
+# rules/). Without accounts they work only for a browser on this machine with a localhost-only server.
+# drafts:
+#   enabled: true

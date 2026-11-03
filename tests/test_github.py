@@ -392,7 +392,8 @@ def api(tmp_path, monkeypatch):
 def test_api_github_status_never_exposes_the_token(api):
     client, _ = api
     resp = client.get("/api/github")
-    assert resp.json() == {"configured": True, "repo": REPO, "base": "main", "workflow": None, "token": True}
+    assert resp.json() == {"configured": True, "source": "vitrix.yml", "repo": REPO, "base": "main", "workflow": None,
+                           "token": True, "token_source": "VITRIX_GITHUB_TOKEN"}
     assert "test-secret" not in resp.text
 
 

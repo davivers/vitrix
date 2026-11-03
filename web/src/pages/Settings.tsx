@@ -3,11 +3,14 @@ import CodeMirror from "@uiw/react-codemirror";
 import { AlertTriangle, CheckCircle2, Loader2, RotateCcw, Rocket, XCircle } from "lucide-react";
 import { useEffect, useMemo, useState } from "react";
 import { api } from "../api";
+import { LanguageControl, ThemeControl } from "../components/ThemeControl";
+import { useIsDark } from "../theme";
 import { yamlExtensions } from "../components/code";
 import { Section } from "../components/dash";
 import { PublishDialog } from "../components/PublishDialog";
 import { Card, ErrorBox, PageHeader, TargetSwatch, btnPrimary } from "../components/ui";
 import type { ConfigCheck, ConfigView } from "../types";
+import { t } from "../i18n";
 
 function fmt(v: unknown): string {
   if (typeof v === "boolean") return v ? "yes" : "no";
@@ -20,7 +23,7 @@ function Effective({ cfg }: { cfg: Omit<ConfigView, "path" | "text"> }) {
   return (
     <dl className="divide-y divide-line">
       <div className={row}>
-        <dt className="text-subtle">Active SIEMs</dt>
+        <dt className="text-subtle">{t("active_siems")}</dt>
         <dd className="flex flex-wrap gap-1.5">
           {cfg.targets.map((t) => (
             <span key={t} className="inline-flex items-center gap-1.5 rounded-md bg-surface-2 px-2 py-0.5 font-mono text-xs text-text">
@@ -30,14 +33,14 @@ function Effective({ cfg }: { cfg: Omit<ConfigView, "path" | "text"> }) {
         </dd>
       </div>
       <div className={row}>
-        <dt className="text-subtle">Default language</dt>
-        <dd className="font-mono text-text">{cfg.default_target ?? "— (every active target)"}</dd>
+        <dt className="text-subtle">{t("default_language")}</dt>
+        <dd className="font-mono text-text">{cfg.default_target ?? t("l_every_active_target")}</dd>
       </div>
       <div className={row}>
-        <dt className="text-subtle">Routes</dt>
+        <dt className="text-subtle">{t("routes")}</dt>
         <dd className="text-text">
           {cfg.routes.length === 0 ? (
-            <span className="text-muted">none</span>
+            <span className="text-muted">{t("none")}</span>
           ) : (
             <ul className="space-y-0.5 font-mono text-xs">
               {cfg.routes.map((r) => (
@@ -50,18 +53,18 @@ function Effective({ cfg }: { cfg: Omit<ConfigView, "path" | "text"> }) {
         </dd>
       </div>
       <div className={row}>
-        <dt className="text-subtle">Folders</dt>
+        <dt className="text-subtle">{t("folders")}</dt>
         <dd className="font-mono text-xs text-text">
           rules {cfg.rules_dir}/ · cases {cfg.cases_dir}/ · datasets {cfg.datasets_dir ?? "—"}/ · output {cfg.output_dir}/
         </dd>
       </div>
       <div className={row}>
-        <dt className="text-subtle">Requires cases</dt>
-        <dd className="text-text">{cfg.require_cases ? "yes: at least one match and one no_match per rule" : "no"}</dd>
+        <dt className="text-subtle">{t("requires_cases")}</dt>
+        <dd className="text-text">{cfg.require_cases ? t("st_req_cases") : t("l_no_lower")}</dd>
       </div>
       <div className={row}>
-        <dt className="text-subtle">Extra pipelines</dt>
-        <dd className="font-mono text-xs text-text">{cfg.extra_pipelines.length ? cfg.extra_pipelines.join(", ") : <span className="font-sans text-muted">none</span>}</dd>
+        <dt className="text-subtle">{t("extra_pipelines")}</dt>
+        <dd className="font-mono text-xs text-text">{cfg.extra_pipelines.length ? cfg.extra_pipelines.join(", ") : <span className="font-sans text-muted">{t("none")}</span>}</dd>
       </div>
       <div className={row}>
         <dt className="text-subtle">GitHub</dt>
@@ -69,7 +72,7 @@ function Effective({ cfg }: { cfg: Omit<ConfigView, "path" | "text"> }) {
           {cfg.github ? (
             `${cfg.github.repo} @ ${cfg.github.base}${cfg.github.path ? ` (${cfg.github.path}/)` : ""}${cfg.github.workflow ? ` · CI: ${cfg.github.workflow}` : ""}`
           ) : (
-            <span className="font-sans text-muted">not configured</span>
+            <span className="font-sans text-muted">{t("not_configured")}</span>
           )}
         </dd>
       </div>
@@ -89,11 +92,11 @@ function CheckResult({ check, pending, dirty }: { check: ConfigCheck | null; pen
         ) : (
           <XCircle size={15} className="text-bad" aria-hidden />
         )}
-        <span className="text-strong">{pending ? "Validating…" : check.ok ? (dirty ? "Valid configuration" : "Current configuration is valid") : "Invalid configuration"}</span>
+        <span className="text-strong">{pending ? t("l_validating") : check.ok ? (dirty ? t("st_valid") : t("st_current_valid")) : t("st_invalid")}</span>
       </p>
       {check.errors.map((e) => (
         <p key={e} className="flex gap-2 text-[13px]">
-          <span className="shrink-0 font-medium text-bad">Error</span>
+          <span className="shrink-0 font-medium text-bad">{t("error")}</span>
           <span className="text-text [overflow-wrap:anywhere]">{e}</span>
         </p>
       ))}
@@ -114,7 +117,8 @@ export default function SettingsPage() {
   const [check, setCheck] = useState<ConfigCheck | null>(null);
   const [pending, setPending] = useState(false);
   const [publishOpen, setPublishOpen] = useState(false);
-  const extensions = useMemo(yamlExtensions, []);
+  const dark = useIsDark();
+  const extensions = useMemo(() => yamlExtensions(dark), [dark]);
 
   const original = config.data?.text ?? "";
   const current = text ?? original;
@@ -146,18 +150,18 @@ export default function SettingsPage() {
   return (
     <div className="mx-auto max-w-7xl px-4 py-8 sm:px-8">
       <PageHeader
-        title="Settings"
-        subtitle="The repository's vitrix.yml. Nothing is written to disk: a change goes through the real CI first and then a pull request, like any rule."
+        title={t("settings")}
+        subtitle={t("the_repository_s_vitrix_yml_nothing_is")}
       />
       {config.error && <ErrorBox message={(config.error as Error).message} />}
 
       {config.data && (
         <div className="grid gap-5 xl:grid-cols-[1fr_1.15fr]">
           <div className="flex flex-col gap-5">
-            <Section title="Effective configuration" aside={dirty ? "with your changes" : (config.data.path ?? "defaults (no vitrix.yml)")}>
+            <Section title={t("effective_configuration")} aside={dirty ? t("st_with_changes") : (config.data.path ?? t("st_defaults"))}>
               <Effective cfg={check?.config ?? config.data} />
             </Section>
-            <Section title="Quality gate criteria" aside="quality_gate">
+            <Section title={t("quality_gate_criteria")} aside="quality_gate">
               <dl className="space-y-1.5 text-[12.5px]">
                 {Object.entries((check?.config ?? config.data).quality_gate).map(([k, v]) => (
                   <div key={k} className="flex justify-between gap-3">
@@ -167,14 +171,19 @@ export default function SettingsPage() {
                 ))}
               </dl>
             </Section>
-            <Section title="About">
+            <Section title={t("appearance")} aside={t("this_browser_only")}>
+              <ThemeControl />
+              <p className="mb-2 mt-4 text-[13px] font-medium text-strong">{t("language_label")}</p>
+              <LanguageControl />
+            </Section>
+            <Section title={t("about")}>
               <dl className="grid grid-cols-[9rem_1fr] gap-y-1.5 text-[13px]">
-                <dt className="text-subtle">Version</dt>
+                <dt className="text-subtle">{t("version")}</dt>
                 <dd className="font-mono text-text">{health.data?.version ?? "—"}</dd>
-                <dt className="text-subtle">Server</dt>
-                <dd className="text-text">local, no authentication (localhost only)</dd>
-                <dt className="text-subtle">Writes</dt>
-                <dd className="text-text">only through GitHub: CI-validated branch, then pull request</dd>
+                <dt className="text-subtle">{t("server")}</dt>
+                <dd className="text-text">{t("local_no_authentication_localhost_only")}</dd>
+                <dt className="text-subtle">{t("writes")}</dt>
+                <dd className="text-text">{t("only_through_github_ci_validated_branc")}</dd>
               </dl>
             </Section>
           </div>
@@ -184,7 +193,7 @@ export default function SettingsPage() {
               <h2 className="font-mono text-[13px] font-semibold text-strong">{config.data.path ?? "vitrix.yml"}</h2>
               {dirty && (
                 <button type="button" onClick={() => setText(null)} className="inline-flex items-center gap-1.5 rounded-md px-2 py-1 text-xs text-muted hover:bg-surface-2 hover:text-text">
-                  <RotateCcw size={13} aria-hidden /> Discard changes
+                  <RotateCcw size={13} aria-hidden /> {t("discard_changes")}
                 </button>
               )}
             </div>
@@ -194,9 +203,9 @@ export default function SettingsPage() {
             <div className="space-y-3 border-t border-line p-4">
               <CheckResult check={check} pending={pending} dirty={dirty} />
               <button type="button" disabled={!dirty} onClick={() => setPublishOpen(true)} className={btnPrimary}>
-                <Rocket size={16} aria-hidden /> Publish change
+                <Rocket size={16} aria-hidden /> {t("publish_change")}
               </button>
-              {!dirty && <p className="text-xs text-subtle">Edit the file to publish a change.</p>}
+              {!dirty && <p className="text-xs text-subtle">{t("edit_the_file_to_publish_a_change")}</p>}
             </div>
           </Card>
         </div>

@@ -11,9 +11,8 @@ Security decisions (see tests/test_auth.py):
 - sessions: 256-bit random token; only its SHA-256 is stored, so a leaked database cannot be
   replayed; a new token on every login (no fixation); logout and password change revoke;
 - brute force: 5 failed logins per (email, IP) lock that pair for 5 minutes;
-- registration: the first account becomes the owner; afterwards only invited people (or anyone,
-  if `auth.allow_signup` is true, with `auth.signup_role`); invites are single use, expire in
-  7 days and are shown once (only their hash is stored);
+- registration: the first account becomes the owner; afterwards ONLY invited people (no open
+  sign-up); invites are single use, expire in 7 days and are shown once (only their hash is stored);
 - GitHub login: OAuth web flow with a `state` bound to a cookie; an existing account is linked
   only through a **verified** GitHub email; the GitHub access token is discarded, never stored;
 - roles: viewer < editor < admin < owner; the last owner can never be removed or demoted.
@@ -306,7 +305,7 @@ class AuthStore:
         if current == "owner" and role != "owner" and self._owners() <= 1:
             raise AuthError("The workspace needs at least one owner.", 409)
         self._x("UPDATE members SET role=? WHERE workspace_id=? AND user_id=?", (role, self.workspace_id, user_id))
-        self.revoke_sessions(user_id)  # sessions re-read the role anyway; this also forces a fresh login
+        # sessions are NOT revoked: identify() re-reads the role on every request, so the new role applies at once
 
     def remove_member(self, actor: Identity, user_id: int) -> None:
         current = self._role(user_id)
@@ -376,7 +375,7 @@ class AuthStore:
 # --------------------------------------------------------------------------- registration policy
 
 
-def _role_for_new_account(store: AuthStore, email: str, invite_token: str | None) -> tuple[str, int | None]:
+def _role_for_new_account(store: AuthStore, email: str, invite_token: str | None, verified_email: bool = False) -> tuple[str, int | None]:
     """The role a new account gets, and the invite it consumes. Raises when registration is closed."""
     if store.user_count() == 0:
         return "owner", None  # bootstrap: the first account owns the workspace
@@ -387,11 +386,9 @@ def _role_for_new_account(store: AuthStore, email: str, invite_token: str | None
         return invite["role"], invite["id"]
     if invite_token:
         raise AuthError("This invitation is invalid or has expired.", 403)
-    pending = store.invite_for_email(email)
-    if pending is not None:  # signing in with GitHub as the invited email needs no token
+    pending = store.invite_for_email(email) if verified_email else None  # only a GitHub-VERIFIED email may skip the token
+    if pending is not None:
         return pending["role"], pending["id"]
-    if store.cfg.allow_signup:
-        return store.cfg.signup_role, None
     raise AuthError("Registration is by invitation only. Ask a workspace admin for an invite.", 403)
 
 
@@ -422,7 +419,7 @@ def login_github(store: AuthStore, profile: dict, invite_token: str | None = Non
         store.link_github(existing["id"], profile)
         store.log(str(existing["email"]), "account.github_linked", f"@{profile['login']}")
         return existing["id"]
-    role, invite_id = _role_for_new_account(store, email, invite_token)
+    role, invite_id = _role_for_new_account(store, email, invite_token, verified_email=True)
     uid = store.create_user(email, profile.get("name") or profile["login"], None, role, github=profile)
     if invite_id:
         store.consume_invite(invite_id)
@@ -458,7 +455,7 @@ class GitHubOAuth:
 
     def authorize_url(self, state: str, redirect_uri: str) -> str:
         q = urllib.parse.urlencode({"client_id": self.client_id, "redirect_uri": redirect_uri, "scope": "read:user user:email",
-                                    "state": state, "allow_signup": "true"})
+                                    "state": state, "allow_signup": "false"})
         return f"https://github.com/login/oauth/authorize?{q}"
 
     def profile(self, code: str, redirect_uri: str) -> dict:

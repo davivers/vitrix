@@ -1,31 +1,33 @@
 import clsx from "clsx";
-import { AlertTriangle, CheckCircle2, ChevronRight, CircleDashed, Clock, XCircle } from "lucide-react";
-import type { GateCheck, StageId, StageState } from "../types";
+import { AlertTriangle, CheckCircle2, ChevronRight, Clock, Minus, XCircle } from "lucide-react";
+import type { GateCheck, QualityReport, StageId, StageState } from "../types";
+import { Card } from "./ui";
+import { t } from "../i18n";
 
 export const STAGES: { id: StageId; label: string; hint: string }[] = [
-  { id: "write", label: "Write", hint: "YAML parses without errors" },
-  { id: "validate", label: "Validate", hint: "schema, lint and conversion to the final query language" },
-  { id: "test", label: "Test", hint: "positive, negative and edge cases" },
-  { id: "replay", label: "Replay", hint: "datasets/ logs with the expected match counts" },
-  { id: "analyze", label: "Analyze", hint: "false positives, exclusions, ATT&CK and test data quality" },
-  { id: "gate", label: "Quality gate", hint: "every blocking check passes" },
-  { id: "deploy", label: "Deploy", hint: "validated by the real CI, then merged. Vitrix does not push to SIEMs yet." },
+  { id: "write", label: t("l_write"), hint: t("l_yaml_parses_without_errors") },
+  { id: "validate", label: t("l_validate"), hint: t("l_schema_lint_and_conversion_to_the_") },
+  { id: "test", label: t("l_test"), hint: t("l_positive_negative_and_edge_cases") },
+  { id: "replay", label: t("l_replay"), hint: t("l_datasets_logs_with_the_expected_ma") },
+  { id: "analyze", label: t("l_analyze"), hint: t("l_false_positives_exclusions_att_ck_") },
+  { id: "gate", label: t("l_quality_gate"), hint: t("l_every_blocking_check_passes") },
+  { id: "deploy", label: t("l_deploy"), hint: t("l_validated_by_the_real_ci_then_merg") },
 ];
 
 export const QUESTIONS: Record<number, string> = {
-  1: "Is the rule syntactically correct?",
-  2: "Does the detection logic work?",
-  3: "Are there known false positives?",
-  4: "Does the rule detect the expected behaviour?",
-  5: "Is the rule ready to be published?",
+  1: t("l_is_the_rule_syntactically_correct"),
+  2: t("l_does_the_detection_logic_work"),
+  3: t("l_are_there_known_false_positives"),
+  4: t("l_does_the_rule_detect_the_expected_"),
+  5: t("l_is_the_rule_ready_to_be_published"),
 };
 
 export const STAGE_META: Record<StageState, { label: string; cls: string; ring: string; Icon: typeof CheckCircle2 }> = {
   ok: { label: "ok", cls: "text-good", ring: "bg-good-soft", Icon: CheckCircle2 },
-  warn: { label: "has recommendations", cls: "text-warn", ring: "bg-warn-soft", Icon: AlertTriangle },
-  fail: { label: "blocked", cls: "text-bad", ring: "bg-bad-soft", Icon: XCircle },
-  skip: { label: "not applicable", cls: "text-subtle", ring: "bg-surface-2", Icon: CircleDashed },
-  pending: { label: "waiting for CI and merge", cls: "text-muted", ring: "bg-surface-2", Icon: Clock },
+  warn: { label: t("fl_recs"), cls: "text-warn", ring: "bg-warn-soft", Icon: AlertTriangle },
+  fail: { label: t("blocked"), cls: "text-bad", ring: "bg-bad-soft", Icon: XCircle },
+  skip: { label: t("fl_na"), cls: "text-subtle", ring: "bg-surface-2", Icon: Minus },
+  pending: { label: t("fl_waiting"), cls: "text-muted", ring: "bg-surface-2", Icon: Clock },
 };
 
 export function StageIcon({ state, size = 14 }: { state: StageState; size?: number }) {
@@ -36,7 +38,7 @@ export function StageIcon({ state, size = 14 }: { state: StageState; size?: numb
 /** The Write → … → Deploy track. Every stage has icon + text, never colour alone. */
 export function FlowStepper({ stages, compact = false }: { stages: Record<StageId, StageState>; compact?: boolean }) {
   return (
-    <ol className={clsx("flex flex-wrap items-center", compact ? "gap-1" : "gap-1.5")} aria-label="Rule lifecycle">
+    <ol className={clsx("flex flex-wrap items-center", compact ? "gap-1" : "gap-1.5")} aria-label={t("rule_lifecycle")}>
       {STAGES.map((s, i) => {
         const state = stages[s.id];
         const { ring, cls, Icon, label } = STAGE_META[state];
@@ -90,10 +92,10 @@ export function CheckList({ checks }: { checks: GateCheck[] }) {
 }
 
 const KIND_META: Record<string, string> = {
-  positive: "positive",
-  negative: "negative",
-  false_positive: "false positive",
-  edge: "edge",
+  positive: t("l_positive_2"),
+  negative: t("l_negative_2"),
+  false_positive: t("l_false_positive_2"),
+  edge: t("l_edge_2"),
 };
 
 export function KindTag({ kind }: { kind: string }) {
@@ -101,8 +103,65 @@ export function KindTag({ kind }: { kind: string }) {
 }
 
 export const KIND_LABEL: Record<string, string> = {
-  positive: "Positive",
-  negative: "Negative",
-  false_positive: "False positive",
-  edge: "Edge",
+  positive: t("l_positive"),
+  negative: t("l_negative"),
+  false_positive: t("l_false_positive"),
+  edge: t("l_edge"),
 };
+
+export const GATE_LABELS: Record<string, string> = {
+  min_positive: t("l_minimum_positive_cases"),
+  min_negative: t("l_minimum_negative_cases"),
+  false_positive_levels: t("l_levels_requiring_a_false_positive_"),
+  require_filter_test: t("l_exclusions_must_be_tested"),
+  require_mitre: t("l_att_ck_technique_required"),
+  allow_warnings: t("l_lint_warnings_allowed"),
+  blocked_status: t("l_blocking_statuses"),
+  require_replay: t("l_replay_expectation_required"),
+  review_days: t("l_review_window_days"),
+  min_score: t("l_minimum_health_score_to_approve"),
+};
+
+export function fmt(v: unknown): string {
+  if (typeof v === "boolean") return v ? "yes" : "no";
+  if (Array.isArray(v)) return v.length ? v.join(", ") : "—";
+  return String(v);
+}
+
+export function FlowFunnel({ q }: { q: QualityReport }) {
+  return (
+    <Card className="mb-5 overflow-x-auto">
+      <ol className="flex min-w-[760px] divide-x divide-line">
+        {q.stages.map((s) => {
+          const passed = (s.counts.ok ?? 0) + (s.counts.warn ?? 0) + (s.counts.pending ?? 0);
+          const failed = s.counts.fail ?? 0;
+          const meta = STAGES.find((x) => x.id === s.id)!;
+          return (
+            <li key={s.id} className="flex-1 px-4 py-3" title={meta.hint}>
+              <span className="text-[11px] font-semibold uppercase tracking-wider text-subtle">{s.label}</span>
+              <span className="mt-1 block text-[22px] font-bold leading-tight text-strong tabular-nums">
+                {s.id === "deploy" ? (s.counts.pending ?? 0) : passed}
+                <span className="text-sm font-medium text-subtle">/{q.summary.total}</span>
+              </span>
+              <span className="mt-0.5 flex items-center gap-1 text-xs text-muted">
+                {s.id === "deploy" ? (
+                  t("fl_ready_wait")
+                ) : failed ? (
+                  <>
+                    <XCircle size={12} className="text-bad" aria-hidden /> {t("fl_n_blocked", { n: failed })}
+                  </>
+                ) : (s.counts.skip ?? 0) === q.summary.total ? (
+                  t("fl_na")
+                ) : (
+                  <>
+                    <CheckCircle2 size={12} className="text-good" aria-hidden /> {t("no_blockers")}
+                  </>
+                )}
+              </span>
+            </li>
+          );
+        })}
+      </ol>
+    </Card>
+  );
+}

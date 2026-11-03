@@ -8,20 +8,20 @@
 | Glow | `#22D3EE` |
 | SIEM outputs (logo) | `#2A78D6` `#EB6834` `#1BAF7A` |
 
-## UI (dark "glass" theme)
+## UI (dark "Ultraviolet Ink" theme)
 
-Tokens live in `web/src/index.css`. Cards are translucent surfaces (`.glass`) over a background with a violet and cyan glow.
+Tokens live in `web/src/index.css`. Cards are solid ink layers (`.glass`, no blur) over a violet-black background with one violet glow and a faint detection grid. `heat-0..4` (`#191527 #2B2160 #43328F #6247C9 #8A74F5`) are the coverage ramp.
 
 | Token | Value | Use |
 |---|---|---|
-| `bg` | `#070B16` | page background |
-| `surface` / `surface-2` / `surface-3` | white at 4% / 7% / 10% | cards, chips, hover |
-| `line` | white at 9% | borders and dividers |
-| `strong` / `text` / `muted` / `subtle` | `#FFFFFF` `#E8ECF5` `#A3ADC4` `#8791AB` | titles, body, secondary, labels |
-| `brand` | `#6D5BF0` | primary button background |
-| `accent` | `#8B7CF6` | active tab, focus, links, chart series (contrast on dark) |
+| `bg` | `#0F0B1C` | page background |
+| `surface` / `surface-2` / `surface-3` | lavender (`#D9CEFF`) at 5% / 8% / 12% | cards, chips, hover |
+| `line` | lavender at 12% | borders and dividers |
+| `strong` / `text` / `muted` / `subtle` | `#FFFFFF` `#ECE8F7` `#B0A9C8` `#9189AA` | titles, body, secondary, labels |
+| `brand` | `#6B54F2` | primary button background |
+| `accent` | `#A292FF` | active tab, focus, links, chart series (contrast on dark) |
 | `glow` | `#22D3EE` | editor cursor, background glow |
-| `good` / `warn` / `bad` | `#34D399` `#FBBF24` `#F87171` | status only, always with icon and text |
+| `good` / `warn` / `bad` | `#3DDC97` `#F5B83D` `#FF7A85` | status only, always with icon and text |
 | `siem-splunk` / `siem-microsoft` / `siem-elastic` | `#5AA9FF` `#F59A6B` `#34D3A3` | marker next to the SPL/KQL/EQL label |
 
 The UI SIEM colours are lighter versions of the logo's, for contrast on the dark background. SIEM colours are markers beside a label, never chart series: charts use a single violet series with the number written.

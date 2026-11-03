@@ -1,8 +1,10 @@
 """Vitrix HTTP API (FastAPI) and web UI server.
 
-Nothing here writes to the local disk. The only writes go to GitHub with the token from the
-environment (see github.py), and always in two steps: push a branch so the real CI validates
-it, then open the pull request only if that CI passed. The API has no authentication, so
+Nothing here writes to the local disk except local drafts (rows in `<data_dir>/drafts.db`, see
+drafts.py; with accounts off only for a loopback client on a localhost-only server). The only
+writes to the repository go to GitHub with the token from the environment (see github.py), and
+always in two steps: push a branch so the real CI validates it, then open the pull request only
+if that CI passed. The API has no authentication, so
 `vitrix serve` listens on localhost by default and every request goes through
 `request_problem` (Host, Origin, JSON-only POST: against DNS rebinding and CSRF).
 
@@ -31,23 +33,30 @@ it, then open the pull request only if that CI passed. The API has no authentica
     POST /api/ci/config                step 1 for vitrix.yml
     GET  /api/ci/status?commit=SHA     state of the real CI for that commit
     POST /api/pull-requests            step 2: open the PR, only if CI passed for that commit
+    GET|POST /api/drafts               local drafts: list / save (no PR)
+    GET|PUT|DELETE /api/drafts/{id}    load / update (optimistic `version`, 409) / delete a draft
     /api/auth/*  /api/workspace/*      accounts, GitHub sign-in, members, invites, audit (when auth.enabled)
 """
 
 from __future__ import annotations
 
+import ipaddress
 import os
+import re
 from pathlib import Path
 
 from fastapi import FastAPI, HTTPException, Request
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import FileResponse, JSONResponse, PlainTextResponse
+from fastapi.responses import FileResponse, JSONResponse, PlainTextResponse, Response
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field
 
 from . import __version__, auth, auth_api, flow, history, regex_lab, service
+from . import drafts as drafts_mod
+from . import replay as replay_mod
 from .backends import available_targets
 from .config import load_config
+from .evaluator import regex_budget
 from .github import GitHubError
 from .replay import ReplayError
 
@@ -90,6 +99,12 @@ class ReplayRequest(BaseModel):
     rule: str | None = Field(default=None, max_length=MAX_TEXT, description="only this rule (Editor); default: all")
 
 
+class ReplayDraftRequest(BaseModel):
+    rule: str = Field(max_length=MAX_TEXT, description="the unsaved rule YAML from the Editor")
+    datasets: list[str] | None = Field(default=None, max_length=50, description="dataset names; default: all")
+    path: str | None = Field(default=None, max_length=500, description="rule id if editing an existing rule (expectation lookup)")
+
+
 class RegexRequest(BaseModel):
     pattern: str = Field(max_length=2_000)
     flags: str = Field(default="", max_length=3, description="i, m and/or s (Sigma's |re|i|m|s)")
@@ -100,6 +115,18 @@ class ConfigTextRequest(BaseModel):
     text: str = Field(max_length=MAX_TEXT, description="vitrix.yml content")
 
 
+class DraftRequest(BaseModel):
+    path: str | None = Field(default=None, max_length=300, description="rule path inside rules/ (metadata only)")
+    title: str | None = Field(default=None, max_length=drafts_mod.MAX_TITLE)
+    rule: str = Field(min_length=1, max_length=MAX_TEXT, description="Sigma rule YAML (may be invalid)")
+    cases: str | None = Field(default=None, max_length=MAX_TEXT)
+
+
+class DraftUpdateRequest(DraftRequest):
+    version: int = Field(ge=1, description="the version you loaded; 409 if the draft changed since")
+
+
+_DRAFT_ID = re.compile(r"^[0-9a-f]{32}$")
 LOCAL_HOSTS = {"127.0.0.1", "localhost", "[::1]"}
 
 
@@ -153,7 +180,7 @@ def create_app(config_path: str | None = None) -> FastAPI:
 
     origins = [o.strip() for o in os.environ.get("VITRIX_CORS_ORIGINS", "").split(",") if o.strip()]
     if origins:
-        app.add_middleware(CORSMiddleware, allow_origins=origins, allow_methods=["GET", "POST"], allow_headers=["Content-Type"])
+        app.add_middleware(CORSMiddleware, allow_origins=origins, allow_methods=["GET", "POST", "PUT", "DELETE"], allow_headers=["Content-Type"])
     hosts = allowed_hosts()
     store = auth.AuthStore(cfg.data_dir / "vitrix.db", cfg.auth) if cfg.auth.enabled and cfg.data_dir else None
     oauth = auth_api.github_oauth_from_env() if store is not None and cfg.auth.github_login else None
@@ -227,15 +254,17 @@ def create_app(config_path: str | None = None) -> FastAPI:
                 path = service.normalize_rule_path(req.path)
             except service.ChangeError as exc:
                 raise HTTPException(status_code=422, detail=str(exc)) from None
-        result = service.validate_text(cfg, req.rule, req.cases, req.targets)
-        result["quality"] = flow.draft_quality(cfg, result, req.rule, bool(req.cases and req.cases.strip()), path)
+        with regex_budget():
+            result = service.validate_text(cfg, req.rule, req.cases, req.targets)
+            result["quality"] = flow.draft_quality(cfg, result, req.rule, bool(req.cases and req.cases.strip()), path)
         return result
 
     @app.post("/api/impact")
     def impact(req: ImpactRequest) -> dict:
         try:
             path = service.normalize_rule_path(req.path) if req.path else None
-            return flow.impact_analysis(cfg, path, req.rule)
+            with regex_budget():
+                return flow.impact_analysis(cfg, path, req.rule)
         except (service.ChangeError, ReplayError) as exc:
             raise HTTPException(status_code=422, detail=str(exc)) from None
 
@@ -286,7 +315,20 @@ def create_app(config_path: str | None = None) -> FastAPI:
     @app.post("/api/replay")
     def replay_events(req: ReplayRequest) -> dict:
         try:
-            return flow.replay_text(cfg, req.events, req.rule)
+            with regex_budget():
+                return flow.replay_text(cfg, req.events, req.rule)
+        except ReplayError as exc:
+            raise HTTPException(status_code=422, detail=str(exc)) from None
+
+    @app.get("/api/replay/datasets")
+    def replay_datasets() -> list[dict]:
+        return replay_mod.list_dataset_info(cfg)
+
+    @app.post("/api/replay/draft")
+    def replay_draft(req: ReplayDraftRequest) -> dict:
+        try:
+            with regex_budget():
+                return replay_mod.replay_draft(cfg, req.rule, req.datasets, req.path)
         except ReplayError as exc:
             raise HTTPException(status_code=422, detail=str(exc)) from None
 
@@ -338,6 +380,87 @@ def create_app(config_path: str | None = None) -> FastAPI:
         if store is not None:
             store.log(auth_api.who(request), "pull_request.opened", f"#{out['number']} from {req.branch}")
         return out
+
+    # ------------------------------------------------------------------ local drafts (ADR 0001)
+    drafts = drafts_mod.DraftStore(cfg.data_dir / "drafts.db") if cfg.drafts_enabled and cfg.data_dir else None
+
+    def drafts_off(request: Request) -> str | None:
+        """Why drafts are unavailable for this request, or None. Without accounts only a loopback
+        client of a localhost-only server may write (Host alone can be forged by non-browser clients)."""
+        if drafts is None:
+            return "disabled in vitrix.yml (drafts.enabled: false)"
+        if store is not None:
+            return None
+        host = request.client.host if request.client else ""
+        try:
+            loopback = ipaddress.ip_address(host).is_loopback
+        except ValueError:
+            loopback = False
+        if not loopback:
+            return "accounts are off, so drafts only work from this machine (in Docker, turn on accounts: auth.enabled: true)"
+        if not hosts <= LOCAL_HOSTS:
+            return "accounts are off and this server accepts non-local hosts"
+        return None
+
+    def drafts_ready(request: Request, draft_id: str | None = None) -> drafts_mod.DraftStore:
+        reason = drafts_off(request)
+        if reason or drafts is None:
+            raise HTTPException(status_code=403, detail=f"Local drafts are off: {reason}")
+        if draft_id is not None and not _DRAFT_ID.match(draft_id):
+            raise HTTPException(status_code=404, detail="draft not found")
+        return drafts
+
+    def draft_json(request: Request, row: dict, full: bool = True) -> dict:
+        who = auth_api.who(request)
+        return drafts_mod.public(row, current_hash=drafts_mod.rule_hash(cfg.rules_dir, row["path"]),
+                                 me_id=who.user_id if who else None, auth_on=store is not None, full=full)
+
+    def draft_fields(req: DraftRequest) -> dict:
+        try:
+            path = service.normalize_rule_path(req.path) if req.path and req.path.strip() else None
+        except service.ChangeError as exc:
+            raise HTTPException(status_code=422, detail=str(exc)) from None
+        return {"path": path, "title": req.title, "rule": req.rule, "cases": req.cases,
+                "base_hash": drafts_mod.rule_hash(cfg.rules_dir, path)}
+
+    @app.exception_handler(drafts_mod.DraftError)
+    def _draft_error(_, exc: drafts_mod.DraftError):  # noqa: ANN001
+        return JSONResponse(status_code=exc.status, content={"detail": str(exc)})
+
+    @app.get("/api/drafts")
+    def drafts_list(request: Request) -> dict:
+        reason = drafts_off(request)
+        if reason or drafts is None:
+            return {"enabled": False, "reason": reason, "drafts": []}
+        return {"enabled": True, "reason": None, "drafts": [draft_json(request, r, full=False) for r in drafts.list()]}
+
+    @app.post("/api/drafts", status_code=201)
+    def drafts_create(req: DraftRequest, request: Request) -> dict:
+        db = drafts_ready(request)
+        who = auth_api.who(request)
+        author = {"id": who.user_id, "email": who.email, "name": who.name} if who else None
+        return draft_json(request, db.create(author=author, **draft_fields(req)))
+
+    @app.get("/api/drafts/{draft_id}")
+    def drafts_get(draft_id: str, request: Request) -> dict:
+        return draft_json(request, drafts_ready(request, draft_id).get(draft_id))
+
+    @app.put("/api/drafts/{draft_id}")
+    def drafts_update(draft_id: str, req: DraftUpdateRequest, request: Request) -> dict:
+        db = drafts_ready(request, draft_id)
+        who = auth_api.who(request)
+        if who and db.get(draft_id)["author_id"] not in (None, who.user_id):  # authorless (saved with accounts off) = shared
+            raise HTTPException(status_code=403, detail="only the author can change this draft")
+        return draft_json(request, db.update(draft_id, version=req.version, **draft_fields(req)))
+
+    @app.delete("/api/drafts/{draft_id}", status_code=204)
+    def drafts_delete(draft_id: str, request: Request) -> Response:
+        db = drafts_ready(request, draft_id)
+        who = auth_api.who(request)
+        if who and db.get(draft_id)["author_id"] not in (None, who.user_id) and not who.can("admin"):
+            raise HTTPException(status_code=403, detail="only the author or an admin can delete this draft")
+        db.delete(draft_id)
+        return Response(status_code=204)
 
     _mount_ui(app)
     return app

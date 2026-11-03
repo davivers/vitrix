@@ -1,13 +1,14 @@
 import clsx from "clsx";
 import { useState, type ReactNode } from "react";
 import { pct } from "./dash";
+import { t } from "../i18n";
 
-/** Categorical palette validated for the dark surface (OKLCH lightness band, CVD and contrast checks). */
-export const SERIES_COLORS = ["#7C6DF0", "#1FA2BD", "#D2693A", "#C84B92", "#3E86E0"];
-/** The "Other" bucket and empty remainders: a muted gray, always labelled. */
-export const OTHER_COLOR = "#59627F";
-/** One-hue ramp (strong to light violet) for ordinal data such as severity. */
-export const VIOLET_RAMP = ["#7C6DF0", "#9A8EF4", "#B7AEF7", "#D2CCFA", "#E6E3FC"];
+/** Categorical palette; the CSS variables (index.css) switch with the theme. Same hue order in light and dark. */
+export const SERIES_COLORS = ["var(--series-1)", "var(--series-2)", "var(--series-3)", "var(--series-4)", "var(--series-5)"];
+/** The t("l_other") bucket and empty remainders: a muted gray, always labelled. */
+export const OTHER_COLOR = "var(--series-other)";
+/** One-hue ramp (strong to light blue) for ordinal data such as severity. */
+export const BLUE_RAMP = ["var(--color-heat-4)", "var(--color-heat-3)", "var(--color-heat-2)", "var(--color-heat-1)", "var(--color-heat-0)"];
 
 export interface Slice {
   key: string;
@@ -16,12 +17,12 @@ export interface Slice {
   color: string;
 }
 
-/** Top `n` entries as slices (fixed colour order), the rest folded into "Other". */
+/** Top `n` entries as slices (fixed colour order), the rest folded into t("l_other"). */
 export function topSlices(entries: [string, number][], n = 5, colors: string[] = SERIES_COLORS): Slice[] {
   const sorted = [...entries].filter(([, v]) => v > 0).sort((a, b) => b[1] - a[1] || a[0].localeCompare(b[0]));
   const head = sorted.slice(0, n).map(([label, value], i) => ({ key: label, label, value, color: colors[i % colors.length] }));
   const rest = sorted.slice(n).reduce((sum, [, v]) => sum + v, 0);
-  return rest > 0 ? [...head, { key: "__other", label: "Other", value: rest, color: OTHER_COLOR }] : head;
+  return rest > 0 ? [...head, { key: "__other", label: t("l_other"), value: rest, color: OTHER_COLOR }] : head;
 }
 
 function niceTicks(max: number): number[] {
@@ -52,7 +53,7 @@ export function DonutChart(props: { slices: Slice[]; centerValue: ReactNode; cen
   });
   const active = slices.find((s) => s.key === hover);
 
-  if (total === 0) return <p className="text-sm text-subtle">No data yet.</p>;
+  if (total === 0) return <p className="text-sm text-subtle">{t("no_data_yet")}</p>;
   return (
     <div className="flex flex-wrap items-center gap-x-6 gap-y-4">
       <div className="relative size-[148px] shrink-0">
@@ -130,7 +131,7 @@ export function ColumnChart({ columns, height = 190, ariaLabel, unit = "" }: { c
   const width = 760;
   const pad = { l: 30, r: 8, t: 22, b: 30 };
   const n = columns.length;
-  if (n === 0) return <p className="text-sm text-subtle">No data yet.</p>;
+  if (n === 0) return <p className="text-sm text-subtle">{t("no_data_yet")}</p>;
   const max = Math.max(1, ...columns.map((c) => c.value));
   const ticks = niceTicks(max);
   const top = ticks[ticks.length - 1];
@@ -180,7 +181,7 @@ export function ColumnChart({ columns, height = 190, ariaLabel, unit = "" }: { c
       </svg>
       {active && hover !== null && (
         <div
-          className="pointer-events-none absolute top-0 z-10 rounded-lg border border-line bg-ink px-2.5 py-1.5 text-xs shadow-lg"
+          className="pointer-events-none absolute top-0 z-10 rounded-lg border border-line bg-surface px-2.5 py-1.5 text-xs shadow-pop"
           style={{ left: `${((pad.l + slot * hover + slot / 2) / width) * 100}%`, transform: `translateX(${hover > n / 2 ? "-105%" : "5%"})` }}
         >
           <span className="block font-semibold text-strong">{active.title}</span>

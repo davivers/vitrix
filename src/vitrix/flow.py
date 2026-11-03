@@ -19,6 +19,7 @@ from .cases import run_rule_cases
 from .config import Config
 from .evaluator import UnsupportedError, evaluate, exclusion_selections
 from .gate import QUESTIONS, STAGE_LABELS, STAGES, evaluate_rule
+from .governance import rule_governance
 from .history import history
 from .lint import Issue, lint_files
 from .loader import RuleFile
@@ -138,6 +139,7 @@ def _rule_quality(cfg: Config, rf: RuleFile, issues: list[Issue], extra: list, r
     return evaluate_rule(
         cfg.gate, doc if isinstance(doc, dict) else None, None, issues, results, problems,
         {t: c["ok"] for t, c in conv.items()}, any(exclusion_selections(d) for d in detection_docs), replay_checks, age_days,
+        rule_governance(doc),
     )
 
 
@@ -228,7 +230,7 @@ def draft_quality(cfg: Config, validation: dict, rule_text: str, cases_given: bo
                 replay_checks += [{**c, "dataset": name} for c in check_expectations(res, {path: expectations[path]}, None)]
     q = evaluate_rule(cfg.gate, doc if isinstance(doc, dict) else None, parse_error, issues, results, problems,
                       final, any(exclusion_selections(d) for d in detection_docs), replay_checks,
-                      _ages(cfg).get(path) if path else None)
+                      _ages(cfg).get(path) if path else None, rule_governance(doc))
     return {**q, "datasets": datasets}
 
 

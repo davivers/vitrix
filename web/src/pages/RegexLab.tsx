@@ -3,6 +3,7 @@ import { AlertTriangle, Check, CheckCircle2, Copy, Info, Loader2, Plus, Timer, T
 import { useEffect, useState } from "react";
 import { request } from "../api";
 import { Card, ErrorBox, PageHeader } from "../components/ui";
+import { t } from "../i18n";
 
 interface Match {
   start: number;
@@ -32,9 +33,9 @@ const START_SAMPLES = [
 ];
 
 const FLAG_INFO: [string, string][] = [
-  ["i", "ignore case"],
-  ["m", "^ and $ per line"],
-  ["s", ". matches newlines"],
+  ["i", t("rx_i")],
+  ["m", t("rx_m")],
+  ["s", t("rx_s")],
 ];
 
 /** Highlights the matched spans, without innerHTML. */
@@ -51,7 +52,7 @@ function Highlighted({ text, matches }: { text: string; matches: Match[] }) {
     <span className="whitespace-pre-wrap break-all font-mono text-[12.5px] text-code-text">
       {parts.map((p, i) =>
         p.hit ? (
-          <mark key={i} className="rounded-[3px] bg-accent/35 px-0.5 text-strong underline decoration-accent decoration-2 underline-offset-2">
+          <mark key={i} className="rounded-[3px] bg-accent-soft px-0.5 text-strong underline decoration-accent decoration-2 underline-offset-2">
             {p.t}
           </mark>
         ) : (
@@ -116,13 +117,13 @@ export default function RegexLabPage() {
   return (
     <div className="mx-auto max-w-6xl px-4 py-8 sm:px-8">
       <PageHeader
-        title="Regex Workbench"
-        subtitle="Develop, test and optimise regular expressions with the same engine as the local tests (Python's re). Every run has a 2 s timeout."
+        title={t("regex_workbench")}
+        subtitle={t("develop_test_and_optimise_regular_expr")}
       />
 
       <Card className="mb-5 p-5">
         <label className="block">
-          <span className="mb-1.5 block text-sm font-medium text-strong">Expression</span>
+          <span className="mb-1.5 block text-sm font-medium text-strong">{t("expression")}</span>
           <span className="flex items-stretch overflow-hidden rounded-[10px] border border-line bg-code focus-within:border-accent/50">
             <span className="grid place-items-center px-3 font-mono text-subtle">/</span>
             <input
@@ -145,19 +146,19 @@ export default function RegexLabPage() {
           <span className="ml-auto flex items-center gap-1.5 text-xs text-muted" aria-live="polite">
             {pending ? (
               <>
-                <Loader2 size={13} className="animate-spin" aria-hidden /> testing…
+                <Loader2 size={13} className="animate-spin" aria-hidden /> {t("testing")}
               </>
             ) : result?.timeout ? (
               <>
-                <Timer size={13} className="text-bad" aria-hidden /> timed out
+                <Timer size={13} className="text-bad" aria-hidden /> {t("timed_out")}
               </>
             ) : result?.ok ? (
               <>
-                <CheckCircle2 size={13} className="text-good" aria-hidden /> {hits}/{samples.length} samples matched · slowest {slowest} ms
+                <CheckCircle2 size={13} className="text-good" aria-hidden /> {t("rx_summary", { a: hits, b: samples.length, ms: slowest })}
               </>
             ) : result ? (
               <>
-                <XCircle size={13} className="text-bad" aria-hidden /> invalid regex
+                <XCircle size={13} className="text-bad" aria-hidden /> {t("invalid_regex")}
               </>
             ) : null}
           </span>
@@ -169,9 +170,9 @@ export default function RegexLabPage() {
       <div className="grid gap-5 lg:grid-cols-[1fr_20rem]">
         <Card className="p-5">
           <div className="mb-3 flex items-center justify-between">
-            <h2 className="text-[15px] font-semibold text-strong">Samples</h2>
+            <h2 className="text-[15px] font-semibold text-strong">{t("samples")}</h2>
             <button type="button" onClick={() => setSamples([...samples, ""])} className="inline-flex items-center gap-1.5 rounded-md px-2 py-1 text-xs text-muted hover:bg-surface-2 hover:text-text">
-              <Plus size={13} aria-hidden /> sample
+              <Plus size={13} aria-hidden /> {t("sample")}
             </button>
           </div>
           <ul className="space-y-3">
@@ -183,18 +184,18 @@ export default function RegexLabPage() {
                     {r ? (
                       <span className={clsx("inline-flex items-center gap-1 text-xs font-semibold", r.matched ? "text-good" : "text-muted")}>
                         {r.matched ? <CheckCircle2 size={13} aria-hidden /> : <XCircle size={13} aria-hidden />}
-                        {r.matched ? `matched (${r.matches.length})` : "no match"}
+                        {r.matched ? t("rx_matched", { n: r.matches.length }) : t("rx_nomatch")}
                       </span>
                     ) : (
                       <span className="text-xs text-subtle">—</span>
                     )}
                     {r && <span className="text-[11px] text-subtle tabular-nums">{r.duration_ms} ms</span>}
-                    <button type="button" aria-label={`Remove sample ${i + 1}`} onClick={() => setSamples(samples.filter((_, j) => j !== i))} className="ml-auto rounded p-1 text-subtle hover:bg-surface-2 hover:text-text">
+                    <button type="button" aria-label={t("rx_remove", { n: i + 1 })} onClick={() => setSamples(samples.filter((_, j) => j !== i))} className="ml-auto rounded p-1 text-subtle hover:bg-surface-2 hover:text-text">
                       <Trash2 size={13} aria-hidden />
                     </button>
                   </div>
                   <label>
-                    <span className="sr-only">Amostra {i + 1}</span>
+                    <span className="sr-only">{t("rx_sample_n", { n: i + 1 })}</span>
                     <textarea
                       value={s}
                       onChange={(e) => setSamples(samples.map((x, j) => (j === i ? e.target.value : x)))}
@@ -233,40 +234,40 @@ export default function RegexLabPage() {
 
         <div className="flex flex-col gap-5">
           <Card className="p-5">
-            <h2 className="mb-3 text-[15px] font-semibold text-strong">Optimisation</h2>
+            <h2 className="mb-3 text-[15px] font-semibold text-strong">{t("optimisation")}</h2>
             {result && result.tips.length === 0 && (
               <p className="flex items-center gap-2 text-[13px] text-muted">
-                <CheckCircle2 size={14} className="text-good" aria-hidden /> No known problem.
+                <CheckCircle2 size={14} className="text-good" aria-hidden /> {t("no_known_problem")}
               </p>
             )}
             <ul className="space-y-2">
-              {result?.tips.map((t, i) => (
+              {result?.tips.map((tip, i) => (
                 <li key={i} className="flex gap-2 text-[13px]">
-                  {t.severity === "error" ? (
-                    <XCircle size={14} className="mt-0.5 shrink-0 text-bad" aria-label="grave" />
-                  ) : t.severity === "warning" ? (
-                    <AlertTriangle size={14} className="mt-0.5 shrink-0 text-warn" aria-label="aviso" />
+                  {tip.severity === "error" ? (
+                    <XCircle size={14} className="mt-0.5 shrink-0 text-bad" aria-label={t("rx_sev_error")} />
+                  ) : tip.severity === "warning" ? (
+                    <AlertTriangle size={14} className="mt-0.5 shrink-0 text-warn" aria-label={t("rx_sev_warn")} />
                   ) : (
-                    <Info size={14} className="mt-0.5 shrink-0 text-subtle" aria-label="dica" />
+                    <Info size={14} className="mt-0.5 shrink-0 text-subtle" aria-label={t("rx_sev_tip")} />
                   )}
-                  <span className="text-text">{t.message}</span>
+                  <span className="text-text">{tip.message}</span>
                 </li>
               ))}
             </ul>
           </Card>
           <Card className="p-5">
             <div className="mb-2 flex items-center justify-between">
-              <h2 className="text-[15px] font-semibold text-strong">In the Sigma rule</h2>
+              <h2 className="text-[15px] font-semibold text-strong">{t("in_the_sigma_rule")}</h2>
               {result?.sigma && (
                 <button type="button" onClick={copy} className="inline-flex items-center gap-1 rounded-md px-2 py-1 text-xs text-muted hover:bg-surface-2 hover:text-text">
-                  {copied ? <Check size={13} aria-hidden /> : <Copy size={13} aria-hidden />} {copied ? "Copied" : "Copy"}
+                  {copied ? <Check size={13} aria-hidden /> : <Copy size={13} aria-hidden />} {copied ? t("l_copied") : t("l_copy")}
                 </button>
               )}
             </div>
             <pre className="overflow-auto whitespace-pre-wrap break-all rounded-[10px] border border-line bg-code p-3 font-mono text-[12px] text-code-text">
               {result?.sigma ?? "—"}
             </pre>
-            <p className="mt-2 text-xs text-subtle">Replace Field with the field name (e.g. CommandLine). Single quotes in YAML keep the backslash literal.</p>
+            <p className="mt-2 text-xs text-subtle">{t("replace_field_with_the_field_name_e_g_")}</p>
           </Card>
         </div>
       </div>

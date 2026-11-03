@@ -7,26 +7,27 @@ import { Section, timeAgo } from "../components/dash";
 import { Avatar } from "../components/UserMenu";
 import { Card, ErrorBox, PageHeader, btnPrimary, btnSecondary, inputCls } from "../components/ui";
 import type { CreatedInvite, Member, Role } from "../types";
+import { t } from "../i18n";
 
 const ROLES: { id: Role; label: string; can: string }[] = [
-  { id: "viewer", label: "Viewer", can: "Read everything: rules, dashboards, reports, coverage." },
-  { id: "editor", label: "Editor", can: "Viewer, plus the Editor tools, Regex Workbench, replay, and publishing rules through CI." },
-  { id: "admin", label: "Admin", can: "Editor, plus Settings changes, members, invites and the audit log." },
-  { id: "owner", label: "Owner", can: "Admin, plus granting or removing owners. There is always at least one." },
+  { id: "viewer", label: t("l_viewer"), can: t("tm_can_viewer") },
+  { id: "editor", label: t("l_editor"), can: t("tm_can_editor") },
+  { id: "admin", label: t("l_admin"), can: t("tm_can_admin") },
+  { id: "owner", label: t("l_owner"), can: t("tm_can_owner") },
 ];
 
 const ACTION: Record<string, string> = {
-  login: "signed in",
-  "login.failed": "failed to sign in",
-  "account.register": "created an account",
-  "account.github_linked": "linked a GitHub account",
-  "invite.created": "invited",
-  "invite.revoked": "revoked an invite",
-  "member.role": "changed a role",
-  "member.removed": "removed a member",
-  "password.changed": "changed their password",
-  "workspace.renamed": "renamed the workspace",
-  "rule.ci_submitted": "sent a rule to CI",
+  login: t("tm_a_login"),
+  "login.failed": t("tm_a_login_failed"),
+  "account.register": t("tm_a_register"),
+  "account.github_linked": t("tm_a_gh"),
+  "invite.created": t("tm_a_invited"),
+  "invite.revoked": t("tm_a_revoked"),
+  "member.role": t("tm_a_role"),
+  "member.removed": t("l_removed_a_member"),
+  "password.changed": t("tm_a_pw"),
+  "workspace.renamed": t("tm_a_rename"),
+  "rule.ci_submitted": t("tm_a_rule_ci"),
   "config.ci_submitted": "sent vitrix.yml to CI",
   "pull_request.opened": "opened a pull request",
 };
@@ -55,12 +56,12 @@ function MemberRow({ m, myRole, meId, onChanged }: { m: Member; myRole: Role; me
               <GitBranch size={11} aria-hidden /> @{m.github_login}
             </span>
           )}
-          {!m.has_password && <span>GitHub-only</span>}
+          {!m.has_password && <span>{t("github_only")}</span>}
         </span>
       </span>
-      <span className="text-xs text-subtle">{m.last_login ? `active ${timeAgo(iso(m.last_login))}` : "never signed in"}</span>
+      <span className="text-xs text-subtle">{m.last_login ? t("tm_active_ago", { t: timeAgo(iso(m.last_login)) }) : t("tm_never")}</span>
       <label className="sr-only" htmlFor={`role-${m.id}`}>
-        Role of {m.name || m.email}
+        {t("role_of")} {m.name || m.email}
       </label>
       <select
         id={`role-${m.id}`}
@@ -70,7 +71,7 @@ function MemberRow({ m, myRole, meId, onChanged }: { m: Member; myRole: Role; me
         className="rounded-[10px] border border-line bg-surface px-2.5 py-1.5 text-[13px] text-text disabled:opacity-60"
       >
         {options.map((r) => (
-          <option key={r.id} value={r.id} className="bg-ink">
+          <option key={r.id} value={r.id} className="bg-surface">
             {r.label}
           </option>
         ))}
@@ -79,10 +80,10 @@ function MemberRow({ m, myRole, meId, onChanged }: { m: Member; myRole: Role; me
       {confirm ? (
         <span className="flex items-center gap-1.5">
           <button type="button" onClick={() => remove.mutate()} disabled={remove.isPending} className="rounded-md bg-bad-soft px-2.5 py-1.5 text-xs font-semibold text-bad hover:brightness-110">
-            {remove.isPending ? "Removing…" : "Remove access"}
+            {remove.isPending ? t("tm_removing") : t("tm_remove")}
           </button>
           <button type="button" onClick={() => setConfirm(false)} className="rounded-md px-2 py-1.5 text-xs text-muted hover:text-text">
-            Cancel
+            {t("cancel")}
           </button>
         </span>
       ) : (
@@ -131,37 +132,37 @@ function InviteForm({ myRole, onCreated }: { myRole: Role; onCreated: () => void
     <div className="space-y-3">
       <form onSubmit={onSubmit} className="flex flex-wrap gap-2">
         <label className="min-w-[14rem] flex-1">
-          <span className="sr-only">Email to invite</span>
+          <span className="sr-only">{t("email_to_invite")}</span>
           <input type="email" value={email} onChange={(e) => setEmail(e.target.value)} placeholder="colleague@company.com" className={inputCls} required maxLength={254} />
         </label>
         <label>
-          <span className="sr-only">Role</span>
+          <span className="sr-only">{t("role")}</span>
           <select value={role} onChange={(e) => setRole(e.target.value as Role)} className="h-full rounded-[10px] border border-line bg-surface px-2.5 text-[13px] text-text">
             {ROLES.filter((r) => r.id !== "owner" || myRole === "owner").map((r) => (
-              <option key={r.id} value={r.id} className="bg-ink">
+              <option key={r.id} value={r.id} className="bg-surface">
                 {r.label}
               </option>
             ))}
           </select>
         </label>
         <button type="submit" disabled={create.isPending} className={btnPrimary}>
-          {create.isPending ? <Loader2 size={15} className="animate-spin" aria-hidden /> : <UserPlus size={15} aria-hidden />} Create invite
+          {create.isPending ? <Loader2 size={15} className="animate-spin" aria-hidden /> : <UserPlus size={15} aria-hidden />} {t("tm_create_invite")}
         </button>
       </form>
       {create.error && <ErrorBox message={(create.error as Error).message} />}
       {created && (
         <div className="space-y-2 rounded-[10px] border border-accent/30 bg-accent-soft p-3">
           <p className="flex items-center gap-1.5 text-[13px] font-medium text-strong">
-            <Mail size={14} aria-hidden /> Invite for {created.email} as {created.role}: share this link
+            <Mail size={14} aria-hidden /> {t("invite_for")} {created.email} as {created.role}: share this link
           </p>
           <div className="flex gap-2">
-            <input readOnly value={created.link} onFocus={(e) => e.currentTarget.select()} aria-label="Invite link" className={`${inputCls} font-mono text-xs`} />
+            <input readOnly value={created.link} onFocus={(e) => e.currentTarget.select()} aria-label={t("invite_link")} className={`${inputCls} font-mono text-xs`} />
             <button type="button" onClick={copy} className={btnSecondary}>
-              {copied ? <Check size={14} aria-hidden /> : <Copy size={14} aria-hidden />} {copied ? "Copied" : "Copy"}
+              {copied ? <Check size={14} aria-hidden /> : <Copy size={14} aria-hidden />} {copied ? t("l_copied") : t("l_copy")}
             </button>
           </div>
           <p className="text-xs text-muted">
-            Shown only once (the server keeps just a hash). Valid for {created.expires_in_days} days, single use, and only for {created.email}. Vitrix does not send emails.
+            {t("shown_only_once_the_server_keeps_just_")} {t("tm_invite_note", { d: created.expires_in_days, email: created.email })}
           </p>
         </div>
       )}
@@ -178,6 +179,7 @@ export default function TeamPage() {
   const refresh = () => {
     void qc.invalidateQueries({ queryKey: ["workspace"] });
     void qc.invalidateQueries({ queryKey: ["audit"] });
+    void qc.invalidateQueries({ queryKey: ["me"] }); // my own role may have changed: the session stays, the UI adapts
   };
   const [renaming, setRenaming] = useState(false);
   const [name, setName] = useState("");
@@ -197,11 +199,11 @@ export default function TeamPage() {
   if (!me.enabled) {
     return (
       <div className="mx-auto max-w-3xl px-4 py-8 sm:px-8">
-        <PageHeader title="Team" subtitle="Accounts are off, so Vitrix runs as a single local user." />
+        <PageHeader title={t("team")} subtitle={t("accounts_are_off_so_vitrix_runs_as_a_s")} />
         <Card className="space-y-3 p-5 text-[13px] text-muted">
-          <p>To let several people work in the same workspace, turn accounts on in vitrix.yml:</p>
-          <pre className="rounded-[10px] border border-line bg-code p-3 font-mono text-xs text-code-text">{`auth:\n  enabled: true\n  allow_signup: false   # invite-only after the first account\n  # GitHub sign-in: set VITRIX_GITHUB_CLIENT_ID and VITRIX_GITHUB_CLIENT_SECRET`}</pre>
-          <p>The first account to register becomes the workspace owner. Then invite the team from this page.</p>
+          <p>{t("to_let_several_people_work_in_the_same")}</p>
+          <pre className="rounded-[10px] border border-line bg-code p-3 font-mono text-xs text-code-text">{`auth:\n  enabled: true\n  # GitHub sign-in: set VITRIX_GITHUB_CLIENT_ID and VITRIX_GITHUB_CLIENT_SECRET`}</pre>
+          <p>{t("the_first_account_to_register_becomes_")}</p>
         </Card>
       </div>
     );
@@ -210,12 +212,12 @@ export default function TeamPage() {
   return (
     <div className="mx-auto max-w-5xl px-4 py-8 sm:px-8">
       <PageHeader
-        title="Team"
-        subtitle="Everyone who works in this workspace, what they can do, and what they did. One workspace is one detection repository."
+        title={t("team")}
+        subtitle={t("everyone_who_works_in_this_workspace_w")}
         actions={
           isAdmin && !renaming ? (
             <button type="button" className={btnSecondary} onClick={() => { setName(w?.name ?? ""); setRenaming(true); }}>
-              <Pencil size={14} aria-hidden /> Rename workspace
+              <Pencil size={14} aria-hidden /> {t("rename_workspace")}
             </button>
           ) : undefined
         }
@@ -227,22 +229,22 @@ export default function TeamPage() {
           <Card className="p-4">
             <form onSubmit={(e) => { e.preventDefault(); rename.mutate(); }} className="flex flex-wrap gap-2">
               <label className="min-w-[14rem] flex-1">
-                <span className="sr-only">Workspace name</span>
+                <span className="sr-only">{t("workspace_name")}</span>
                 <input value={name} onChange={(e) => setName(e.target.value)} className={inputCls} maxLength={80} required autoFocus />
               </label>
               <button type="submit" className={btnPrimary} disabled={rename.isPending}>
-                Save
+                {t("save")}
               </button>
               <button type="button" className={btnSecondary} onClick={() => setRenaming(false)}>
-                Cancel
+                {t("cancel")}
               </button>
             </form>
             {rename.error && <div className="mt-2"><ErrorBox message={(rename.error as Error).message} /></div>}
           </Card>
         )}
 
-        <Section title={w?.name ?? "Workspace"} aside={w ? `${w.member_count} ${w.member_count === 1 ? "member" : "members"} · you are ${w.role}` : undefined}>
-          {!isAdmin && <p className="text-[13px] text-muted">Only admins see the member list, invites and the audit log. Ask an admin if you need more access.</p>}
+        <Section title={w?.name ?? t("l_workspace")} aside={w ? t("tm_members", { n: w.member_count, m: w.member_count === 1 ? t("tm_member") : t("tm_members_w"), role: w.role }) : undefined}>
+          {!isAdmin && <p className="text-[13px] text-muted">{t("only_admins_see_the_member_list_invite")}</p>}
           {isAdmin && w?.members && (
             <ul className="-mx-5 divide-y divide-line">
               {w.members.map((m) => (
@@ -253,19 +255,19 @@ export default function TeamPage() {
         </Section>
 
         {isAdmin && (
-          <Section title="Invite people" aside="registration is by invitation">
+          <Section title={t("invite_people")} aside={t("registration_is_by_invitation")}>
             <InviteForm myRole={myRole} onCreated={refresh} />
             {w?.invites && w.invites.length > 0 && (
               <div className="mt-5">
-                <h3 className="mb-1.5 text-[11px] font-semibold uppercase tracking-wider text-subtle">Pending invites</h3>
+                <h3 className="mb-1.5 text-[11px] font-semibold uppercase tracking-wider text-subtle">{t("pending_invites")}</h3>
                 <ul className="divide-y divide-line">
                   {w.invites.map((i) => (
                     <li key={i.id} className="flex items-center gap-3 py-2 text-[13px]">
                       <span className="min-w-0 flex-1 truncate text-text">{i.email}</span>
                       <span className="text-xs text-muted">{i.role}</span>
-                      <span className="text-xs text-subtle">expires {timeAgo(iso(i.expires_at))}</span>
+                      <span className="text-xs text-subtle">{t("expires")} {timeAgo(iso(i.expires_at))}</span>
                       <button type="button" onClick={() => revoke.mutate(i.id)} className="rounded-md px-2 py-1 text-xs text-muted hover:bg-surface-2 hover:text-bad">
-                        Revoke
+                        {t("revoke")}
                       </button>
                     </li>
                   ))}
@@ -275,7 +277,7 @@ export default function TeamPage() {
           </Section>
         )}
 
-        <Section title="Roles">
+        <Section title={t("roles")}>
           <dl className="grid gap-x-6 gap-y-2.5 text-[13px] sm:grid-cols-[7rem_1fr]">
             {ROLES.map((r) => (
               <div key={r.id} className="contents">
@@ -287,7 +289,7 @@ export default function TeamPage() {
         </Section>
 
         {isAdmin && (
-          <Section title="Audit log" aside="latest 100 events">
+          <Section title={t("audit_log")} aside={t("latest_100_events")}>
             {audit.error && <ErrorBox message={(audit.error as Error).message} />}
             <ul className="-mx-5 divide-y divide-line">
               {(audit.data ?? []).map((a, i) => (
@@ -298,7 +300,7 @@ export default function TeamPage() {
                   {a.detail && <span className="min-w-0 truncate font-mono text-xs text-subtle">{a.detail}</span>}
                 </li>
               ))}
-              {audit.data?.length === 0 && <li className="px-5 py-4 text-sm text-subtle">No events yet.</li>}
+              {audit.data?.length === 0 && <li className="px-5 py-4 text-sm text-subtle">{t("no_events_yet")}</li>}
             </ul>
           </Section>
         )}

@@ -1,14 +1,27 @@
 <!doctype html>
-<html lang="pt-BR">
+<html lang="en">
   <head>
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
     <link rel="icon" type="image/svg+xml" href="/favicon.svg" />
     <title>Vitrix</title>
-    <script type="module" crossorigin src="/assets/index-QiLKx360.js"></script>
-    <link rel="stylesheet" crossorigin href="/assets/index-DeFWy4uM.css">
+    <script>
+      // Apply the saved theme before first paint (no flash). "?theme=dark|light|system" overrides it for this page view (screenshots).
+      (function () {
+        var t = "light";
+        try {
+          var q = new URLSearchParams(location.search).get("theme");
+          t = q || localStorage.getItem("vitrix.theme") || "light";
+        } catch (e) {}
+        var dark = t === "dark" || (t === "system" && window.matchMedia && matchMedia("(prefers-color-scheme: dark)").matches);
+        document.documentElement.dataset.theme = dark ? "dark" : "light";
+        document.documentElement.style.colorScheme = dark ? "dark" : "light";
+      })();
+    </script>
+    <script type="module" crossorigin src="/assets/index-CSRaBdpj.js"></script>
+    <link rel="stylesheet" crossorigin href="/assets/index-BpFYJwLN.css">
   </head>
   <body>
-    <div id="root"></div>
+    <div id="root"></div>
   </body>
 </html>

@@ -86,24 +86,45 @@ def test_registration_is_closed_after_the_first_account(tmp_path):
     assert "vitrix_session" not in other.cookies
 
 
-def test_open_signup_gives_the_configured_role(tmp_path):
-    c = make_client(tmp_path, "auth:\n  enabled: true\n  allow_signup: true\n  signup_role: editor\n")
+def test_second_registration_needs_an_invite(tmp_path):
+    c = make_client(tmp_path)
+    assert c.get("/api/auth/config").json()["registration"] == "owner-bootstrap"
     register(c)
-    other = second_client(tmp_path, c)
-    assert register(other, "new@example.com", "New Person").json()["user"]["role"] == "editor"
+    assert c.get("/api/auth/config").json()["registration"] == "invite-only"
+    assert register(second_client(tmp_path, c), "no-invite@example.com", "No Invite").status_code == 403
+    token = invite_token(c, "new@example.com", "viewer")
+    assert register(second_client(tmp_path, c), "new@example.com", "New Person", invite=token).json()["user"]["role"] == "viewer"
 
 
-def test_duplicate_and_invalid_registrations(tmp_path):
-    c = make_client(tmp_path, "auth:\n  enabled: true\n  allow_signup: true\n")
+def test_local_registration_with_an_invited_email_but_no_token_is_refused(tmp_path):
+    c = make_client(tmp_path)
     register(c)
-    other = second_client(tmp_path, c)
-    assert register(other, "OWNER@example.com", "Dup").status_code == 409  # emails are case-insensitive
-    assert register(other, "not-an-email", "X").status_code == 422
-    assert register(other, "ok@example.com", "X", password="short").status_code == 422
-    assert register(other, "ok2@example.com", "  ").status_code == 422
+    invite_token(c, "bob@example.com", "admin")
+    thief = second_client(tmp_path, c)
+    assert register(thief, "bob@example.com", "Thief").status_code == 403
+    assert "vitrix_session" not in thief.cookies
 
 
-@pytest.mark.parametrize("bad", ["auth: 1\n", "auth:\n  nope: true\n", "auth:\n  enabled: maybe\n", "auth:\n  session_days: 0\n", "auth:\n  signup_role: admin\n"])
+def test_retired_signup_keys_are_ignored_not_fatal(tmp_path):
+    with pytest.warns(UserWarning, match="allow_signup"):
+        c = make_client(tmp_path, "auth:\n  enabled: true\n  allow_signup: true\n  signup_role: editor\n")
+    register(c)
+    assert register(second_client(tmp_path, c), "new@example.com", "New Person").status_code == 403  # still closed
+
+
+def test_invalid_registrations_and_duplicate_emails(tmp_path):
+    c = make_client(tmp_path)
+    assert register(c, "not-an-email", "X").status_code == 422
+    assert register(c, "ok@example.com", "X", password="short").status_code == 422
+    assert register(c, "ok2@example.com", "  ").status_code == 422
+    assert c.get("/api/auth/config").json()["bootstrap"] is True  # nothing was created
+    register(c)
+    token = invite_token(c, "ana@example.com")
+    assert register(second_client(tmp_path, c), "ana@example.com", "Ana", invite=token).status_code == 201
+    assert c.post("/api/workspace/invites", json={"email": "OWNER@example.com", "role": "viewer"}).status_code == 409  # emails are case-insensitive
+
+
+@pytest.mark.parametrize("bad", ["auth: 1\n", "auth:\n  nope: true\n", "auth:\n  enabled: maybe\n", "auth:\n  session_days: 0\n"])
 def test_invalid_auth_config(tmp_path, bad):
     with pytest.raises(ConfigError):
         load_config(make_project(tmp_path, extra_cfg=bad))
@@ -235,15 +256,36 @@ def test_role_matrix(tmp_path):
     body = {"rule": RULE_OK, "cases": CASES_OK}
     # reading: everyone; computing/publishing rules: editor+; config, members, audit: admin+
     assert viewer.get("/api/rules").status_code == editor.get("/api/rules").status_code == 200
-    assert viewer.post("/api/validate", json=body).status_code == 403
+    # pure-compute POSTs are open to viewers; anything that writes needs editor+
+    assert viewer.post("/api/validate", json=body).status_code == 200
     assert editor.post("/api/validate", json=body).status_code == 200
-    assert viewer.post("/api/regex", json={"pattern": "a"}).status_code == 403
+    assert viewer.post("/api/regex", json={"pattern": "a", "samples": ["a"]}).status_code == 200
+    assert viewer.post("/api/replay", json={"events": "[]"}).status_code != 403
+    assert viewer.post("/api/config/validate", json={"text": "targets: [splunk]"}).status_code == 200
+    assert viewer.post("/api/ci/rules", json={"path": "x.yml", "rule": RULE_OK}).status_code == 403
+    assert viewer.post("/api/pull-requests", json={"branch": "b", "commit": "c", "title": "t"}).status_code == 403
+    assert viewer.post("/api/ci/config", json={"text": "targets: [splunk]"}).status_code == 403
     assert editor.post("/api/ci/config", json={"text": "targets: [splunk]"}).status_code == 403
     assert admin.post("/api/ci/config", json={"text": "targets: [splunk]"}).status_code != 403
     for who, expected in ((viewer, 403), (editor, 403), (admin, 200), (owner, 200)):
         assert who.get("/api/workspace/audit").status_code == expected
     assert "members" not in viewer.get("/api/workspace").json() and "members" in admin.get("/api/workspace").json()
     assert editor.post("/api/workspace/invites", json={"email": "x@example.com", "role": "viewer"}).status_code == 403
+
+
+@pytest.mark.parametrize("path", ["/api/regex", "/api/validate", "/api/impact", "/api/replay", "/api/replay/draft", "/api/config/validate"])
+def test_compute_posts_are_viewer_level(path):
+    assert auth_api.required_role("POST", path) == "viewer"
+
+
+@pytest.mark.parametrize("path", ["/api/ci/rules", "/api/pull-requests", "/api/drafts"])
+def test_publishing_posts_are_editor_level(path):
+    assert auth_api.required_role("POST", path) == "editor"
+
+
+def test_draft_routes_are_classified():
+    assert auth_api.required_role("GET", "/api/drafts") == auth_api.required_role("GET", "/api/drafts/abc") == "viewer"
+    assert auth_api.required_role("PUT", "/api/drafts/abc") == auth_api.required_role("DELETE", "/api/drafts/abc") == "editor"
 
 
 def test_unclassified_writes_default_to_admin():
@@ -266,16 +308,29 @@ def test_owner_rules_and_the_last_owner(tmp_path):
     assert owner.patch(f"/api/workspace/members/{members['owner@example.com']}", json={"role": "editor"}).status_code == 200  # a second owner exists now
 
 
-def test_changing_a_role_or_removing_a_member_ends_their_sessions(tmp_path):
+def test_role_change_keeps_the_session_and_applies_at_once(tmp_path):
+    owner = make_client(tmp_path)
+    register(owner)
+    editor = join(owner, tmp_path, "editor@example.com", "editor")
+    token = editor.cookies.get("vitrix_session")
+    uid = next(m["id"] for m in owner.get("/api/workspace").json()["members"] if m["email"] == "editor@example.com")
+    assert editor.post("/api/ci/rules", json={"path": "x.yml", "rule": RULE_OK}).status_code != 403
+    assert owner.patch(f"/api/workspace/members/{uid}", json={"role": "viewer"}).status_code == 200  # downgrade
+    assert editor.cookies.get("vitrix_session") == token and editor.get("/api/rules").status_code == 200  # no logout
+    assert editor.get("/api/auth/me").json()["user"]["role"] == "viewer"
+    assert editor.post("/api/ci/rules", json={"path": "x.yml", "rule": RULE_OK}).status_code == 403  # lost editor writes
+    assert editor.post("/api/regex", json={"pattern": "a", "samples": ["a"]}).status_code == 200  # still computes
+    assert owner.patch(f"/api/workspace/members/{uid}", json={"role": "admin"}).status_code == 200  # upgrade
+    assert editor.get("/api/auth/me").json()["user"]["role"] == "admin" and editor.get("/api/workspace/audit").status_code == 200
+
+
+def test_removing_a_member_ends_their_sessions(tmp_path):
     owner = make_client(tmp_path)
     register(owner)
     editor = join(owner, tmp_path, "editor@example.com", "editor")
     uid = next(m["id"] for m in owner.get("/api/workspace").json()["members"] if m["email"] == "editor@example.com")
-    owner.patch(f"/api/workspace/members/{uid}", json={"role": "viewer"})
-    assert editor.get("/api/rules").status_code == 401
-    login(editor, "editor@example.com")
-    assert editor.post("/api/validate", json={"rule": RULE_OK}).status_code == 403
     assert owner.delete(f"/api/workspace/members/{uid}").status_code == 200
+    assert editor.get("/api/rules").status_code == 401
     assert login(editor, "editor@example.com").status_code == 401
 
 
@@ -398,8 +453,11 @@ def test_github_sign_up_follows_the_invite_policy(tmp_path, monkeypatch):
     github_flow(owner)  # first account: owner
     monkeypatch.setattr(auth_api, "github_oauth_from_env", lambda: fake_github(user_id=2, login="newbie", emails=[{"email": "newbie@example.com", "primary": True, "verified": True}]))
     newbie = TestClient(create_app(str(tmp_path / "vitrix.yml")), base_url="http://127.0.0.1:8000")
-    assert "invitation" in urllib.parse.unquote_plus(github_flow(newbie).headers["location"])  # closed
+    assert "invitation" in urllib.parse.unquote_plus(github_flow(newbie).headers["location"])  # closed: un-invited email refused
+    assert newbie.get("/api/auth/me").json()["authenticated"] is False
+    assert len(owner.get("/api/workspace").json()["members"]) == 1
     token = invite_token(owner, "newbie@example.com", "editor")
+    assert register(second_client(tmp_path, owner), "newbie@example.com", "Local").status_code == 403  # no token locally
     start = newbie.get(f"/api/auth/github/start?invite={urllib.parse.quote(token)}", follow_redirects=False)
     state = urllib.parse.parse_qs(urllib.parse.urlparse(start.headers["location"]).query)["state"][0]
     assert newbie.get(f"/api/auth/github/callback?code=abc&state={state}", follow_redirects=False).headers["location"] == "/"

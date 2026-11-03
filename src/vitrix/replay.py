@@ -197,3 +197,97 @@ def _describe(spec: dict, n: int) -> str:
     else:
         want = f"between {spec['min']} and {spec['max']}"
     return f"expected {want} event(s), got {n}"
+
+
+# --------------------------------------------------------------------------- draft replay (Editor)
+
+MAX_DRAFT_YAML = 200_000  # characters of rule YAML accepted from the Editor
+MAX_DRAFT_SAMPLE = 50  # matching events returned per dataset
+MAX_DRAFT_DATASETS = 50  # datasets per request
+
+
+def list_dataset_info(cfg: Config) -> list[dict]:
+    """Datasets for the picker: name, size, event count (None if unreadable) and error."""
+    out = []
+    for path in dataset_files(cfg):
+        try:
+            n, error = len(load_events(path.read_text(encoding="utf-8"), path.name)), None
+        except (ReplayError, OSError, UnicodeDecodeError) as exc:
+            n, error = None, str(exc)
+        try:
+            rules, others = load_expectations(path)
+            expect_error = None
+        except ReplayError as exc:
+            rules, others, expect_error = {}, None, str(exc)
+        out.append({"name": dataset_name(cfg, path), "events": n, "size": path.stat().st_size, "error": error,
+                    "has_expectations": bool(rules) or others is not None, "expect_error": expect_error})
+    return out
+
+
+def replay_draft(cfg: Config, rule_text: str, names: list[str] | None = None, path: str | None = None) -> dict:
+    """Run an unsaved rule (YAML text) against datasets. `names` None = all.
+
+    `path` is the rule id used to look the draft up in `<dataset>.expect.yml` (an existing rule
+    being edited); without it a dataset's `others` limit, if any, still applies.
+    Raises ReplayError for bad input (invalid YAML, no detection, unknown dataset, too large).
+    """
+    if len(rule_text) > MAX_DRAFT_YAML:
+        raise ReplayError(f"the rule is larger than {MAX_DRAFT_YAML} characters")
+    try:
+        docs = [d for d in yaml.safe_load_all(rule_text) if d is not None]
+    except yaml.YAMLError as exc:
+        raise ReplayError(f"the rule is not valid YAML: {exc}") from exc
+    if not any(isinstance(d, dict) and "detection" in d for d in docs):
+        raise ReplayError("the rule has no 'detection' section")
+    if names is None:
+        paths = dataset_files(cfg)
+    else:
+        if len(names) > MAX_DRAFT_DATASETS:
+            raise ReplayError(f"at most {MAX_DRAFT_DATASETS} datasets per request")
+        paths = []
+        for n in dict.fromkeys(names):
+            p = resolve_dataset(cfg, n)
+            if p is None or p.name.endswith(EXPECT_SUFFIX):
+                raise ReplayError(f"unknown dataset: {n!r}")
+            paths.append(p)
+    rid = path or "<editor>"
+    detection_docs = [d for d in docs if isinstance(d, dict) and "detection" in d]
+    started = time.perf_counter()
+    results: list[dict] = []
+    for p in paths:
+        name = dataset_name(cfg, p)
+        item: dict = {"dataset": name, "events": 0, "matches": 0, "duration_ms": 0.0, "expectation": None,
+                      "passed": None, "message": None, "error": None, "sample": [], "truncated": False}
+        try:
+            events = load_events(p.read_text(encoding="utf-8"), p.name)
+            expect_rules, others = load_expectations(p)
+        except (ReplayError, OSError, UnicodeDecodeError) as exc:
+            item.update(error=str(exc), passed=False)
+            results.append(item)
+            continue
+        item["events"] = len(events)
+        t0 = time.perf_counter()
+        try:
+            for i, event in enumerate(events, 1):
+                if any(evaluate(d, event) for d in detection_docs):
+                    item["matches"] += 1
+                    if len(item["sample"]) < MAX_DRAFT_SAMPLE:
+                        item["sample"].append({"index": i, "event": event})
+        except UnsupportedError as exc:  # never a silent pass
+            item.update(error=str(exc), passed=False, matches=0, sample=[])
+        except (AttributeError, TypeError, ValueError, KeyError) as exc:  # malformed detection section
+            item.update(error=f"the detection section could not be evaluated ({type(exc).__name__}: {exc})", passed=False, matches=0, sample=[])
+        item["duration_ms"] = round((time.perf_counter() - t0) * 1000, 2)
+        item["truncated"] = item["matches"] > len(item["sample"])
+        if item["error"] is None:
+            spec = expect_rules.get(rid) if path else None
+            if spec is None and others is not None:
+                spec = {"min": 0, "max": others}
+            if spec is not None:
+                ok = item["matches"] >= spec["min"] and (spec["max"] is None or item["matches"] <= spec["max"])
+                item.update(expectation=spec, passed=ok, message=None if ok else _describe(spec, item["matches"]))
+        results.append(item)
+    return {"rule": rid, "duration_ms": round((time.perf_counter() - started) * 1000, 2), "datasets": results,
+            "passed": (all(r["passed"] is not False for r in results) if results else None),
+            "message": None if results else "no datasets to replay",
+            "errors": sum(r["error"] is not None for r in results)}

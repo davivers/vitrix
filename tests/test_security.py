@@ -92,3 +92,65 @@ def test_repo_e_branch_nao_injetam_caminho():
     client = GitHubClient(GitHubConfig(repo="org/x", base="feat/a b"), transport=lambda m, u, b: calls.append(u) or (200, {}))
     client._call("GET", "/commits/" + __import__("urllib.parse").parse.quote("feat/a b", safe=""))
     assert calls[0] == "https://api.github.com/repos/org/x/commits/feat%2Fa%20b"
+
+
+# --------------------------------------------------------------------------- ReDoS through viewer-reachable compute routes
+
+EVIL_RULE = RULE_OK.replace("Image|endswith: '\\\\tool.exe'", "Image|re: '^(a|aa)+$'").replace("    CommandLine|contains: '--bad'\n", "")
+EVIL_EVENT = {"Image": "a" * 60 + "b"}
+BOUND_SECONDS = 5
+
+
+def _viewer_client(tmp_path):
+    import urllib.parse
+
+    from fastapi.testclient import TestClient
+
+    from vitrix.api import create_app
+
+    owner = TestClient(create_app(make_project(tmp_path, extra_cfg="auth:\n  enabled: true\n")), base_url="http://127.0.0.1:8000")
+    pw = "correct horse battery"
+    owner.post("/api/auth/register", json={"email": "o@example.com", "name": "O", "password": pw})
+    link = owner.post("/api/workspace/invites", json={"email": "v@example.com", "role": "viewer"}).json()["link"]
+    token = urllib.parse.parse_qs(urllib.parse.urlparse(link).query)["invite"][0]
+    viewer = TestClient(owner.app, base_url="http://127.0.0.1:8000")
+    r = viewer.post("/api/auth/register", json={"email": "v@example.com", "name": "V", "password": pw, "invite": token})
+    assert r.status_code == 201 and r.json()["user"]["role"] == "viewer"
+    return viewer
+
+
+def _bounded(viewer, path, body):
+    import time
+
+    start = time.monotonic()
+    resp = viewer.post(path, json=body)
+    elapsed = time.monotonic() - start
+    assert elapsed < BOUND_SECONDS, f"{path} took {elapsed:.1f}s on a catastrophic regex"
+    return resp
+
+
+def test_viewer_replay_with_catastrophic_regex_is_bounded(tmp_path):
+    viewer = _viewer_client(tmp_path)
+    resp = _bounded(viewer, "/api/replay", {"events": json.dumps([EVIL_EVENT]), "rule": EVIL_RULE})
+    assert resp.status_code == 200
+    rule = resp.json()["rules"][0]
+    assert rule["matches"] == 0 and "timed out" in rule["error"]
+
+
+def test_viewer_validate_with_catastrophic_regex_is_bounded(tmp_path):
+    viewer = _viewer_client(tmp_path)
+    cases = "cases:\n  - {name: evil, expect: match, event: {Image: '" + EVIL_EVENT["Image"] + "'}}\n"
+    resp = _bounded(viewer, "/api/validate", {"rule": EVIL_RULE, "cases": cases})
+    assert resp.status_code == 200
+    assert resp.json()["state"] != "pass" and "timed out" in resp.text  # reported as an error, never a pass
+
+
+def test_viewer_replay_draft_with_catastrophic_regex_is_bounded(tmp_path):
+    viewer = _viewer_client(tmp_path)
+    ds = tmp_path / "datasets"
+    ds.mkdir(exist_ok=True)
+    (ds / "evil.jsonl").write_text(json.dumps(EVIL_EVENT) + "\n", encoding="utf-8")
+    resp = _bounded(viewer, "/api/replay/draft", {"rule": EVIL_RULE})
+    assert resp.status_code == 200
+    body = resp.json()
+    assert body["passed"] is False and body["errors"] == 1 and "timed out" in body["datasets"][0]["error"]

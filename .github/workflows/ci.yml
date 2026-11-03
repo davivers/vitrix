@@ -80,3 +80,24 @@ jobs:
           for i in $(seq 1 30); do curl -sf http://127.0.0.1:8123/api/health && break; sleep 1; done
           curl -sf http://127.0.0.1:8123/ | grep -q '<div id="root">'
           curl -sf http://127.0.0.1:8123/api/quality | grep -q '"ready":true'
+
+  # The Docker image: builds from the committed UI, then runs the lifecycle inside the container
+  # exactly as a user with a mounted detections repository would.
+  docker:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - run: docker build -t vitrix:ci .
+      - run: docker run --rm vitrix:ci --help
+      - name: Init and check inside the container
+        run: |
+          mkdir -p "$RUNNER_TEMP/det" && chmod 777 "$RUNNER_TEMP/det"
+          docker run --rm -v "$RUNNER_TEMP/det:/workspace" vitrix:ci init .
+          docker run --rm --entrypoint sh -v "$RUNNER_TEMP/det:/workspace" vitrix:ci -c             "git init -q && git add -A && git -c user.name=ci -c user.email=ci@example.com commit -qm init"
+          docker run --rm -v "$RUNNER_TEMP/det:/workspace" vitrix:ci check --strict --gate
+      - name: The container serves and its healthcheck passes
+        run: |
+          docker run -d --name vx -p 127.0.0.1:8124:8000 -v "$RUNNER_TEMP/det:/workspace" vitrix:ci
+          for i in $(seq 1 30); do curl -sf http://localhost:8124/api/health && break; sleep 1; done
+          curl -sf http://localhost:8124/ | grep -q '<div id="root">'
+          docker exec vx python -c "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8000/api/health', timeout=4)"

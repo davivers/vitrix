@@ -443,8 +443,135 @@ def cmd_init(cfg: Config, args: argparse.Namespace) -> int:
     print(f"\nnext steps (one command per line):\n  {here}vitrix check --strict --gate     # validate the example rules\n"
           "  vitrix serve                      # open the web UI\n"
           "  git init\n  git add -A\n  git commit -m \"Initial detections\"\n"
-          "then push it to YOUR repository and set `github.repo` in vitrix.yml (see README.md).")
+          "  vitrix connect your-org/your-repo # link it to GitHub and its CI (checks every step)")
     return 0
+
+
+def cmd_connect(cfg: Config, args: argparse.Namespace) -> int:
+    """Connect this detections folder to its GitHub repository and CI, checking every step.
+
+    Does only safe local steps itself (`git init`, `git remote add origin`); everything else is
+    printed as the exact command to run. Exit 0 when publishing from the UI will work.
+    """
+    from .github import GitHubClient, GitHubConfig, GitHubError
+    from .github import parse_config as parse_github
+    from .gitremote import detect, git, parse_remote, token
+
+    root = cfg.root
+    wanted = None
+    if args.repo:
+        wanted = parse_remote(args.repo) or args.repo.strip().strip("/")
+        try:
+            parse_github({"repo": wanted})
+        except ValueError:
+            raise UsageError(f"{args.repo!r} is not a GitHub repository: use owner/name or its URL") from None
+
+    steps: list[tuple[bool, str, str]] = []  # (ok, what, how to fix)
+
+    def step(ok: bool, what: str, fix: str = "") -> bool:
+        steps.append((ok, what, fix))
+        return ok
+
+    def report() -> int:
+        print(f"Connecting {root} to GitHub\n")
+        for ok, what, fix in steps:
+            print(f"  {'✓' if ok else '✗'} {what}")
+            if not ok and fix:
+                for line in fix.splitlines():
+                    print(f"      {line}")
+        ready = all(ok for ok, _, _ in steps)
+        if ready:
+            print("\nAll set. Start `vitrix serve`, open a rule and click Publish: CI runs on GitHub first, then the pull request.")
+        else:
+            print("\nFix the first ✗ above and run `vitrix connect` again.")
+        return 0 if ready else 1
+
+    # 1. a git repository
+    if git(root, "rev-parse", "--show-toplevel") is None:
+        if not shutil.which("git"):
+            step(False, "Git is installed", "install Git: https://git-scm.com/downloads")
+            return report()
+        if wanted:
+            git(root, "init", "-b", "main")
+        if not step(git(root, "rev-parse", "--show-toplevel") is not None, "This folder is a git repository",
+                    "vitrix connect your-org/your-repo   (or: git init)"):
+            return report()
+    else:
+        step(True, "This folder is a git repository")
+
+    # 2. the GitHub remote
+    url = git(root, "remote", "get-url", "origin")
+    current = parse_remote(url) if url else None
+    if url is None and wanted:
+        git(root, "remote", "add", "origin", f"https://github.com/{wanted}.git")
+        url, current = f"https://github.com/{wanted}.git", wanted
+    if wanted and current and current.lower() != wanted.lower():
+        step(False, f"Remote origin points to {wanted}",
+             f"origin is {url}. To change it:\ngit remote set-url origin https://github.com/{wanted}.git")
+        return report()
+    if not step(current is not None, f"Remote origin is on GitHub{f' ({current})' if current else ''}",
+                "create an empty repository on https://github.com/new, then:\nvitrix connect your-org/your-repo"
+                if url is None else f"origin is {url}, which is not github.com"):
+        return report()
+
+    # 3. the settings Vitrix will use
+    from .gitremote import _cache
+
+    _cache.clear()
+    gh: GitHubConfig | None = cfg.github if cfg.github_source == "vitrix.yml" else detect(root)
+    if gh is None:
+        step(False, "GitHub settings", "remove `github: false` from vitrix.yml")
+        return report()
+    origin = "vitrix.yml" if cfg.github_source == "vitrix.yml" else "detected from git, nothing to edit"
+    step(True, f"Repository {gh.repo}, base branch {gh.base}{f', folder {gh.path}' if gh.path else ''} ({origin})")
+
+    # 4. a token
+    tok, source = token()
+    gh_cli = shutil.which("gh")
+    if not step(tok is not None, f"GitHub token{f' (from {source})' if source else ''}",
+                "easiest: install the GitHub CLI (https://cli.github.com) and run:\ngh auth login" if not gh_cli else "gh auth login"):
+        return report()
+
+    # 5-7. what GitHub says
+    client = GitHubClient(gh, token=tok)
+    try:
+        status, repo = client.probe()
+        if status == 404:
+            step(False, f"Repository {gh.repo} exists and the token can see it",
+                 f"create it (empty) on https://github.com/new, or:\ngh repo create {gh.repo} --private")
+            return report()
+        if status == 401:
+            step(False, "Token is valid", "gh auth login   (or create a new VITRIX_GITHUB_TOKEN)")
+            return report()
+        perms = repo.get("permissions", {}) if isinstance(repo, dict) else {}
+        if not step(status == 200 and perms.get("push", True), f"Token can push to {gh.repo}",
+                    "the token needs Contents and Pull requests (read/write) and Actions (read) on this repository"):
+            return report()
+
+        status, _ = client.probe(f"/branches/{gh.base}")
+        if not step(status == 200, f"Branch {gh.base} is on GitHub",
+                    f"git add -A\ngit commit -m \"Initial detections\"\ngit push -u origin {gh.base}"):
+            return report()
+
+        wf_file = ".github/workflows/vitrix.yml"
+        status, _ = client.probe(f"/contents/{wf_file}?ref={gh.base}")
+        if not step(status == 200, f"CI workflow {wf_file} is on GitHub",
+                    'commit and push the workflow `vitrix init` created:\ngit add .github\ngit commit -m "Add Vitrix CI"\ngit push'
+                    if (Path(git(root, "rev-parse", "--show-toplevel") or root) / wf_file).is_file()
+                    else "run `vitrix init` in the repository root to get it, then commit and push it"):
+            return report()
+
+        status, runs = client.probe("/actions/workflows/vitrix.yml/runs?per_page=1")
+        last = (runs.get("workflow_runs") or [None])[0] if status == 200 and isinstance(runs, dict) else None
+        if last is None:
+            step(True, "CI has not run yet (it runs on the next push)")
+        else:
+            verdict = last.get("conclusion") or last.get("status")
+            step(verdict in ("success", "in_progress", "queued"), f"Last CI run: {verdict}",
+                 f"open {last.get('html_url', '')} to see why it failed")
+    except GitHubError as exc:
+        step(False, "GitHub is reachable", str(exc))
+    return report()
 
 
 def cmd_targets(cfg: Config, args: argparse.Namespace) -> int:
@@ -471,6 +598,10 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("directory", nargs="?", default=".", help="where to create it (default: the current folder)")
     p.add_argument("--force", action="store_true", help="overwrite files that already exist")
     p.set_defaults(func=cmd_init)
+
+    p = sub.add_parser("connect", help="connect this folder to its GitHub repository and CI (checks every step)")
+    p.add_argument("repo", nargs="?", help="owner/name or URL of the GitHub repository (default: git remote origin)")
+    p.set_defaults(func=cmd_connect)
 
     p = sub.add_parser("lint", help="validate schema, condition and metadata")
     paths(p)

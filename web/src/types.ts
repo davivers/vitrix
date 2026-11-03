@@ -154,11 +154,13 @@ export type Activity =
     };
 
 export interface GitHubStatus {
-  configured: boolean; // github section in vitrix.yml
+  configured: boolean; // github section in vitrix.yml, or detected from `git remote origin`
+  source: "vitrix.yml" | "git remote" | null;
   repo: string | null;
   base: string | null;
   workflow: string | null;
-  token: boolean; // a token exists in the environment of `vitrix serve` (its value never leaves the server)
+  token: boolean; // a token exists for `vitrix serve` (its value never leaves the server)
+  token_source: string | null; // VITRIX_GITHUB_TOKEN, GITHUB_TOKEN or "gh CLI"
 }
 
 /** Step 1: the change was pushed to a branch so the real CI validates it. */
@@ -433,7 +435,7 @@ export interface AuthConfig {
   enabled: boolean;
   workspace?: string;
   bootstrap?: boolean; // no account yet: the first one becomes the owner
-  allow_signup?: boolean;
+  registration?: "owner-bootstrap" | "invite-only"; // who may create an account without an invite
   github?: boolean; // GitHub sign-in is configured on the server
 }
 
@@ -494,4 +496,67 @@ export interface AuditEntry {
   actor: string;
   action: string;
   detail: string;
+}
+
+/** G1: dataset picker entry for the Editor Replay panel. */
+export interface ReplayDatasetInfo {
+  name: string;
+  events: number | null;
+  size: number;
+  error: string | null;
+  has_expectations: boolean;
+  expect_error: string | null;
+}
+
+export interface DraftReplayDataset {
+  dataset: string;
+  events: number;
+  matches: number;
+  duration_ms: number;
+  expectation: { min: number; max: number | null } | null;
+  passed: boolean | null;
+  message: string | null;
+  error: string | null;
+  truncated: boolean;
+  sample: { index: number; event: Record<string, unknown> }[];
+}
+
+export interface DraftReplay {
+  rule: string;
+  duration_ms: number;
+  passed: boolean;
+  errors: number;
+  datasets: DraftReplayDataset[];
+}
+
+/** G4: local drafts (`/api/drafts`). */
+export interface DraftSummary {
+  id: string;
+  path: string | null;
+  title: string;
+  author: { id: number; email: string; name: string } | null;
+  created_at: string;
+  updated_at: string;
+  version: number;
+  stale: boolean;
+  mine: boolean;
+}
+
+export interface Draft extends DraftSummary {
+  rule: string;
+  cases: string | null;
+  base_hash: string | null;
+}
+
+export interface DraftList {
+  enabled: boolean;
+  reason: string | null;
+  drafts: DraftSummary[];
+}
+
+export interface DraftBody {
+  path: string | null;
+  title: string | null;
+  rule: string;
+  cases: string | null;
 }

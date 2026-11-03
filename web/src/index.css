@@ -2,68 +2,155 @@
 @import "@fontsource-variable/inter";
 @import "@fontsource-variable/jetbrains-mono";
 
-/* Tema escuro "vidro". Fonte da verdade visual: o canvas de design (ver CLAUDE.md). */
-@theme {
+/*
+ * Enterprise neutral theme: light by default, graphite dark. Opaque surfaces, 1px borders, one blue accent.
+ * Spec: .claude/design/colors.md. The active theme is data-theme="light|dark" on <html> (see theme.ts).
+ */
+@theme static {
   --font-sans: "Inter Variable", system-ui, sans-serif;
   --font-mono: "JetBrains Mono Variable", ui-monospace, monospace;
 
-  /* fundo e superfícies de vidro (translúcidas sobre o fundo) */
-  --color-bg: #070b16;
-  --color-ink: #0b1020; /* fundo do símbolo da marca */
-  --color-code: #050812; /* blocos de consulta */
-  --color-surface: rgb(255 255 255 / 0.04);
-  --color-surface-2: rgb(255 255 255 / 0.07);
-  --color-surface-3: rgb(255 255 255 / 0.1);
-  --color-line: rgb(255 255 255 / 0.09);
+  /* canvas and surfaces */
+  --color-bg: #f8fafc;
+  --color-ink: #0f172a; /* logo tile */
+  --color-code: #f1f5f9; /* query blocks */
+  --color-surface: #ffffff;
+  --color-surface-2: #f1f5f9;
+  --color-surface-3: #e2e8f0;
+  --color-line: #d5dbe5;
 
-  /* texto */
+  /* text */
+  --color-strong: #0f172a;
+  --color-text: #1e293b;
+  --color-muted: #475569;
+  --color-subtle: #5b6678;
+  --color-code-text: #1e293b;
+
+  /* one accent: actions, focus, links, selected tabs */
+  --color-brand: #2563eb; /* primary button */
+  --color-on-brand: #ffffff;
+  --color-accent: #1d4ed8;
+  --color-accent-soft: #e3ecfd;
+  --color-glow: #1d4ed8; /* = accent (no glow); editor cursor */
+
+  /* status: reserved, never a series colour, always with icon + text */
+  --color-good: #166534;
+  --color-good-soft: #dcfce7;
+  --color-warn: #92400e;
+  --color-warn-soft: #fef3c7;
+  --color-bad: #b91c1c;
+  --color-bad-soft: #fee2e2;
+  --color-info: #1d4ed8;
+  --color-info-soft: #dbeafe;
+
+  /* coverage heat ramp */
+  --color-heat-0: #ffffff;
+  --color-heat-1: #dbeafe;
+  --color-heat-2: #93c5fd;
+  --color-heat-3: #3b82f6;
+  --color-heat-4: #1d4ed8;
+  --color-heat-text: #0f172a; /* text on steps 0-3 */
+  --color-heat-text-4: #ffffff; /* text on step 4 */
+
+  /* SIEM outputs: markers beside a label */
+  --color-siem-splunk: #1d5fc4;
+  --color-siem-microsoft: #b4531a;
+  --color-siem-elastic: #0e7a5c;
+}
+
+/* Non-utility variables (charts read them via getComputedStyle). */
+:root {
+  --series-1: #2563eb;
+  --series-2: #c2570c;
+  --series-3: #0b7a6b;
+  --series-4: #9d2a7e;
+  --series-5: #6b5b00;
+  --series-other: #7c8798;
+  --shadow-card: 0 1px 2px rgb(15 23 42 / 0.06);
+  --shadow-pop: 0 8px 24px -8px rgb(15 23 42 / 0.18);
+  color-scheme: light;
+}
+
+:root[data-theme="dark"] {
+  --color-bg: #0f1115;
+  --color-ink: #0b0d11;
+  --color-code: #0b0d11;
+  --color-surface: #171a20;
+  --color-surface-2: #1e222a;
+  --color-surface-3: #272c36;
+  --color-line: #2e343f;
   --color-strong: #ffffff;
-  --color-text: #e8ecf5;
-  --color-muted: #a3adc4;
-  --color-subtle: #8791ab;
-  --color-code-text: #dce3f5;
-
-  /* marca: violeta e ciano só na marca e em foco/seleção */
-  --color-brand: #6d5bf0; /* fundo de botão principal */
-  --color-accent: #8b7cf6; /* texto, borda de aba, foco */
-  --color-accent-soft: rgb(139 124 246 / 0.14);
-  --color-glow: #22d3ee;
-
-  /* status: reservados, nunca usados como cor de série */
-  --color-good: #34d399;
-  --color-good-soft: rgb(52 211 153 / 0.13);
+  --color-text: #e6e9ef;
+  --color-muted: #a4acba;
+  --color-subtle: #8a93a3;
+  --color-code-text: #e6e9ef;
+  --color-brand: #2563eb;
+  --color-accent: #60a5fa;
+  --color-accent-soft: #16264a;
+  --color-glow: #60a5fa;
+  --color-good: #4ade80;
+  --color-good-soft: #12281b;
   --color-warn: #fbbf24;
-  --color-warn-soft: rgb(251 191 36 / 0.13);
+  --color-warn-soft: #2e2410;
   --color-bad: #f87171;
-  --color-bad-soft: rgb(248 113 113 / 0.14);
-
-  /* saídas por SIEM: sempre acompanhadas de rótulo */
+  --color-bad-soft: #331618;
+  --color-info: #60a5fa;
+  --color-info-soft: #14233d;
+  --color-heat-0: #171a20;
+  --color-heat-1: #1e3a5f;
+  --color-heat-2: #1d4f91;
+  --color-heat-3: #2f6fd6;
+  --color-heat-4: #7db4fa;
+  --color-heat-text: #ffffff;
+  --color-heat-text-4: #0f1115;
   --color-siem-splunk: #5aa9ff;
   --color-siem-microsoft: #f59a6b;
   --color-siem-elastic: #34d3a3;
-}
-
-html {
+  --series-1: #60a5fa;
+  --series-2: #fb923c;
+  --series-3: #2dd4bf;
+  --series-4: #f472b6;
+  --series-5: #facc15;
+  --series-other: #64748b;
+  --shadow-card: none;
+  --shadow-pop: 0 8px 24px -8px rgb(0 0 0 / 0.6);
   color-scheme: dark;
 }
+
 html, body, #root { height: 100%; }
 body {
-  background:
-    radial-gradient(900px 500px at 12% -5%, rgb(109 91 240 / 0.2), transparent 60%),
-    radial-gradient(800px 480px at 100% 100%, rgb(34 211 238 / 0.1), transparent 60%),
-    var(--color-bg);
-  background-attachment: fixed;
+  background: var(--color-bg);
   color: var(--color-text);
   font-family: var(--font-sans);
+  font-size: 14px;
+  line-height: 1.5;
   -webkit-font-smoothing: antialiased;
 }
 :focus-visible { outline: 2px solid var(--color-accent); outline-offset: 2px; }
-::selection { background: rgb(139 124 246 / 0.35); }
+::selection { background: var(--color-accent-soft); }
 
-/* cartão de vidro */
+/* Code and mono text: no ligatures (JetBrains Mono renders "/=" as a not-equal glyph, which misleads in regexes). */
+code, pre, kbd, samp, .font-mono, .cm-editor, .cm-content {
+  font-variant-ligatures: none;
+  font-feature-settings: "liga" 0, "calt" 0;
+}
+
+/* Solid card (name kept for existing markup) */
 @utility glass {
   background: var(--color-surface);
   border: 1px solid var(--color-line);
-  box-shadow: inset 0 1px 0 rgb(255 255 255 / 0.04), 0 12px 32px -16px rgb(0 0 0 / 0.6);
-  backdrop-filter: blur(12px);
+  box-shadow: var(--shadow-card);
+}
+
+/* Popover/menu elevation */
+@utility shadow-pop {
+  box-shadow: var(--shadow-pop);
+}
+
+/* Tab strips: no native scroll widgets */
+@utility no-scrollbar {
+  scrollbar-width: none;
+  &::-webkit-scrollbar {
+    display: none;
+  }
 }

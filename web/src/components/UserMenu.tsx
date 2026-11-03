@@ -4,10 +4,13 @@ import { ChevronsUpDown, KeyRound, Loader2, LogOut, Plug, Settings, ShieldCheck,
 import { useEffect, useRef, useState, type FormEvent, type ReactNode } from "react";
 import { Link } from "react-router-dom";
 import { api } from "../api";
+import { LanguageControl, ThemeControl } from "./ThemeControl";
 import { useMe } from "./auth";
 import { ErrorBox, btnPrimary, btnSecondary, inputCls } from "./ui";
+import { t } from "../i18n";
 
-const PALETTE = ["#7C6DF0", "#1FA2BD", "#D2693A", "#C84B92", "#3E86E0"];
+// Avatar backgrounds: fixed (theme-independent) with white initials, each >= 4.5:1 against white.
+const PALETTE = ["#2563EB", "#C2570C", "#0B7A6B", "#9D2A7E", "#6B5B00"];
 
 function initials(label: string): string {
   const parts = label.replace(/@.*/, "").split(/[\s._-]+/).filter(Boolean);
@@ -24,7 +27,7 @@ export function Avatar({ name, email, url, size = 32 }: { name: string; email: s
   return (
     <span
       aria-hidden
-      className="grid shrink-0 place-items-center rounded-full font-bold text-white"
+      className="grid shrink-0 place-items-center rounded-full font-bold text-on-brand"
       style={{ width: size, height: size, background: PALETTE[seed % PALETTE.length], fontSize: size * 0.38 }}
     >
       {initials(name || email)}
@@ -32,7 +35,7 @@ export function Avatar({ name, email, url, size = 32 }: { name: string; email: s
   );
 }
 
-const ROLE_LABEL = { viewer: "Viewer", editor: "Editor", admin: "Admin", owner: "Owner" } as const;
+const ROLE_LABEL = { viewer: t("l_viewer"), editor: t("l_editor"), admin: t("l_admin"), owner: t("l_owner") } as const;
 
 function PasswordDialog({ onClose }: { onClose: () => void }) {
   const ref = useRef<HTMLDialogElement>(null);
@@ -48,39 +51,39 @@ function PasswordDialog({ onClose }: { onClose: () => void }) {
     change.mutate();
   };
   return (
-    <dialog ref={ref} onClose={onClose} aria-labelledby="pw-title" className="glass m-auto w-[min(420px,calc(100vw-32px))] rounded-2xl bg-ink/95 p-0 text-text backdrop:bg-black/60 backdrop:backdrop-blur-sm">
+    <dialog ref={ref} onClose={onClose} aria-labelledby="pw-title" className="glass m-auto w-[min(420px,calc(100vw-32px))] rounded-2xl bg-surface p-0 text-text backdrop:bg-black/50">
       <form onSubmit={onSubmit} className="space-y-4 p-6">
         <div className="flex items-start justify-between gap-4">
           <h2 id="pw-title" className="text-lg font-semibold text-strong">
-            Change password
+            {t("change_password")}
           </h2>
-          <button type="button" onClick={onClose} aria-label="Close" className="rounded-md p-1 text-muted hover:bg-surface-2 hover:text-text">
+          <button type="button" onClick={onClose} aria-label={t("close")} className="rounded-md p-1 text-muted hover:bg-surface-2 hover:text-text">
             <X size={18} aria-hidden />
           </button>
         </div>
         {change.isSuccess ? (
-          <p className="text-sm text-good">Password changed. Your other sessions were signed out.</p>
+          <p className="text-sm text-good">{t("password_changed_your_other_sessions_w")}</p>
         ) : (
           <>
             <label className="block space-y-1.5">
-              <span className="text-sm font-medium text-strong">Current password</span>
+              <span className="text-sm font-medium text-strong">{t("current_password")}</span>
               <input type="password" value={current} onChange={(e) => setCurrent(e.target.value)} className={inputCls} autoComplete="current-password" required />
             </label>
             <label className="block space-y-1.5">
-              <span className="text-sm font-medium text-strong">New password</span>
+              <span className="text-sm font-medium text-strong">{t("new_password")}</span>
               <input type="password" value={next} onChange={(e) => setNext(e.target.value)} className={inputCls} autoComplete="new-password" minLength={10} required />
-              <span className="block text-xs text-subtle">At least 10 characters.</span>
+              <span className="block text-xs text-subtle">{t("at_least_10_characters")}</span>
             </label>
             {change.error && <ErrorBox message={(change.error as Error).message} />}
           </>
         )}
         <div className="flex justify-end gap-2">
           <button type="button" onClick={onClose} className={btnSecondary}>
-            {change.isSuccess ? "Done" : "Cancel"}
+            {change.isSuccess ? t("l_done") : t("l_cancel")}
           </button>
           {!change.isSuccess && (
             <button type="submit" disabled={change.isPending} className={btnPrimary}>
-              {change.isPending && <Loader2 size={15} className="animate-spin" aria-hidden />} Change password
+              {change.isPending && <Loader2 size={15} className="animate-spin" aria-hidden />} {t("change_password")}
             </button>
           )}
         </div>
@@ -146,21 +149,21 @@ export function UserMenu() {
     onSettled: () => window.location.assign("/"), // a full reload drops everything the previous session loaded
   });
 
-  const name = user?.name || user?.email || "Local mode";
-  const email = user?.email ?? "No sign-in: local single-user session";
-  const sub = user ? `${ROLE_LABEL[user.role]}${me.workspace ? ` · ${me.workspace}` : ""}` : "Auth is off";
+  const name = user?.name || user?.email || t("l_local_mode");
+  const email = user?.email ?? t("l_no_sign_in_local_single_user_sessi");
+  const sub = user ? `${ROLE_LABEL[user.role]}${me.workspace ? ` · ${me.workspace}` : ""}` : t("l_auth_is_off");
   const close = () => setOpen(false);
 
   return (
     <div ref={box} className="relative mt-3 border-t border-line pt-3">
       {open && (
-        <div role="menu" aria-label="Account" className="glass absolute bottom-[calc(100%+4px)] left-0 z-50 w-64 rounded-xl bg-ink/95 p-1.5 shadow-2xl lg:w-full lg:min-w-[15rem]">
+        <div role="menu" aria-label={t("account")} className="glass absolute bottom-[calc(100%+4px)] left-0 z-50 w-64 rounded-xl bg-surface p-1.5 shadow-pop lg:w-full lg:min-w-[15rem]">
           <div className="px-2.5 pb-2 pt-1.5">
             <p className="truncate text-[13px] font-semibold text-strong">{name}</p>
             <p className="truncate text-xs text-subtle">{email}</p>
             {user && (
               <p className="mt-1.5 flex items-center gap-1.5 text-xs text-muted">
-                <ShieldCheck size={13} className="text-accent" aria-hidden /> {ROLE_LABEL[user.role]} of {me.workspace}
+                <ShieldCheck size={13} className="text-accent" aria-hidden /> {t("um_role_of", { role: ROLE_LABEL[user.role], ws: me.workspace ?? "" })}
                 {user.github_login && <span className="text-subtle">· @{user.github_login}</span>}
               </p>
             )}
@@ -168,14 +171,20 @@ export function UserMenu() {
           <div className="my-1 h-px bg-line" />
           {user && (
             <Item icon={Users} to="/team" onClick={close}>
-              Team and access
+              {t("team_and_access")}
             </Item>
           )}
+          <div className="my-1 h-px bg-line" />
+          <p className="px-2.5 pt-1 text-[11px] font-semibold uppercase tracking-wider text-subtle">{t("appearance")}</p>
+          <ThemeControl menu />
+          <p className="px-2.5 pt-1 text-[11px] font-semibold uppercase tracking-wider text-subtle">{t("language_label")}</p>
+          <LanguageControl menu />
+          <div className="my-1 h-px bg-line" />
           <Item icon={Settings} to="/settings" onClick={close}>
-            Settings
+            {t("settings")}
           </Item>
           <Item icon={Plug} to="/connections" onClick={close}>
-            Connections
+            {t("connections")}
           </Item>
           {user && (
             <Item
@@ -192,12 +201,12 @@ export function UserMenu() {
             <>
               <div className="my-1 h-px bg-line" />
               <Item icon={LogOut} danger onClick={() => signOut.mutate()}>
-                {signOut.isPending ? "Signing out…" : "Sign out"}
+                {signOut.isPending ? t("l_signing_out") : t("l_sign_out")}
               </Item>
             </>
           ) : (
             <p className="px-2.5 py-2 text-xs text-subtle">
-              Turn on accounts with <span className="font-mono">auth.enabled</span> in vitrix.yml.
+              {t("turn_on_accounts_with")} <span className="font-mono">auth.enabled</span> {t("in_vitrix_yml")}
             </p>
           )}
         </div>
@@ -208,7 +217,7 @@ export function UserMenu() {
         onClick={() => setOpen(!open)}
         aria-haspopup="menu"
         aria-expanded={open}
-        aria-label={`Account menu: ${name}`}
+        aria-label={t("um_account_menu", { name })}
         className={clsx("flex w-full items-center gap-2.5 rounded-[10px] p-1.5 text-left transition-colors hover:bg-surface", open && "bg-surface")}
       >
         <Avatar name={name} email={user?.email ?? "local"} url={user?.avatar_url} />

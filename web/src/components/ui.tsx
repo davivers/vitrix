@@ -2,11 +2,12 @@ import clsx from "clsx";
 import { AlertTriangle, CheckCircle2, XCircle } from "lucide-react";
 import type { ReactNode } from "react";
 import type { State } from "../types";
+import { t } from "../i18n";
 
 const STATE = {
-  ok: { label: "Valid", cls: "bg-good-soft text-good", Icon: CheckCircle2 },
-  warn: { label: "Warnings", cls: "bg-warn-soft text-warn", Icon: AlertTriangle },
-  fail: { label: "Failing", cls: "bg-bad-soft text-bad", Icon: XCircle },
+  ok: { label: t("l_valid"), cls: "bg-good-soft text-good", Icon: CheckCircle2 },
+  warn: { label: t("l_warnings"), cls: "bg-warn-soft text-warn", Icon: AlertTriangle },
+  fail: { label: t("l_failing"), cls: "bg-bad-soft text-bad", Icon: XCircle },
 } as const;
 
 /** State is always icon + text, never colour alone. */
@@ -20,11 +21,11 @@ export function StateBadge({ state }: { state: State }) {
 }
 
 const LEVEL: Record<string, string> = {
-  critical: "Critical",
-  high: "High",
-  medium: "Medium",
-  low: "Low",
-  informational: "Info",
+  critical: t("l_critical"),
+  high: t("l_high"),
+  medium: t("l_medium"),
+  low: t("l_low"),
+  informational: t("l_info"),
 };
 
 export function LevelTag({ level }: { level: string | null }) {
@@ -53,11 +54,11 @@ export function TargetSwatch({ target }: { target: string }) {
 }
 
 const SOURCE_LABEL: Record<string, string> = {
-  rule: "set in the rule (vitrix.target)",
-  route: "set by a vitrix.yml route",
-  default: "project default (default_target)",
-  all: "no choice: every active target",
-  override: "forced on the command line",
+  rule: t("l_set_in_the_rule_vitrix_target"),
+  route: t("l_set_by_a_vitrix_yml_route"),
+  default: t("l_project_default_default_target"),
+  all: t("l_no_choice_every_active_target"),
+  override: t("l_forced_on_the_command_line"),
 };
 
 /** Final query language of the rule, with the conversion result (icon + text, never colour alone). */
@@ -66,12 +67,12 @@ export function TargetChip({ target, ok, source }: { target: string; ok?: boolea
   const failed = ok === false;
   return (
     <span
-      title={`${target}${source ? ` · ${SOURCE_LABEL[source] ?? source}` : ""}${failed ? " · conversion failed" : ""}`}
+      title={`${target}${source ? ` · ${SOURCE_LABEL[source] ?? source}` : ""}${failed ? " · " + t("conversion_failed") : ""}`}
       className={clsx("inline-flex items-center gap-1.5 rounded-md px-2 py-1 font-mono text-xs font-semibold", failed ? "bg-bad-soft text-bad" : "bg-surface-2 text-text")}
     >
       <TargetSwatch target={target} />
       {code}
-      {ok !== undefined && (failed ? <XCircle size={12} aria-label="conversion failed" /> : <CheckCircle2 size={12} className="text-good" aria-label="conversion ok" />)}
+      {ok !== undefined && (failed ? <XCircle size={12} aria-label={t("conversion_failed")} /> : <CheckCircle2 size={12} className="text-good" aria-label={t("conversion_ok")} />)}
     </span>
   );
 }
@@ -101,8 +102,8 @@ export function ErrorBox({ message }: { message: string }) {
 }
 
 export const btnPrimary =
-  "inline-flex items-center justify-center gap-2 rounded-[10px] bg-brand px-4 py-2 text-[13.5px] font-semibold text-strong shadow-[0_8px_24px_-10px_rgb(109_91_240/0.8)] hover:brightness-110 disabled:cursor-not-allowed disabled:opacity-50 disabled:shadow-none disabled:hover:brightness-100";
+  "inline-flex items-center justify-center gap-2 rounded-[10px] bg-brand px-4 py-2 text-[13.5px] font-semibold text-on-brand hover:brightness-90 disabled:cursor-not-allowed disabled:opacity-55 disabled:hover:brightness-100";
 export const btnSecondary =
-  "inline-flex items-center justify-center gap-2 rounded-[10px] border border-line bg-surface-2 px-3 py-2 text-[13.5px] font-semibold text-text hover:bg-surface-3 disabled:cursor-not-allowed disabled:opacity-50";
+  "inline-flex items-center justify-center gap-2 rounded-[10px] border border-line bg-surface-2 px-3 py-2 text-[13.5px] font-semibold text-text hover:bg-surface-3 disabled:cursor-not-allowed disabled:opacity-55";
 export const inputCls =
   "w-full rounded-[10px] border border-line bg-surface px-3 py-2 text-sm text-text placeholder:text-subtle focus:border-accent/50";

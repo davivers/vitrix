@@ -1,16 +1,21 @@
-import { useQuery } from "@tanstack/react-query";
+import { useQuery, useQueryClient } from "@tanstack/react-query";
 import CodeMirror from "@uiw/react-codemirror";
 import clsx from "clsx";
-import { Check, CheckCircle2, Copy, Download, Loader2, Rocket, ShieldCheck, XCircle } from "lucide-react";
-import { useEffect, useMemo, useState } from "react";
-import { useParams } from "react-router-dom";
-import { api } from "../api";
+import { AlertTriangle, Check, CheckCircle2, Copy, Download, Eye, FolderOpen, Loader2, Rocket, Save, ShieldCheck, XCircle } from "lucide-react";
+import { useCallback, useEffect, useMemo, useState } from "react";
+import { useNavigate, useParams, useSearchParams } from "react-router-dom";
+import { ApiError, api } from "../api";
+import { useIsDark } from "../theme";
+import { can, useMe } from "../components/auth";
 import { yamlExtensions } from "../components/code";
 import { HealthMeter, formatDate, timeAgo } from "../components/dash";
-import { CheckList, FlowStepper, KindTag } from "../components/flow";
+import { DraftsSheet } from "../components/DraftsSheet";
+import { CheckList, FlowStepper, GATE_LABELS, KindTag, fmt } from "../components/flow";
 import { PublishDialog } from "../components/PublishDialog";
+import { ReplayPanel } from "../components/ReplayPanel";
 import { Card, ErrorBox, PageHeader, StateBadge, TargetSwatch, btnPrimary, btnSecondary } from "../components/ui";
-import type { DraftQuality, Impact, Validation } from "../types";
+import type { Draft, DraftQuality, Impact, Validation } from "../types";
+import { locale, t, tn } from "../i18n";
 
 function newRuleTemplate(): string {
   return `title: Rule name
@@ -62,31 +67,41 @@ const CASES_TEMPLATE = `cases:
 
 export default function EditorPage() {
   const id = useParams()["*"] || null;
-  const detail = useQuery({ queryKey: ["rule", id], queryFn: () => api.rule(id!), enabled: id !== null });
+  const draftId = useSearchParams()[0].get("draft");
+  const detail = useQuery({ queryKey: ["rule", id], queryFn: () => api.rule(id!), enabled: id !== null && draftId === null });
+  const draft = useQuery({ queryKey: ["draft", draftId], queryFn: () => api.draft(draftId!), enabled: draftId !== null, staleTime: 0, gcTime: 0 });
 
-  if (id !== null && detail.isLoading) return <div className="p-8 text-muted">Loading rule…</div>;
-  if (id !== null && detail.error) {
+  const failure = (draftId ? draft.error : detail.error) as Error | null;
+  if (draftId ? draft.isLoading : id !== null && detail.isLoading) return <div className="p-8 text-muted">{t("loading")}</div>;
+  if (failure) {
     return (
       <div className="p-8">
-        <ErrorBox message={(detail.error as Error).message} />
+        <ErrorBox message={failure.message} />
       </div>
     );
   }
+  const d = draftId ? (draft.data ?? null) : null;
   return (
     <EditorWorkspace
-      key={id ?? "new"}
-      ruleId={id}
-      file={detail.data?.file ?? null}
-      initialRule={detail.data?.text ?? newRuleTemplate()}
-      initialCases={detail.data ? (detail.data.tests.cases_text ?? "") : CASES_TEMPLATE}
+      key={d ? `draft:${d.id}:${d.version}` : (id ?? "new")}
+      ruleId={d ? d.path : id}
+      file={d ? (d.path ?? d.title) : (detail.data?.file ?? null)}
+      initialRule={d ? d.rule : (detail.data?.text ?? newRuleTemplate())}
+      initialCases={d ? (d.cases ?? "") : detail.data ? (detail.data.tests.cases_text ?? "") : CASES_TEMPLATE}
+      draft={d}
     />
   );
 }
 
-type Panel = "gate" | "queries" | "tests" | "impact" | "history";
+type Panel = "gate" | "replay" | "queries" | "tests" | "impact" | "history";
 
-function EditorWorkspace(props: { ruleId: string | null; file: string | null; initialRule: string; initialCases: string }) {
+function EditorWorkspace(props: { ruleId: string | null; file: string | null; initialRule: string; initialCases: string; draft: Draft | null }) {
   const { ruleId, file, initialRule, initialCases } = props;
+  const me = useMe();
+  const dark = useIsDark();
+  const isEditor = can(me, "editor");
+  const navigate = useNavigate();
+  const qc = useQueryClient();
   const [rule, setRule] = useState(initialRule);
   const [cases, setCases] = useState(initialCases);
   const [tab, setTab] = useState<"rule" | "cases">("rule");
@@ -95,6 +110,19 @@ function EditorWorkspace(props: { ruleId: string | null; file: string | null; in
   const [pending, setPending] = useState(true);
   const [error, setError] = useState<string | null>(null);
   const [publishOpen, setPublishOpen] = useState(false);
+  const [replayBroken, setReplayBroken] = useState<boolean | null>(null);
+  const [draftsOpen, setDraftsOpen] = useState(false);
+  const [offerDelete, setOfferDelete] = useState(false);
+  // Local draft state: id + version of the loaded/saved draft, and what was last saved (for the "unsaved" dot).
+  const [saved, setSaved] = useState<{ id: string; version: number; rule: string; cases: string; at: Date } | null>(
+    // Only the author's own draft keeps its id (PUT); someone else's opens as a copy and Save creates a new draft.
+    props.draft?.mine ? { id: props.draft.id, version: props.draft.version, rule: props.draft.rule, cases: props.draft.cases ?? "", at: new Date(props.draft.updated_at) } : null,
+  );
+  const [saveState, setSaveState] = useState<{ busy: boolean; error: string | null; conflict: boolean }>({ busy: false, error: null, conflict: false });
+  const draftsInfo = useQuery({ queryKey: ["drafts"], queryFn: api.drafts, retry: false, enabled: isEditor });
+  const draftsOn = draftsInfo.data?.enabled === true;
+  const draftsReason = draftsInfo.data && !draftsInfo.data.enabled ? (draftsInfo.data.reason ?? t("l_local_drafts_are_off")) : null;
+  const dirty = saved ? saved.rule !== rule || saved.cases !== cases : rule !== initialRule || cases !== initialCases;
 
   // Validates 500 ms after the last keystroke; cancels the previous call if still in flight.
   useEffect(() => {
@@ -120,9 +148,56 @@ function EditorWorkspace(props: { ruleId: string | null; file: string | null; in
     };
   }, [rule, cases, ruleId]);
 
-  const extensions = useMemo(yamlExtensions, []);
+  const extensions = useMemo(() => yamlExtensions(dark), [dark]);
   const quality = result?.quality;
   const localReady: boolean | null = pending || !result ? null : result.state !== "fail" && Boolean(quality?.ready);
+
+  const saveLocally = useCallback(async () => {
+    if (!isEditor || !draftsOn || saveState.busy) return;
+    setSaveState({ busy: true, error: null, conflict: false });
+    const body = { path: ruleId, title: null, rule, cases: cases.trim() ? cases : null };
+    try {
+      const d = saved ? await api.updateDraft(saved.id, { ...body, version: saved.version }) : await api.createDraft(body);
+      setSaved({ id: d.id, version: d.version, rule, cases, at: new Date() });
+      setSaveState({ busy: false, error: null, conflict: false });
+      void qc.invalidateQueries({ queryKey: ["drafts"] });
+    } catch (e) {
+      const status = e instanceof ApiError ? e.status : 0;
+      setSaveState({ busy: false, error: (e as Error).message, conflict: status === 409 && saved !== null });
+    }
+  }, [isEditor, draftsOn, saveState.busy, ruleId, rule, cases, saved, qc]);
+
+  // Ctrl/Cmd+S saves locally (never publishes).
+  useEffect(() => {
+    const onKey = (e: KeyboardEvent) => {
+      if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === "s") {
+        e.preventDefault();
+        void saveLocally();
+      }
+    };
+    window.addEventListener("keydown", onKey);
+    return () => window.removeEventListener("keydown", onKey);
+  }, [saveLocally]);
+
+  const saveAsNew = () => {
+    setSaved(null);
+    setSaveState({ busy: false, error: null, conflict: false });
+  };
+  const closePublish = () => {
+    setPublishOpen(false);
+    if (saved) setOfferDelete(true);
+  };
+  const deleteLoaded = async () => {
+    if (!saved) return;
+    try {
+      await api.deleteDraft(saved.id);
+      setSaved(null);
+      void qc.invalidateQueries({ queryKey: ["drafts"] });
+    } catch (e) {
+      setSaveState({ busy: false, error: (e as Error).message, conflict: false });
+    }
+    setOfferDelete(false);
+  };
 
   const download = () => {
     const url = URL.createObjectURL(new Blob([rule], { type: "text/yaml" }));
@@ -136,26 +211,128 @@ function EditorWorkspace(props: { ruleId: string | null; file: string | null; in
   return (
     <div className="flex h-full flex-col px-4 py-8 sm:px-8">
       <PageHeader
-        title={file ?? "New rule"}
-        subtitle="Validation, tests and the quality gate run on every change. Nothing is written to disk: a change goes to the repository through CI, then a pull request."
+        title={file ?? t("l_new_rule")}
+        subtitle={t("ed_sub")}
         actions={
           <div className="flex flex-wrap items-center gap-2">
+            {isEditor && (
+              <button
+                type="button"
+                onClick={() => setDraftsOpen(true)}
+                disabled={!draftsOn}
+                aria-describedby={draftsReason ? "drafts-off" : undefined}
+                className={btnSecondary}
+              >
+                <FolderOpen size={16} aria-hidden /> {t("drafts")}{draftsInfo.data ? ` (${draftsInfo.data.drafts.length})` : ""}
+              </button>
+            )}
             <button type="button" onClick={download} className={btnSecondary}>
-              <Download size={16} aria-hidden /> Download .yml
+              <Download size={16} aria-hidden /> {t("download_yml")}
             </button>
-            <button type="button" onClick={() => setPublishOpen(true)} className={btnPrimary}>
-              <Rocket size={16} aria-hidden /> Publish
+            <button
+              type="button"
+              onClick={() => void saveLocally()}
+              aria-disabled={!isEditor || !draftsOn}
+              aria-describedby={!isEditor ? "viewer-save" : draftsReason ? "drafts-off" : undefined}
+              aria-busy={saveState.busy}
+              className={clsx(btnSecondary, (!isEditor || !draftsOn) && "cursor-not-allowed opacity-50")}
+            >
+              {saveState.busy ? <Loader2 size={16} className="animate-spin" aria-hidden /> : <Save size={16} aria-hidden />} {t("ed_save_locally")}
+            </button>
+            <button
+              type="button"
+              onClick={() => isEditor && setPublishOpen(true)}
+              aria-disabled={!isEditor}
+              aria-describedby={!isEditor ? "viewer-publish" : undefined}
+              className={clsx(btnPrimary, !isEditor && "cursor-not-allowed opacity-50 shadow-none hover:brightness-100")}
+            >
+              <Rocket size={16} aria-hidden /> {t("publish")}
             </button>
           </div>
         }
       />
-      {publishOpen && (
+      <div className="-mt-3 mb-4 space-y-1 text-xs" aria-live="polite">
+        {isEditor && draftsOn && (
+          <p className="text-muted">
+            {saved && !dirty ? t("ed_saved_at", { t: saved.at.toLocaleTimeString(locale(), { hour: "2-digit", minute: "2-digit" }) }) : ""}
+            {dirty && (
+              <span className="inline-flex items-center gap-1.5 text-text">
+                <span className="size-2 rounded-full bg-accent" aria-hidden /> {t("unsaved_changes")}
+              </span>
+            )}
+          </p>
+        )}
+        {draftsReason && (
+          <p id="drafts-off" className="text-muted">
+            {t("local_drafts_are_unavailable")} {draftsReason}
+          </p>
+        )}
+        {saveState.error && !saveState.conflict && (
+          <p className="flex items-center gap-1.5 text-bad">
+            <XCircle size={13} aria-hidden /> {saveState.error}
+          </p>
+        )}
+        {saveState.conflict && (
+          <p className="flex flex-wrap items-center gap-2 text-warn">
+            <AlertTriangle size={13} aria-hidden /> {t("someone_saved_a_newer_version")}
+            <button type="button" className="font-semibold text-accent hover:underline" onClick={() => {
+                if (!saved) return;
+                navigate(`/editor?draft=${saved.id}`, { replace: true });
+                void qc.invalidateQueries({ queryKey: ["draft", saved.id] });
+              }}>
+              {t("reload_draft")}
+            </button>
+            <button type="button" className="font-semibold text-accent hover:underline" onClick={saveAsNew}>
+              {t("overwrite_as_new")}
+            </button>
+          </p>
+        )}
+        {offerDelete && saved && (
+          <p className="flex flex-wrap items-center gap-2 text-text">
+            {t("if_you_published_this_draft_delete_the")}
+            <button type="button" className="font-semibold text-accent hover:underline" onClick={() => void deleteLoaded()}>
+              {t("delete")}
+            </button>
+            <button type="button" className="text-muted hover:text-text" onClick={() => setOfferDelete(false)}>
+              {t("keep")}
+            </button>
+          </p>
+        )}
+      </div>
+      {!isEditor && (
+        <Card className="mb-4 flex items-start gap-2 p-4 text-sm text-muted">
+          <Eye size={16} className="mt-0.5 shrink-0" aria-hidden />
+          <div>
+            <p>{t("you_have_view_only_access_you_can_try_")}</p>
+            <p id="viewer-save" className="mt-1 text-xs text-subtle">
+              {t("save_locally_saving_needs_the_editor_r")}
+            </p>
+            <p id="viewer-publish" className="text-xs text-subtle">
+              {t("publish_publishing_needs_the_editor_ro")}
+            </p>
+          </div>
+        </Card>
+      )}
+      {publishOpen && isEditor && (
         <PublishDialog
           mode={{ kind: "rule", ruleId, rule, cases }}
           localReady={localReady}
-          approval={quality ? `Approved by the quality gate: health ${quality.score}/100${quality.min_score ? ` (${quality.min_score} required)` : ""}.` : undefined}
-          localDetail={quality && !quality.ready ? `Blocked: ${quality.blockers.join("; ")}` : result?.state === "fail" ? "The rule has lint, conversion or test errors." : undefined}
-          onClose={() => setPublishOpen(false)}
+          approval={quality ? t("ed_approved_by", { n: quality.score, req: quality.min_score ? t("ed_req_paren", { n: quality.min_score }) : "" }) : undefined}
+          localDetail={quality && !quality.ready ? `Blocked: ${quality.blockers.join("; ")}` : result?.state === "fail" ? t("l_the_rule_has_lint_conversion_or_te") : undefined}
+          onClose={closePublish}
+        />
+      )}
+      {draftsOpen && (
+        <DraftsSheet
+          dirty={dirty}
+          isAdmin={can(me, "admin")}
+          currentId={saved?.id ?? null}
+          onOpen={(draftId) => {
+            setDraftsOpen(false);
+            navigate(`/editor?draft=${draftId}`);
+          }}
+          onDeleted={(draftId) => saved?.id === draftId && setSaved(null)}
+          onClose={() => setDraftsOpen(false)}
         />
       )}
 
@@ -164,8 +341,8 @@ function EditorWorkspace(props: { ruleId: string | null; file: string | null; in
           <div className="flex gap-1 border-b border-line px-3 pt-2" role="tablist">
             {(
               [
-                ["rule", "Sigma rule"],
-                ["cases", "Test cases"],
+                ["rule", t("l_sigma_rule")],
+                ["cases", t("l_test_cases")],
               ] as const
             ).map(([key, label]) => (
               <button
@@ -180,7 +357,7 @@ function EditorWorkspace(props: { ruleId: string | null; file: string | null; in
               </button>
             ))}
           </div>
-          <div className="min-h-0 flex-1 overflow-auto">
+          <div className="min-h-0 flex-1 overflow-auto bg-code">
             {tab === "rule" ? (
               <CodeMirror key="rule" value={rule} onChange={setRule} extensions={extensions} theme="none" height="100%" basicSetup={{ foldGutter: false }} />
             ) : (
@@ -193,21 +370,22 @@ function EditorWorkspace(props: { ruleId: string | null; file: string | null; in
           {error && <ErrorBox message={error} />}
           {!result && !error && (
             <Card className="flex items-center gap-2 p-5 text-sm text-muted">
-              <Loader2 size={16} className="animate-spin" aria-hidden /> Validating…
+              <Loader2 size={16} className="animate-spin" aria-hidden /> {t("validating")}
             </Card>
           )}
           {result && (
             <>
               <StatusBar result={result} pending={pending} />
               <Card className="overflow-hidden">
-                <div className="flex gap-1 overflow-x-auto border-b border-line px-3 pt-2" role="tablist" aria-label="Rule panels">
+                <div className="no-scrollbar flex gap-1 overflow-x-auto overflow-y-hidden border-b border-line px-3 pt-2" role="tablist" aria-label={t("rule_panels")}>
                   {(
                     [
-                      ["gate", "Quality gate"],
-                      ["queries", "Queries"],
-                      ["tests", "Tests"],
-                      ["impact", "Impact"],
-                      ...(ruleId ? ([["history", "History"]] as const) : []),
+                      ["gate", t("l_quality_gate")],
+                      ["replay", t("l_replay")],
+                      ["queries", t("l_queries")],
+                      ["tests", t("l_tests")],
+                      ["impact", t("l_impact")],
+                      ...(ruleId ? ([["history", t("l_history")]] as const) : []),
                     ] as const
                   ).map(([key, label]) => (
                     <button
@@ -222,12 +400,14 @@ function EditorWorkspace(props: { ruleId: string | null; file: string | null; in
                       )}
                     >
                       {label}
-                      {key === "gate" && quality && !quality.ready && <XCircle size={13} className="text-bad" aria-label="blocked" />}
+                      {key === "gate" && quality && !quality.ready && <XCircle size={13} className="text-bad" aria-label={t("blocked")} />}
+                      {key === "replay" && replayBroken && <XCircle size={13} className="text-bad" aria-label={t("expectation_broken")} />}
                     </button>
                   ))}
                 </div>
                 <div className="p-4">
                   {panel === "gate" && quality && <GatePanel quality={quality} />}
+                  {panel === "replay" && <ReplayPanel rule={rule} ruleId={ruleId} invalid={result.state === "fail"} onBroken={setReplayBroken} />}
                   {panel === "queries" && <QueriesPanel result={result} />}
                   {panel === "tests" && <TestsPanel result={result} />}
                   {panel === "impact" && <ImpactPanel rule={rule} ruleId={ruleId} />}
@@ -242,7 +422,6 @@ function EditorWorkspace(props: { ruleId: string | null; file: string | null; in
   );
 }
 
-const plural = (n: number, one: string, many: string) => `${n} ${n === 1 ? one : many}`;
 
 /** Always-visible summary: validation state, publish readiness and health score. */
 function StatusBar({ result, pending }: { result: Validation; pending: boolean }) {
@@ -257,15 +436,15 @@ function StatusBar({ result, pending }: { result: Validation; pending: boolean }
             className={clsx("inline-flex items-center gap-1 rounded-full px-2.5 py-1 text-xs font-semibold", q.ready ? "bg-good-soft text-good" : "bg-bad-soft text-bad")}
           >
             {q.ready ? <ShieldCheck size={13} aria-hidden /> : <XCircle size={13} aria-hidden />}
-            {q.ready ? "Approved" : "Not approved"}
+            {q.ready ? t("l_approved") : t("l_not_approved")}
           </span>
         )}
         {q && <HealthMeter score={q.score} />}
-        {q && q.min_score > 0 && <span className="text-xs text-subtle">{q.score >= q.min_score ? `≥ ${q.min_score} required` : `${q.min_score} required`}</span>}
+        {q && q.min_score > 0 && <span className="text-xs text-subtle">{q.score >= q.min_score ? t("ed_req_ge", { n: q.min_score }) : t("ed_req", { n: q.min_score })}</span>}
       </span>
       <span className="flex items-center gap-2 text-xs text-muted" aria-live="polite">
         {pending && <Loader2 size={14} className="animate-spin" aria-hidden />}
-        {pending ? "Validating…" : `${plural(issues.filter((i) => i.severity === "error").length, "error", "errors")} · ${plural(issues.filter((i) => i.severity === "warning").length, "warning", "warnings")}`}
+        {pending ? t("l_validating") : `${tn("n_errors", issues.filter((i) => i.severity === "error").length)} · ${tn("n_warnings", issues.filter((i) => i.severity === "warning").length)}`}
       </span>
     </Card>
   );
@@ -282,7 +461,7 @@ function ApprovalCard({ quality }: { quality: DraftQuality }) {
       <div className="flex flex-wrap items-center justify-between gap-2">
         <p className={clsx("flex items-center gap-2 text-sm font-semibold", ready ? "text-good" : "text-bad")}>
           {ready ? <ShieldCheck size={16} aria-hidden /> : <XCircle size={16} aria-hidden />}
-          {ready ? "Approved: ready to publish" : "Not approved yet"}
+          {ready ? t("l_approved_ready_to_publish") : t("l_not_approved_yet")}
         </p>
         <span className="font-mono text-sm font-bold text-strong tabular-nums">
           {score}
@@ -290,22 +469,22 @@ function ApprovalCard({ quality }: { quality: DraftQuality }) {
         </span>
       </div>
       {min > 0 && (
-        <div className="mt-3" role="img" aria-label={`Health score ${score} of 100; ${min} required for approval`}>
+        <div className="mt-3" role="img" aria-label={t("ed_meter_aria", { s: score, m: min })}>
           <div className="relative h-2 rounded-full bg-surface-2">
             <span className={clsx("absolute inset-y-0 left-0 rounded-full", scoreOk ? "bg-good" : "bg-warn")} style={{ width: `${score}%` }} />
             <span className="absolute -top-1 bottom-[-4px] w-0.5 rounded bg-strong" style={{ left: `calc(${min}% - 1px)` }} />
           </div>
           <p className="mt-1.5 text-xs text-muted">
-            Required score: <b className="text-strong">{min}</b> (marker). {scoreOk ? "The score requirement is met." : `${min - score} more point(s) needed: fix the failing checks below.`}
+            {t("required_score")} <b className="text-strong">{min}</b> {t("ed_marker")} {scoreOk ? t("ed_score_met") : t("ed_score_more", { n: min - score })}
           </p>
         </div>
       )}
       <p className="mt-2 text-xs text-muted">
         {ready
-          ? "Publishing still requires the real CI to pass for the exact commit."
+          ? t("l_publishing_still_requires_the_real")
           : hardBlockers.length
-            ? "Fix every blocker first; the score only counts once nothing blocks."
-            : "No blocker, but the health score is below the required minimum."}
+            ? t("l_fix_every_blocker_first_the_score_")
+            : t("l_no_blocker_but_the_health_score_is")}
       </p>
     </div>
   );
@@ -320,7 +499,7 @@ function GatePanel({ quality }: { quality: DraftQuality }) {
       {quality.blockers.length > 0 && (
         <div className="rounded-[10px] border border-bad/30 bg-bad-soft p-3">
           <p className="mb-1 flex items-center gap-1.5 text-sm font-semibold text-bad">
-            <XCircle size={15} aria-hidden /> {plural(quality.blockers.length, "blocker", "blockers")} to fix
+            <XCircle size={15} aria-hidden /> {t("ed_to_fix", { x: tn("n_blockers", quality.blockers.length) })}
           </p>
           <ul className="space-y-0.5 text-[13px] text-text">
             {quality.blockers.map((b) => (
@@ -331,17 +510,40 @@ function GatePanel({ quality }: { quality: DraftQuality }) {
       )}
       {quality.datasets.length > 0 && (
         <p className="text-xs text-muted">
-          Replay:{" "}
+          {t("replay")}{" "}
           {quality.datasets.map((d, i) => (
             <span key={d.dataset}>
               {i > 0 && " · "}
-              <span className="font-mono">{d.dataset}</span> {d.error ? `(${d.error})` : `matches ${d.matches}/${d.events} events`}
+              <span className="font-mono">{d.dataset}</span> {d.error ? `(${d.error})` : t("ed_matches_of", { a: d.matches ?? 0, b: d.events ?? 0 })}
             </span>
           ))}
         </p>
       )}
       <CheckList checks={quality.checks} />
+      <GateCriteria />
     </div>
+  );
+}
+
+/** The workspace gate settings (what "approved" means), collapsed at the bottom of the Gate panel. */
+function GateCriteria() {
+  const { data } = useQuery({ queryKey: ["quality"], queryFn: api.quality });
+  if (!data) return null;
+  return (
+    <details className="rounded-[10px] border border-line bg-surface">
+      <summary className="cursor-pointer px-3 py-2 text-[13px] font-medium text-text">{t("gate_criteria")}</summary>
+      <dl className="space-y-1.5 border-t border-line p-3 text-[12.5px]">
+        {Object.entries(data.gate).map(([k, v]) => (
+          <div key={k} className="flex justify-between gap-3">
+            <dt className="text-muted">{GATE_LABELS[k] ?? k}</dt>
+            <dd className="text-right font-mono text-text">{fmt(v)}</dd>
+          </div>
+        ))}
+        <p className="pt-1 text-xs text-subtle">
+          {t("tune")} <span className="font-mono">quality_gate</span> {t("in_vitrix_yml_in_ci")} <span className="font-mono">vitrix check --gate</span>.
+        </p>
+      </dl>
+    </details>
   );
 }
 
@@ -363,11 +565,11 @@ function QueriesPanel({ result }: { result: Validation }) {
     }
   };
 
-  if (names.length === 0) return <p className="text-sm text-muted">Fix the YAML to see the queries.</p>;
+  if (names.length === 0) return <p className="text-sm text-muted">{t("fix_the_yaml_to_see_the_queries")}</p>;
   return (
     <div className="space-y-3">
       <div className="flex items-center justify-between gap-2">
-        <div className="flex min-w-0 gap-1 overflow-x-auto" role="tablist" aria-label="Target SIEM">
+        <div className="no-scrollbar flex min-w-0 gap-1 overflow-x-auto overflow-y-hidden" role="tablist" aria-label={t("target_siem")}>
           {names.map((n) => (
             <button
               key={n}
@@ -383,13 +585,13 @@ function QueriesPanel({ result }: { result: Validation }) {
               {result.conversions[n].ok ? <CheckCircle2 size={13} className="text-good" aria-hidden /> : <XCircle size={13} className="text-bad" aria-hidden />}
               <TargetSwatch target={n} />
               {result.conversions[n].label}
-              {result.targets.includes(n) && <span className="rounded bg-accent-soft px-1.5 py-0.5 text-[10px] font-semibold uppercase tracking-wide text-accent">final</span>}
+              {result.targets.includes(n) && <span className="rounded bg-accent-soft px-1.5 py-0.5 text-[10px] font-semibold uppercase tracking-wide text-accent">{t("final")}</span>}
             </button>
           ))}
         </div>
         {conv?.ok && (
           <button type="button" onClick={copy} className="inline-flex shrink-0 items-center gap-1.5 rounded-md px-2 py-1 text-xs text-muted hover:bg-surface-2 hover:text-text">
-            {copied ? <Check size={14} aria-hidden /> : <Copy size={14} aria-hidden />} {copied ? "Copied" : "Copy"}
+            {copied ? <Check size={14} aria-hidden /> : <Copy size={14} aria-hidden />} {copied ? t("l_copied") : t("l_copy")}
           </button>
         )}
       </div>
@@ -404,9 +606,9 @@ function TestsPanel({ result }: { result: Validation }) {
   return (
     <div className="space-y-4">
       {result.tests === null ? (
-        <p className="text-sm text-muted">No test cases. Add them in the “Test cases” tab.</p>
+        <p className="text-sm text-muted">{t("no_test_cases_add_them_in_the_test_cas")}</p>
       ) : result.tests.results.length === 0 ? (
-        <p className="text-sm text-muted">No valid case found.</p>
+        <p className="text-sm text-muted">{t("no_valid_case_found")}</p>
       ) : (
         <ul className="space-y-1.5 text-sm">
           {result.tests.results.map((r, n) => (
@@ -414,7 +616,7 @@ function TestsPanel({ result }: { result: Validation }) {
               {r.passed ? <CheckCircle2 size={16} className="mt-0.5 shrink-0 text-good" aria-hidden /> : <XCircle size={16} className="mt-0.5 shrink-0 text-bad" aria-hidden />}
               <span>
                 {r.name} <KindTag kind={r.kind} />
-                {r.exercises_filter && <span className="ml-1.5 text-xs text-subtle">· proves the exclusion</span>}
+                {r.exercises_filter && <span className="ml-1.5 text-xs text-subtle">{t("proves_the_exclusion")}</span>}
                 {!r.passed && <span className="block text-xs text-bad">{r.error ?? `expected ${r.expect}, got ${r.got}`}</span>}
               </span>
             </li>
@@ -423,11 +625,11 @@ function TestsPanel({ result }: { result: Validation }) {
       )}
       {issues.length > 0 && (
         <div>
-          <h3 className="mb-1.5 text-[11px] font-semibold uppercase tracking-wider text-subtle">Problems</h3>
+          <h3 className="mb-1.5 text-[11px] font-semibold uppercase tracking-wider text-subtle">{t("problems")}</h3>
           <ul className="space-y-1.5 text-sm">
             {issues.map((i, n) => (
               <li key={n} className="flex gap-2">
-                <span className={clsx("shrink-0 font-medium", i.severity === "error" ? "text-bad" : "text-warn")}>{i.severity === "error" ? "Error" : "Warning"}</span>
+                <span className={clsx("shrink-0 font-medium", i.severity === "error" ? "text-bad" : "text-warn")}>{i.severity === "error" ? t("l_error") : t("l_warning")}</span>
                 <span className="text-text">{i.message}</span>
               </li>
             ))}
@@ -463,18 +665,18 @@ function ImpactPanel({ rule, ruleId }: { rule: string; ruleId: string | null }) 
   }, [rule, ruleId]);
 
   if (error) return <ErrorBox message={error} />;
-  if (!data) return <p className="flex items-center gap-2 text-sm text-muted"><Loader2 size={14} className="animate-spin" aria-hidden /> Replaying datasets…</p>;
+  if (!data) return <p className="flex items-center gap-2 text-sm text-muted"><Loader2 size={14} className="animate-spin" aria-hidden /> {t("replaying_datasets")}</p>;
   if (data.datasets.length === 0) {
     return (
       <p className="text-sm text-muted">
-        No dataset in <span className="font-mono">datasets/</span>. Add logs there to see how a change moves the matches before opening a pull request.
+        {t("no_dataset_in")} <span className="font-mono">datasets/</span>{t("add_logs_there_to_see_how_a_change_mov")}
       </p>
     );
   }
   return (
     <div className="space-y-3">
       <p className="text-[13px] text-muted">
-        {data.saved ? "Edited version vs. the version saved in the repository, replayed on the same datasets." : "New rule: events each dataset would match."}
+        {data.saved ? t("l_edited_version_vs_the_version_save") : "New rule: events each dataset would match."}
         {data.saved && !data.changed && " No event changes its result."}
       </p>
       <ul className="space-y-3">
@@ -488,22 +690,22 @@ function ImpactPanel({ rule, ruleId }: { rule: string; ruleId: string | null }) 
                 <p className="mt-1 text-text">
                   {d.before !== null && d.before !== undefined && (
                     <>
-                      <span className="tabular-nums">{d.before}</span> → <b className="tabular-nums text-strong">{d.after}</b> matches
+                      <span className="tabular-nums">{d.before}</span> → <b className="tabular-nums text-strong">{d.after}</b> {t("matches_2")}
                     </>
                   )}
                   {(d.before === null || d.before === undefined) && (
                     <>
-                      <b className="tabular-nums text-strong">{d.after}</b> of {d.events} events match
+                      <b className="tabular-nums text-strong">{d.after}</b> {t("rp_of_events_match", { n: d.events ?? 0 })}
                     </>
                   )}
                 </p>
-                {(d.added?.length ?? 0) > 0 && <p className="text-xs text-muted">Now matching: events {d.added!.map((i) => `#${i}`).join(", ")}</p>}
-                {(d.removed?.length ?? 0) > 0 && <p className="text-xs text-muted">No longer matching: events {d.removed!.map((i) => `#${i}`).join(", ")}</p>}
+                {(d.added?.length ?? 0) > 0 && <p className="text-xs text-muted">{t("now_matching_events")} {d.added!.map((i) => `#${i}`).join(", ")}</p>}
+                {(d.removed?.length ?? 0) > 0 && <p className="text-xs text-muted">{t("no_longer_matching_events")} {d.removed!.map((i) => `#${i}`).join(", ")}</p>}
                 {d.meets_expectation !== null && d.meets_expectation !== undefined && (
                   <p className="mt-1 flex items-center gap-1.5 text-xs">
                     {d.meets_expectation ? <CheckCircle2 size={13} className="text-good" aria-hidden /> : <XCircle size={13} className="text-bad" aria-hidden />}
                     <span className={d.meets_expectation ? "text-muted" : "text-bad"}>
-                      {d.meets_expectation ? "Meets" : "Breaks"} the dataset expectation
+                      {d.meets_expectation ? t("l_meets") : t("l_breaks")} the dataset expectation
                       {d.expected && ` (${d.expected.max === d.expected.min ? `exactly ${d.expected.min}` : `${d.expected.min}–${d.expected.max ?? "∞"}`})`}
                     </span>
                   </p>
@@ -520,22 +722,22 @@ function ImpactPanel({ rule, ruleId }: { rule: string; ruleId: string | null }) 
 /** Audit trail: who created and changed this rule, from the Git history. */
 function HistoryPanel({ ruleId }: { ruleId: string }) {
   const { data, error, isLoading } = useQuery({ queryKey: ["rule-history", ruleId], queryFn: () => api.ruleHistory(ruleId) });
-  if (isLoading) return <p className="text-sm text-muted">Reading Git history…</p>;
+  if (isLoading) return <p className="text-sm text-muted">{t("reading_git_history")}</p>;
   if (error) return <ErrorBox message={(error as Error).message} />;
-  if (!data || !data.available) return <p className="text-sm text-muted">No Git history: {data && !data.available ? data.reason : "unavailable"}.</p>;
-  if (!data.tracked) return <p className="text-sm text-muted">This rule is not committed yet.</p>;
+  if (!data || !data.available) return <p className="text-sm text-muted">{t("no_git_history_2")} {data && !data.available ? data.reason : "unavailable"}.</p>;
+  if (!data.tracked) return <p className="text-sm text-muted">{t("this_rule_is_not_committed_yet")}</p>;
   return (
     <div className="space-y-3">
       <dl className="grid grid-cols-[7rem_1fr] gap-y-1 text-[13px]">
-        <dt className="text-subtle">Created</dt>
+        <dt className="text-subtle">{t("created")}</dt>
         <dd className="text-text">
           {data.created ? formatDate(data.created) : "—"} by {data.created_by}
         </dd>
-        <dt className="text-subtle">Last change</dt>
+        <dt className="text-subtle">{t("last_change")}</dt>
         <dd className="text-text">
           {timeAgo(data.modified)} by {data.modified_by}
         </dd>
-        <dt className="text-subtle">Commits</dt>
+        <dt className="text-subtle">{t("commits")}</dt>
         <dd className="text-text">
           {data.commits} · {data.authors?.join(", ")}
         </dd>

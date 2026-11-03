@@ -316,3 +316,25 @@ def test_exemplos_do_repositorio_passam(user_repo):
     assert run(cfg, "lint", "--strict") == 0
     assert run(cfg, "test") == 0
     assert run(cfg, "convert", "--stdout") == 0
+
+
+def test_wildcard_matcher_is_linear_and_keeps_sigma_semantics():
+    import time
+
+    from vitrix.evaluator import evaluate
+
+    def hit(value, text, mod="", **kw):
+        rule = {"detection": {"s": {f"F{mod}": value}, "condition": "s"}}
+        return evaluate(rule, {"F": text})
+
+    t0 = time.perf_counter()
+    assert hit("*a*a*a*a*ab", "a" * 200, "|contains") is False
+    assert time.perf_counter() - t0 < 1
+    assert hit("ab", "xxABxx", "|contains") and not hit("ab", "xxABxx", "|contains|cased")
+    assert hit(r"C:\Win*\cmd.exe", r"c:\windows\system32\cmd.exe")
+    assert hit(r"a\*b", "a*b") and not hit(r"a\*b", "axb")
+    assert hit(r"a\?b", "a?b") and not hit(r"a\?b", "axb")
+    assert hit("a?c", "abc") and not hit("a?c", "ac")
+    assert hit("a*c", "a"+chr(10)+"b"+chr(10)+"c") and hit("*", "") and not hit("a", "")
+    assert hit("exe", "cmd.exe", "|endswith") and hit("cmd", "cmd.exe", "|startswith")
+    assert hit(r"a\b", r"a\b")  # lone backslash stays literal

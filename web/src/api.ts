@@ -10,7 +10,11 @@ import type {
   ConfigCheck,
   ConfigView,
   Coverage,
-  Dataset,
+  Draft,
+  DraftBody,
+  DraftList,
+  DraftReplay,
+  ReplayDatasetInfo,
   GitHubStatus,
   History,
   Impact,
@@ -28,7 +32,7 @@ import type {
   Validation,
 } from "./types";
 
-class ApiError extends Error {
+export class ApiError extends Error {
   status: number;
   constructor(message: string, status: number) {
     super(message);
@@ -44,6 +48,8 @@ export async function request<T>(url: string, init?: RequestInit): Promise<T> {
     if ((e as Error).name === "AbortError") throw e;
     throw new ApiError("Cannot reach the API. Is `vitrix serve` running?", 0);
   }
+  // 403 = the role changed (or never allowed this): refresh /api/me so the UI adapts. Never treated as logged out.
+  if (res.status === 403 && !url.startsWith("/api/auth/")) window.dispatchEvent(new Event("vitrix:forbidden"));
   if (res.status === 401 && !url.startsWith("/api/auth/")) window.dispatchEvent(new Event("vitrix:unauthorized")); // session expired or revoked
   if (!res.ok) {
     let detail = `${res.status} ${res.statusText}`;
@@ -56,6 +62,7 @@ export async function request<T>(url: string, init?: RequestInit): Promise<T> {
     }
     throw new ApiError(detail, res.status);
   }
+  if (res.status === 204) return undefined as T;
   return res.json() as Promise<T>;
 }
 
@@ -67,6 +74,10 @@ function post<T>(url: string, body: unknown, signal?: AbortSignal): Promise<T> {
 
 function del<T>(url: string): Promise<T> {
   return request<T>(url, { method: "DELETE" });
+}
+
+function put<T>(url: string, body: unknown): Promise<T> {
+  return request<T>(url, { method: "PUT", headers: { "Content-Type": "application/json" }, body: JSON.stringify(body) });
 }
 
 function patch<T>(url: string, body: unknown): Promise<T> {
@@ -113,7 +124,13 @@ export const api = {
   coverage: () => request<Coverage>("/api/coverage"),
   history: () => request<History>("/api/history"),
   ruleHistory: (id: string) => request<RuleHistory>(`/api/history/${path(id)}`),
-  datasets: () => request<Dataset[]>("/api/datasets"),
-  runDataset: (name: string) => request<ReplayResult>(`/api/datasets/${path(name)}/replay`),
+  replayDatasets: () => request<ReplayDatasetInfo[]>("/api/replay/datasets"),
+  replayDraft: (body: { rule: string; datasets?: string[]; path?: string | null }, signal?: AbortSignal) => post<DraftReplay>("/api/replay/draft", body, signal),
+
+  drafts: () => request<DraftList>("/api/drafts"),
+  draft: (id: string) => request<Draft>(`/api/drafts/${encodeURIComponent(id)}`),
+  createDraft: (body: DraftBody) => post<Draft>("/api/drafts", body),
+  updateDraft: (id: string, body: DraftBody & { version: number }) => put<Draft>(`/api/drafts/${encodeURIComponent(id)}`, body),
+  deleteDraft: (id: string) => request<void>(`/api/drafts/${encodeURIComponent(id)}`, { method: "DELETE" }),
   replay: (events: string, rule?: string) => post<ReplayResult>("/api/replay", { events, rule: rule ?? null }),
 };

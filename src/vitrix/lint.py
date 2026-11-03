@@ -10,7 +10,7 @@ import re
 import uuid
 from dataclasses import dataclass
 
-from . import routing
+from . import governance, routing
 from .evaluator import UnsupportedError, check_supported, condition_refs
 from .loader import RuleFile
 
@@ -179,6 +179,8 @@ def lint_doc(doc: object, rel: str, known_targets: set[str] | None = None) -> li
 
     for message in routing.problems(doc):
         err(message)
+    for severity, message in governance.problems(doc):
+        (err if severity == "error" else warn)(message)
     if known_targets is not None:
         for name in routing.declared(doc) or []:
             if name not in known_targets:

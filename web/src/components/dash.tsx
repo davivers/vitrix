@@ -4,10 +4,11 @@ import { useId, useState, type ReactNode } from "react";
 import { Link } from "react-router-dom";
 import type { Activity, RunState, State } from "../types";
 import { Card } from "./ui";
+import { locale, t } from "../i18n";
 
 // --------------------------------------------------------------------------- formatting
 
-const rtf = new Intl.RelativeTimeFormat("en", { numeric: "auto" });
+const rtf = new Intl.RelativeTimeFormat(locale(), { numeric: "auto" });
 
 /** "5 minutes ago", "yesterday"… */
 export function timeAgo(iso: string | null | undefined): string {
@@ -33,8 +34,8 @@ export function timeAgo(iso: string | null | undefined): string {
 export function formatHours(h: number | null | undefined): string {
   if (h === null || h === undefined) return "—";
   if (h < 1) return `${Math.round(h * 60)} min`;
-  if (h < 48) return `${h.toLocaleString("en", { maximumFractionDigits: 1 })} h`;
-  return `${(h / 24).toLocaleString("en", { maximumFractionDigits: 1 })} d`;
+  if (h < 48) return `${h.toLocaleString(locale(), { maximumFractionDigits: 1 })} h`;
+  return `${(h / 24).toLocaleString(locale(), { maximumFractionDigits: 1 })} d`;
 }
 
 export function formatDuration(s: number | null | undefined): string {
@@ -42,7 +43,7 @@ export function formatDuration(s: number | null | undefined): string {
   return s < 60 ? `${s}s` : `${Math.floor(s / 60)}m ${String(s % 60).padStart(2, "0")}s`;
 }
 
-export const formatDate = (iso: string) => new Date(iso).toLocaleDateString("en", { month: "short", day: "numeric", year: "numeric" });
+export const formatDate = (iso: string) => new Date(iso).toLocaleDateString(locale(), { month: "short", day: "numeric", year: "numeric" });
 
 export const pct = (n: number, d: number) => (d ? Math.round((100 * n) / d) : 0);
 
@@ -118,7 +119,7 @@ export function LineChart({ points, height = 180, unit = "", ariaLabel }: { poin
   const gid = useId();
   const width = 640;
   const pad = { l: 34, r: 12, t: 12, b: 24 };
-  if (points.length === 0) return <p className="text-sm text-subtle">No data yet.</p>;
+  if (points.length === 0) return <p className="text-sm text-subtle">{t("no_data_yet")}</p>;
   const max = Math.max(1, ...points.map((p) => p.value));
   const ticks = niceTicks(max);
   const top = ticks[ticks.length - 1];
@@ -176,7 +177,7 @@ export function LineChart({ points, height = 180, unit = "", ariaLabel }: { poin
       </svg>
       {active && hover !== null && (
         <div
-          className="pointer-events-none absolute top-1 z-10 rounded-lg border border-line bg-ink px-2.5 py-1.5 text-xs shadow-lg"
+          className="pointer-events-none absolute top-1 z-10 rounded-lg border border-line bg-surface px-2.5 py-1.5 text-xs shadow-pop"
           style={{ left: `${(x(hover) / width) * 100}%`, transform: `translateX(${hover > n / 2 ? "-105%" : "5%"})` }}
         >
           <span className="block text-subtle">{active.label}</span>
@@ -225,7 +226,7 @@ export interface BarRow {
 /** Horizontal bars of a single series (one hue), value at the tip. No legend: the title names it. */
 export function BarList({ rows, max, unit = "", empty }: { rows: BarRow[]; max?: number; unit?: string; empty?: string }) {
   const top = max ?? Math.max(1, ...rows.map((r) => r.value));
-  if (rows.length === 0) return <p className="text-sm text-subtle">{empty ?? "No data."}</p>;
+  if (rows.length === 0) return <p className="text-sm text-subtle">{empty ?? t("l_no_data")}</p>;
   return (
     <ul className="space-y-2.5">
       {rows.map((r) => {
@@ -259,9 +260,9 @@ export function BarList({ rows, max, unit = "", empty }: { rows: BarRow[]; max?:
 }
 
 const STATE_META: Record<State, { label: string; bar: string; text: string; Icon: typeof CheckCircle2 }> = {
-  ok: { label: "Passing", bar: "bg-good", text: "text-good", Icon: CheckCircle2 },
-  warn: { label: "Warnings", bar: "bg-warn", text: "text-warn", Icon: AlertTriangle },
-  fail: { label: "Failing", bar: "bg-bad", text: "text-bad", Icon: XCircle },
+  ok: { label: t("l_passing"), bar: "bg-good", text: "text-good", Icon: CheckCircle2 },
+  warn: { label: t("l_warnings"), bar: "bg-warn", text: "text-warn", Icon: AlertTriangle },
+  fail: { label: t("l_failing"), bar: "bg-bad", text: "text-bad", Icon: XCircle },
 };
 
 /** Stacked state bar with a legend (icon + text + number): never colour alone. */
@@ -298,7 +299,7 @@ export function StateBar({ counts }: { counts: Record<State, number> }) {
 export function HealthMeter({ score }: { score: number }) {
   const tone = score >= 90 ? "bg-good" : score >= 70 ? "bg-warn" : "bg-bad";
   return (
-    <span className="inline-flex items-center gap-2" title={`Health ${score}/100`}>
+    <span className="inline-flex items-center gap-2" title={t("health_score", { n: score })}>
       <span className="h-1.5 w-14 overflow-hidden rounded-full bg-surface-2" aria-hidden>
         <span className={clsx("block h-1.5 rounded-full", tone)} style={{ width: `${score}%` }} />
       </span>
@@ -311,7 +312,7 @@ export function RunBadge({ state }: { state: RunState | null }) {
   if (state === null)
     return (
       <span className="inline-flex items-center gap-1 text-xs text-subtle">
-        <CircleDashed size={13} aria-hidden /> no CI
+        <CircleDashed size={13} aria-hidden /> {t("no_ci")}
       </span>
     );
   const meta = {
@@ -327,9 +328,9 @@ export function RunBadge({ state }: { state: RunState | null }) {
 }
 
 const REASON: Record<string, string> = {
-  not_configured: "Configure the github section in vitrix.yml to see PRs, CI and time to merge.",
-  no_token: "Set VITRIX_GITHUB_TOKEN in the environment of vitrix serve to read PRs and CI.",
-  error: "Could not read GitHub right now.",
+  not_configured: t("dash_not_configured"),
+  no_token: t("dash_no_token"),
+  error: t("dash_gh_error"),
 };
 
 /** Shown instead of GitHub numbers when the connector is unavailable. Never invents numbers. */
@@ -342,7 +343,7 @@ export function ConnectorNotice({ activity, compact }: { activity: Activity | un
         {REASON[activity.reason]}
         {activity.reason === "error" && <span className="block text-xs text-subtle [overflow-wrap:anywhere]">{activity.message}</span>}{" "}
         <Link to="/connections" className="font-medium text-accent hover:underline">
-          Connections
+          {t("connections")}
         </Link>
       </span>
     </div>

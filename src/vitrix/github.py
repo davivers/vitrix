@@ -16,8 +16,9 @@ Configuration in vitrix.yml:
       path: ""                   # folder of the Vitrix project inside the repository (default: root)
       workflow: vitrix           # optional: only runs of this workflow (name or file) count as CI
 
-The token ALWAYS comes from the environment (`VITRIX_GITHUB_TOKEN` or `GITHUB_TOKEN`), never
-from vitrix.yml. Minimum fine-grained permissions on the repository: Contents (read/write),
+Without a `github:` section, the repository is read from `git remote origin` (see gitremote.py).
+The token NEVER comes from vitrix.yml: `VITRIX_GITHUB_TOKEN` / `GITHUB_TOKEN`, else the GitHub CLI
+login (`gh auth login`). Minimum fine-grained permissions on the repository: Contents (read/write),
 Pull requests (read/write) and Actions (read).
 
 The workflow must run on pushes to `vitrix/**` branches (see .github/workflows/vitrix.yml).
@@ -27,7 +28,6 @@ Standard library only (urllib), no new dependencies.
 from __future__ import annotations
 
 import json
-import os
 import re
 import secrets
 import urllib.error
@@ -90,11 +90,10 @@ def parse_config(data: object) -> GitHubConfig | None:
 
 
 def token_from_env() -> str | None:
-    for name in TOKEN_ENVS:
-        value = os.environ.get(name, "").strip()
-        if value:
-            return value
-    return None
+    """VITRIX_GITHUB_TOKEN / GITHUB_TOKEN, else the GitHub CLI login (`gh auth token`)."""
+    from .gitremote import token
+
+    return token()[0]
 
 
 # Transport signature: (method, url, body) -> (status, json). Injectable in tests.
@@ -136,7 +135,7 @@ class GitHubClient:
         if transport is None:
             if not token:
                 raise GitHubError(
-                    f"set {TOKEN_ENVS[0]} (or GITHUB_TOKEN) in the environment of `vitrix serve` to use GitHub",
+                    "no GitHub token: run `gh auth login` (GitHub CLI) or set VITRIX_GITHUB_TOKEN, then restart `vitrix serve`. `vitrix connect` checks the whole setup",
                     status=503,
                 )
             transport = _urllib_transport(token)
@@ -154,6 +153,10 @@ class GitHubClient:
             }.get(status)
             raise GitHubError(f"GitHub answered {status}: {hint or message or 'unknown error'}")
         return payload
+
+    def probe(self, path: str = "") -> tuple[int, object]:
+        """GET /repos/{repo}{path} without raising on HTTP errors (used by `vitrix connect`)."""
+        return self._send("GET", f"{API_URL}/repos/{self.cfg.repo}{path}", None)
 
     # ----------------------------------------------------------------------- step 1: CI validation
 

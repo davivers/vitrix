@@ -4,9 +4,10 @@ import { AlertTriangle, CheckCircle2, Clock, ExternalLink, GitCommitHorizontal, 
 import { Link } from "react-router-dom";
 import { api } from "../api";
 import { BarList, ConnectorNotice, HealthMeter, RunBadge, Section, formatDuration, formatHours, pct, safeHref, timeAgo } from "../components/dash";
+import { FlowFunnel } from "../components/flow";
 import { Card, ErrorBox, PageHeader, btnPrimary, btnSecondary } from "../components/ui";
 import type { Activity, History, QualityRule, RuleSummary, Stats } from "../types";
-import { FlowFunnel } from "./QualityGate";
+import { t, tn } from "../i18n";
 
 /** One pipeline stage: main number + a detail line with a status icon. */
 function Stage({ label, value, detail, ok }: { label: string; value: string; detail: string; ok: boolean | null }) {
@@ -30,7 +31,7 @@ function Pipeline({ stats, activity }: { stats: Stats; activity: Activity | unde
   return (
     <Card className="mb-5">
       <div className="flex flex-wrap items-center justify-between gap-2 border-b border-line px-4 py-3">
-        <h2 className="text-[15px] font-semibold text-strong">Validation pipeline</h2>
+        <h2 className="text-[15px] font-semibold text-strong">{t("validation_pipeline")}</h2>
         <span className="flex items-center gap-1.5 text-xs text-subtle">
           {activity?.available ? (
             <>
@@ -41,34 +42,34 @@ function Pipeline({ stats, activity }: { stats: Stats; activity: Activity | unde
               · {activity.repo.base} · {timeAgo(activity.head.date)}
             </>
           ) : (
-            "local repository"
+            t("l_local_repository")
           )}
         </span>
       </div>
       <div className="grid grid-cols-2 divide-line sm:grid-cols-3 lg:grid-cols-5 lg:divide-x">
-        <Stage label="Parse" value={String(pipeline.parse.ok)} detail={pipeline.parse.failed ? `${pipeline.parse.failed} with invalid YAML` : "YAML without syntax errors"} ok={pipeline.parse.failed === 0} />
+        <Stage label={t("parse")} value={String(pipeline.parse.ok)} detail={pipeline.parse.failed ? t("db_invalid_yaml", { n: pipeline.parse.failed }) : t("db_yaml_ok")} ok={pipeline.parse.failed === 0} />
         <Stage
-          label="Validation"
-          value={`${pipeline.validation.ok} passing`}
-          detail={`${pipeline.validation.warn} with warnings · ${pipeline.validation.fail} failing`}
+          label={t("validation")}
+          value={t("db_n_passing", { n: pipeline.validation.ok })}
+          detail={t("db_warn_fail", { w: pipeline.validation.warn, f: pipeline.validation.fail })}
           ok={pipeline.validation.fail === 0}
         />
         <Stage
-          label="Conversion"
+          label={t("conversion")}
           value={`${pipeline.conversion.ok}/${total}`}
-          detail={pipeline.conversion.failed ? `${pipeline.conversion.failed} conversion failures` : "final language ok"}
+          detail={pipeline.conversion.failed ? t("db_conv_fail", { n: pipeline.conversion.failed }) : t("db_final_ok")}
           ok={pipeline.conversion.failed === 0}
         />
         <Stage
-          label="Tests"
+          label={t("tests")}
           value={`${tests.passed}/${tests.total}`}
-          detail={tests.total - tests.passed ? `${tests.total - tests.passed} failing cases` : `${tests.rules_without_cases} rules without cases`}
+          detail={tests.total - tests.passed ? t("db_failing_cases", { n: tests.total - tests.passed }) : t("db_no_cases", { n: tests.rules_without_cases })}
           ok={tests.total === tests.passed && tests.rules_without_cases === 0}
         />
         <Stage
-          label="Pull requests"
+          label={t("pull_requests")}
           value={pulls ? `${pulls.open} open` : "—"}
-          detail={pulls ? (pulls.failing ? `${pulls.failing} with failing CI` : "none with failing CI") : "GitHub not connected"}
+          detail={pulls ? (pulls.failing ? t("db_pr_fail", { n: pulls.failing }) : t("l_none_with_failing_ci")) : t("l_github_not_connected")}
           ok={pulls ? pulls.failing === 0 : null}
         />
       </div>
@@ -88,16 +89,16 @@ function NeedsAttention({ rules, gate }: { rules: RuleSummary[]; gate: QualityRu
     .filter((x) => x.r.state !== "ok" || x.blocked || x.stale)
     .sort((a, b) => (a.g?.score ?? 100) - (b.g?.score ?? 100));
   return (
-    <Section title="Needs attention" aside={`${items.length} ${items.length === 1 ? "rule" : "rules"}`}>
+    <Section title={t("needs_attention")} aside={tn("n_rules", items.length)}>
       {items.length === 0 ? (
         <p className="flex items-center gap-2 text-sm text-muted">
-          <CheckCircle2 size={16} className="text-good" aria-hidden /> Nothing pending: every rule passes lint, conversion, tests and the quality gate.
+          <CheckCircle2 size={16} className="text-good" aria-hidden /> {t("nothing_pending_every_rule_passes_lint")}
         </p>
       ) : (
         <ul className="-mx-2 divide-y divide-line">
           {items.map(({ r, g, stale, blocked }) => {
             const fail = r.state === "fail";
-            const first = r.issues[0]?.message ?? g?.blockers[0] ?? (stale ? `Not reviewed for ${Math.round(g?.age_days ?? 0)} days` : "—");
+            const first = r.issues[0]?.message ?? g?.blockers[0] ?? (stale ? t("db_not_reviewed", { n: Math.round(g?.age_days ?? 0) }) : "—");
             return (
               <li key={r.id}>
                 <Link to={`/editor/${r.id}`} className="flex gap-3 rounded-lg px-2 py-2.5 hover:bg-surface">
@@ -108,7 +109,7 @@ function NeedsAttention({ rules, gate }: { rules: RuleSummary[]; gate: QualityRu
                     )}
                   >
                     {fail ? <XCircle size={12} aria-hidden /> : blocked ? <XCircle size={12} aria-hidden /> : stale ? <Clock size={12} aria-hidden /> : <AlertTriangle size={12} aria-hidden />}
-                    {fail ? "Failing" : blocked ? "Blocked" : stale ? "Review due" : "Warning"}
+                    {fail ? t("l_failing") : blocked ? t("l_blocked") : stale ? t("l_review_due") : t("l_warning")}
                   </span>
                   <span className="min-w-0 flex-1">
                     <span className="block truncate text-[13.5px] font-semibold text-strong">{r.title || r.id}</span>
@@ -128,11 +129,11 @@ function NeedsAttention({ rules, gate }: { rules: RuleSummary[]; gate: QualityRu
 
 function CiRuns({ activity }: { activity: Activity | undefined }) {
   return (
-    <Section title="CI runs" aside={activity?.available && activity.ci.success_rate !== null ? `${activity.ci.success_rate}% passing (${activity.ci.sample})` : undefined}>
+    <Section title={t("ci_runs")} aside={activity?.available && activity.ci.success_rate !== null ? t("db_ci_passing", { p: activity.ci.success_rate, n: activity.ci.sample }) : undefined}>
       <ConnectorNotice activity={activity} />
       {activity?.available &&
         (activity.ci.runs.length === 0 ? (
-          <p className="text-sm text-subtle">No CI run on {activity.repo.base}.</p>
+          <p className="text-sm text-subtle">{t("no_ci_run_on")} {activity.repo.base}.</p>
         ) : (
           <ul className="-mx-2 divide-y divide-line">
             {activity.ci.runs.slice(0, 8).map((run) => (
@@ -156,11 +157,11 @@ function CiRuns({ activity }: { activity: Activity | undefined }) {
 
 function OpenPulls({ activity }: { activity: Activity | undefined }) {
   return (
-    <Section title="Open pull requests" aside={activity?.available && activity.merge.median_hours !== null ? `median time to merge: ${formatHours(activity.merge.median_hours)}` : undefined}>
+    <Section title={t("open_pull_requests")} aside={activity?.available && activity.merge.median_hours !== null ? t("db_median", { v: formatHours(activity.merge.median_hours) }) : undefined}>
       <ConnectorNotice activity={activity} />
       {activity?.available &&
         (activity.pulls.items.length === 0 ? (
-          <p className="text-sm text-subtle">No open PR against {activity.repo.base}.</p>
+          <p className="text-sm text-subtle">{t("no_open_pr_against")} {activity.repo.base}.</p>
         ) : (
           <ul className="-mx-2 divide-y divide-line">
             {activity.pulls.items.map((pr) => (
@@ -170,11 +171,11 @@ function OpenPulls({ activity }: { activity: Activity | undefined }) {
                   <span className="min-w-0 flex-1">
                     <span className="block truncate text-text">
                       #{pr.number} {pr.title}
-                      {pr.draft && <span className="ml-2 rounded bg-surface-2 px-1.5 py-0.5 text-[10px] uppercase text-subtle">draft</span>}
+                      {pr.draft && <span className="ml-2 rounded bg-surface-2 px-1.5 py-0.5 text-[10px] uppercase text-subtle">{t("draft")}</span>}
                     </span>
                     <span className="block text-xs text-subtle">
                       {pr.author ?? "—"} · open for {formatHours(pr.age_hours)}
-                      {pr.from_vitrix && " · from the UI"}
+                      {pr.from_vitrix && t("db_from_ui")}
                     </span>
                   </span>
                   <RunBadge state={pr.ci} />
@@ -190,10 +191,10 @@ function OpenPulls({ activity }: { activity: Activity | undefined }) {
 /** Latest commits touching rules, cases or datasets (local Git; no GitHub needed). */
 function RecentChanges({ history }: { history: History | undefined }) {
   return (
-    <Section title="Recent changes" aside={history?.available ? `${history.commits} ${history.commits === 1 ? "commit" : "commits"} on detections` : undefined}>
-      {!history && <p className="text-sm text-muted">Reading Git history…</p>}
-      {history && !history.available && <p className="text-sm text-subtle">No Git history ({history.reason}).</p>}
-      {history?.available && history.activity.length === 0 && <p className="text-sm text-subtle">No commit touches rules yet.</p>}
+    <Section title={t("recent_changes")} aside={history?.available ? t("db_commits_on", { x: tn("n_commits", history.commits) }) : undefined}>
+      {!history && <p className="text-sm text-muted">{t("reading_git_history")}</p>}
+      {history && !history.available && <p className="text-sm text-subtle">{t("no_git_history")}{history.reason}).</p>}
+      {history?.available && history.activity.length === 0 && <p className="text-sm text-subtle">{t("no_commit_touches_rules_yet")}</p>}
       {history?.available && (
         <ul className="-mx-2 divide-y divide-line">
           {history.activity.slice(0, 8).map((c) => (
@@ -204,7 +205,7 @@ function RecentChanges({ history }: { history: History | undefined }) {
                 <span className="shrink-0 text-xs text-subtle">{timeAgo(c.date)}</span>
               </span>
               <span className="block truncate text-xs text-subtle">
-                {c.author} · {c.files.length + c.more_files} file(s)
+                {c.author} · {t("db_files", { n: c.files.length + c.more_files })}
               </span>
             </li>
           ))}
@@ -229,36 +230,36 @@ export default function DashboardPage() {
   return (
     <div className="mx-auto max-w-7xl px-4 py-8 sm:px-8">
       <PageHeader
-        title="Operational"
+        title={t("operational")}
         subtitle={
           act?.available
-            ? `Health of ${act.repo.name}: validation, conversion, tests and ATT&CK coverage on ${act.repo.base}.`
-            : "Health of the local repository: validation, conversion, tests and ATT&CK coverage."
+            ? t("db_health_of", { name: act.repo.name, base: act.repo.base })
+            : t("l_health_of_the_local_repository_val")
         }
         actions={
           <div className="flex flex-wrap gap-2">
             {act?.available && (
               <button type="button" onClick={() => refresh.refetch()} className={btnSecondary}>
-                <RefreshCw size={15} className={refresh.isFetching ? "animate-spin" : undefined} aria-hidden /> Refresh
+                <RefreshCw size={15} className={refresh.isFetching ? "animate-spin" : undefined} aria-hidden /> {t("refresh")}
               </button>
             )}
             <Link to="/editor" className={btnPrimary}>
-              <Plus size={16} aria-hidden /> New rule
+              <Plus size={16} aria-hidden /> {t("new_rule")}
             </Link>
           </div>
         }
       />
       {error && <ErrorBox message={(error as Error).message} />}
-      {stats.isLoading && <p className="text-sm text-muted">Reading the repository…</p>}
+      {stats.isLoading && <p className="text-sm text-muted">{t("reading_the_repository")}</p>}
 
       {stats.data && <Pipeline stats={stats.data} activity={act} />}
 
       {quality.data && (
         <>
           <div className="mb-2 flex flex-wrap items-baseline justify-between gap-3 px-1">
-            <h2 className="text-[15px] font-semibold text-strong">Path to publication</h2>
-            <Link to="/gate" className="text-xs font-medium text-accent hover:underline">
-              {quality.data.summary.ready}/{quality.data.summary.total} ready · open the Quality Gate
+            <h2 className="text-[15px] font-semibold text-strong">{t("path_to_publication")}</h2>
+            <Link to="/rules?view=gate" className="text-xs font-medium text-accent hover:underline">
+              {t("db_ready_open", { a: quality.data.summary.ready, b: quality.data.summary.total })}
             </Link>
           </div>
           <FlowFunnel q={quality.data} />
@@ -268,12 +269,12 @@ export default function DashboardPage() {
       {stats.data && rules.data && (
         <div className="grid gap-5 lg:grid-cols-[3fr_2fr]">
           <NeedsAttention rules={rules.data} gate={quality.data?.rules ?? []} />
-          <Section title="MITRE ATT&CK coverage" aside={`${stats.data.mitre.covered}/${stats.data.mitre.total} tactics · ${pct(stats.data.mitre.covered, stats.data.mitre.total)}%`}>
+          <Section title={t("mitre_att_ck_coverage")} aside={t("db_tactics_pct", { a: stats.data.mitre.covered, b: stats.data.mitre.total, p: pct(stats.data.mitre.covered, stats.data.mitre.total) })}>
             <BarList
-              rows={tactics.map((t) => ({ key: t.slug, code: t.id, label: t.name, value: t.count, title: `${t.id} ${t.name}: ${t.count} rules`, to: "/coverage" }))}
-              empty="No rule with an attack.<tactic> tag."
+              rows={tactics.map((t) => ({ key: t.slug, code: t.id, label: t.name, value: t.count, title: `${t.id} ${t.name}: ${tn("n_rules", t.count)}`, to: "/coverage" }))}
+              empty={t("no_rule_with_an_attack_tactic_tag")}
             />
-            {stats.data.mitre.uncovered.length > 0 && <p className="mt-4 text-xs text-subtle">No coverage: {stats.data.mitre.uncovered.join(", ")}.</p>}
+            {stats.data.mitre.uncovered.length > 0 && <p className="mt-4 text-xs text-subtle">{t("no_coverage_2")} {stats.data.mitre.uncovered.join(", ")}.</p>}
           </Section>
           <CiRuns activity={act} />
           <OpenPulls activity={act} />
@@ -282,7 +283,7 @@ export default function DashboardPage() {
       )}
       {act?.available && (
         <p className="mt-5 flex items-center gap-1.5 text-xs text-subtle">
-          <ExternalLink size={12} aria-hidden /> GitHub data from {timeAgo(act.fetched_at)}; the rest comes from the local repository.
+          <ExternalLink size={12} aria-hidden /> {t("github_data_from")} {timeAgo(act.fetched_at)}{t("db_rest_local")}
         </p>
       )}
     </div>

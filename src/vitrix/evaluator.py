@@ -17,13 +17,45 @@ Not supported (raises UnsupportedError, never passes silently)
 
 from __future__ import annotations
 
+import contextlib
+import contextvars
 import fnmatch
 import re
+import time
 from typing import Any
+
+import regex as rx  # user |re patterns: supports a match timeout (stdlib re cannot be interrupted)
+
+REGEX_TIMEOUT_S = 1.0  # per match; catastrophic backtracking fails the rule instead of hanging the process
+
+
+REGEX_BUDGET_S = 3.0  # total regex time per request/run inside `regex_budget()`
+_deadline: contextvars.ContextVar[float | None] = contextvars.ContextVar("vitrix_regex_deadline", default=None)
+
+
+@contextlib.contextmanager
+def regex_budget(seconds: float = REGEX_BUDGET_S):
+    """Bound the total time user regexes may run inside the block (API requests use this).
+
+    Once spent, every further `|re` match raises RegexError at once, so a catastrophic pattern
+    over many events/datasets cannot hold a worker for N x timeout. Nested use keeps the outer one.
+    """
+    if _deadline.get() is not None:
+        yield
+        return
+    token = _deadline.set(time.monotonic() + seconds)
+    try:
+        yield
+    finally:
+        _deadline.reset(token)
 
 
 class UnsupportedError(Exception):
-    """The rule uses something the local evaluator cannot run yet."""
+    """The rule uses something the local evaluator cannot run yet (or cannot run safely)."""
+
+
+class RegexError(UnsupportedError):
+    """A `|re` pattern is invalid or exceeded the time limit. Counts as a failure, never a pass."""
 
 
 SUPPORTED_MODIFIERS = {"contains", "startswith", "endswith", "all", "re", "i", "m", "s", "cased", "exists"}
@@ -43,24 +75,47 @@ def _get(event: dict, field: str) -> tuple[bool, Any]:
     return False, None
 
 
-def _to_regex(value: str) -> str:
-    """Turn a Sigma value (with wildcards) into a regex. Only \\* and \\? are escapes."""
-    out: list[str] = []
+def _glob_tokens(value: str) -> list[tuple[str, str]]:
+    """Sigma value -> tokens: ("lit", ch), ("any", "?") or ("star", "*"). Only backslash-star and backslash-question are escapes."""
+    out: list[tuple[str, str]] = []
     i = 0
     while i < len(value):
         ch = value[i]
         if ch == "\\" and i + 1 < len(value) and value[i + 1] in "*?":
-            out.append(re.escape(value[i + 1]))
+            out.append(("lit", value[i + 1]))
             i += 2
             continue
-        if ch == "*":
-            out.append(".*")
-        elif ch == "?":
-            out.append(".")
-        else:
-            out.append(re.escape(ch))
+        out.append(("star", ch) if ch == "*" else ("any", ch) if ch == "?" else ("lit", ch))
         i += 1
-    return "".join(out)
+    return out
+
+
+def _glob_match(tokens: list[tuple[str, str]], text: str, cased: bool) -> bool:
+    """Whole-string wildcard match in O(len(text) * len(tokens)) worst case, no regex backtracking.
+
+    `*` matches any run (newlines too), `?` one character; case-insensitive unless `cased`.
+    """
+    if not cased:
+        text = text.lower()
+        tokens = [(k, c.lower()) if k == "lit" else (k, c) for k, c in tokens]
+    t = p = 0
+    star_p = star_t = -1
+    n, m = len(text), len(tokens)
+    while t < n:
+        if p < m and tokens[p][0] == "star":
+            star_p, star_t = p, t
+            p += 1
+        elif p < m and (tokens[p][0] == "any" or tokens[p][1] == text[t]):
+            p += 1
+            t += 1
+        elif star_p >= 0:
+            star_t += 1
+            t, p = star_t, star_p + 1
+        else:
+            return False
+    while p < m and tokens[p][0] == "star":
+        p += 1
+    return p == m
 
 
 def _match_value(actual: Any, expected: Any, mods: set[str]) -> bool:
@@ -70,22 +125,33 @@ def _match_value(actual: Any, expected: Any, mods: set[str]) -> bool:
     if "re" in mods:
         flags = 0
         if "i" in mods:
-            flags |= re.IGNORECASE
+            flags |= rx.IGNORECASE
         if "m" in mods:
-            flags |= re.MULTILINE
+            flags |= rx.MULTILINE
         if "s" in mods:
-            flags |= re.DOTALL
-        return re.search(str(expected), str(actual), flags) is not None
+            flags |= rx.DOTALL
+        limit = REGEX_TIMEOUT_S
+        deadline = _deadline.get()
+        if deadline is not None:
+            limit = min(limit, deadline - time.monotonic())
+            if limit <= 0:
+                raise RegexError(f"regex time budget exhausted ({REGEX_BUDGET_S:g}s per request): {str(expected)[:80]}")
+        try:
+            return rx.search(str(expected), str(actual), flags, timeout=limit) is not None
+        except TimeoutError:
+            raise RegexError(f"regex timed out after {REGEX_TIMEOUT_S:g}s (catastrophic backtracking?): {str(expected)[:80]}") from None
+        except rx.error as exc:
+            raise RegexError(f"invalid regex {str(expected)[:80]!r}: {exc}") from None
 
-    pattern = _to_regex(str(expected))
+    tokens = _glob_tokens(str(expected))
+    star = ("star", "*")
     if "contains" in mods:
-        pattern = f".*{pattern}.*"
+        tokens = [star, *tokens, star]
     elif "startswith" in mods:
-        pattern = f"{pattern}.*"
+        tokens = [*tokens, star]
     elif "endswith" in mods:
-        pattern = f".*{pattern}"
-    flags = re.DOTALL | (0 if "cased" in mods else re.IGNORECASE)
-    return re.fullmatch(pattern, str(actual), flags) is not None
+        tokens = [star, *tokens]
+    return _glob_match(tokens, str(actual), "cased" in mods)
 
 
 def _match_field(event: dict, spec: str, expected: Any) -> bool:

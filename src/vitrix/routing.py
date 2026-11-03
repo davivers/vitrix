@@ -18,7 +18,7 @@ from .config import Config
 from .loader import RuleFile
 
 KEY = "vitrix"
-RULE_KEYS = {"target"}
+RULE_KEYS = {"target", "owner", "review_by", "suppressions"}  # governance keys: see governance.py
 
 
 @dataclass(frozen=True)

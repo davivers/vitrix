@@ -28,8 +28,10 @@ PUBLIC = {
     "/api/auth/github/start",
     "/api/auth/github/callback",
 }
-# POSTs that only compute (or publish rules through CI): an editor may use them.
-EDITOR_POSTS = {"/api/validate", "/api/impact", "/api/replay", "/api/regex", "/api/config/validate", "/api/ci/rules", "/api/pull-requests"}
+# POSTs that only COMPUTE and write nothing (disk, GitHub): any signed-in viewer may use them.
+VIEWER_POSTS = {"/api/regex", "/api/validate", "/api/impact", "/api/replay", "/api/replay/draft", "/api/config/validate"}
+# POSTs that write or publish (CI, pull requests, local drafts): editor and above.
+EDITOR_POSTS = {"/api/ci/rules", "/api/pull-requests", "/api/drafts"}
 
 
 def required_role(method: str, path: str) -> str:
@@ -39,6 +41,10 @@ def required_role(method: str, path: str) -> str:
     if path.startswith("/api/auth/"):
         return "viewer"  # logout, password: any signed-in person
     if method in ("GET", "HEAD"):
+        return "viewer"
+    if path.startswith("/api/drafts/"):  # PUT/DELETE a draft; author-or-admin is checked in the route
+        return "editor"
+    if path in VIEWER_POSTS:
         return "viewer"
     return "editor" if path in EDITOR_POSTS else "admin"
 
@@ -145,7 +151,7 @@ def install(app: FastAPI, cfg: Config, store: AuthStore | None, oauth: GitHubOAu
         if store is None:
             return {"enabled": False}
         return {"enabled": True, "workspace": store.workspace_name, "bootstrap": store.user_count() == 0,
-                "allow_signup": cfg.auth.allow_signup, "github": oauth is not None and cfg.auth.github_login}
+                "registration": "owner-bootstrap" if store.user_count() == 0 else "invite-only", "github": oauth is not None and cfg.auth.github_login}
 
     @app.get("/api/auth/me")
     def me(request: Request) -> dict:

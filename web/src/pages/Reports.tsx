@@ -2,6 +2,7 @@ import { useQuery } from "@tanstack/react-query";
 import { Copy, Download, FileJson, FileText, RefreshCw, Route } from "lucide-react";
 import { useState } from "react";
 import { Card, ErrorBox, PageHeader, btnSecondary } from "../components/ui";
+import { t } from "../i18n";
 
 async function fetchText(url: string): Promise<string> {
   const res = await fetch(url);
@@ -37,15 +38,15 @@ export default function ReportsPage() {
   return (
     <div className="mx-auto max-w-5xl px-4 py-8 sm:px-8">
       <PageHeader
-        title="Reports"
-        subtitle="Quality gate, tests by kind, ATT&CK coverage, data sources, replay and rule-set health in one document. The same one `vitrix report` builds in CI."
+        title={t("reports")}
+        subtitle={t("rp_sub")}
         actions={
           <div className="flex flex-wrap gap-2">
             <button type="button" className={btnSecondary} onClick={() => md.refetch()}>
-              <RefreshCw size={14} className={md.isFetching ? "animate-spin" : undefined} aria-hidden /> Regenerate
+              <RefreshCw size={14} className={md.isFetching ? "animate-spin" : undefined} aria-hidden /> {t("regenerate")}
             </button>
             <button type="button" className={btnSecondary} disabled={!md.data} onClick={copy}>
-              <Copy size={14} aria-hidden /> {copied ? "Copied" : "Copy Markdown"}
+              <Copy size={14} aria-hidden /> {copied ? t("l_copied") : t("rp_copy_md")}
             </button>
             <button type="button" className={btnSecondary} disabled={!md.data} onClick={() => md.data && download(`vitrix-report-${stamp}.md`, md.data, "text/markdown")}>
               <FileText size={14} aria-hidden /> .md
@@ -58,17 +59,17 @@ export default function ReportsPage() {
               <FileJson size={14} aria-hidden /> .json
             </button>
             <a href="/api/coverage/navigator" download="vitrix-attack-layer.json" className={btnSecondary}>
-              <Route size={14} aria-hidden /> ATT&amp;CK layer
+              <Route size={14} aria-hidden /> {t("rp_layer")}
             </a>
           </div>
         }
       />
       {md.error && <ErrorBox message={(md.error as Error).message} />}
-      {md.isLoading && <p className="text-sm text-muted">Building the report…</p>}
+      {md.isLoading && <p className="text-sm text-muted">{t("building_the_report")}</p>}
       {md.data && (
         <Card className="p-5">
           <div className="mb-3 flex items-center gap-2 text-xs text-subtle">
-            <Download size={13} aria-hidden /> Markdown preview: paste it into a PR, wiki or ticket.
+            <Download size={13} aria-hidden /> {t("markdown_preview_paste_it_into_a_pr_wi")}
           </div>
           <pre className="max-h-[70vh] overflow-auto whitespace-pre-wrap rounded-[10px] border border-line bg-code p-4 font-mono text-[12.5px] leading-relaxed text-code-text">{md.data}</pre>
         </Card>

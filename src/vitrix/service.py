@@ -364,7 +364,7 @@ def normalize_rule_path(path: str) -> str:
 
 def _require_github(cfg: Config) -> GitHubConfig:
     if cfg.github is None:
-        raise GitHubError("configure the 'github' section in vitrix.yml (repo and base) to validate in CI and open pull requests", status=503)
+        raise GitHubError("GitHub is not connected: run `vitrix connect your-org/your-repo` in this folder (or set github.repo in vitrix.yml)", status=503)
     return cfg.github
 
 
@@ -459,12 +459,13 @@ def open_pull_request(cfg: Config, branch: str, commit: str, title: str | None =
 
 def github_status(cfg: Config) -> dict:
     """What the UI needs to show (or hide) the CI and PR buttons. Never exposes the token."""
-    from .github import token_from_env
+    from .gitremote import token
 
-    if cfg.github is None:
-        return {"configured": False, "repo": None, "base": None, "workflow": None, "token": token_from_env() is not None}
-    return {"configured": True, "repo": cfg.github.repo, "base": cfg.github.base, "workflow": cfg.github.workflow,
-            "token": token_from_env() is not None}
+    found, token_source = token()
+    gh = cfg.github
+    return {"configured": gh is not None, "source": cfg.github_source, "repo": gh.repo if gh else None,
+            "base": gh.base if gh else None, "workflow": gh.workflow if gh else None,
+            "token": found is not None, "token_source": token_source}
 
 
 # --------------------------------------------------------------------------- GitHub connector (read-only)

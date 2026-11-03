@@ -7,6 +7,7 @@ import type { CiState, StageState } from "../types";
 import { RunBadge, formatDuration, safeHref } from "./dash";
 import { STAGE_META } from "./flow";
 import { ErrorBox, btnPrimary, btnSecondary, inputCls } from "./ui";
+import { t } from "../i18n";
 
 /** Suggested path for a new rule, from the `title:` of the YAML. */
 export function suggestPath(rule: string): string {
@@ -21,11 +22,10 @@ export function suggestPath(rule: string): string {
   return `${slug || "new_rule"}.yml`;
 }
 
-const SETUP_YAML = `# vitrix.yml
-github:
-  repo: my-org/detections
-  base: main
-  workflow: vitrix   # the workflow that runs vitrix check --gate`;
+const SETUP_YAML = `# in your detections folder (stop vitrix serve first)
+gh auth login                       # once: GitHub CLI login, used as the token
+vitrix connect your-org/your-repo   # links the folder and checks the CI, step by step
+vitrix serve`;
 
 type Mode = { kind: "rule"; ruleId: string | null; rule: string; cases: string } | { kind: "config"; text: string };
 
@@ -40,10 +40,10 @@ interface Props {
 }
 
 const CI_COPY: Record<CiState, { title: string; hint: string; state: StageState }> = {
-  none: { title: "Waiting for the CI to start", hint: "GitHub has not reported a workflow run for this commit yet. The workflow must run on pushes to vitrix/** branches.", state: "pending" },
-  pending: { title: "CI is running", hint: "The pull request unlocks when every run for this commit finishes successfully.", state: "pending" },
-  failure: { title: "CI failed", hint: "The pull request stays blocked. Open the failed run on GitHub, fix the rule here and validate again.", state: "fail" },
-  success: { title: "CI passed", hint: "Every workflow run for this exact commit succeeded.", state: "ok" },
+  none: { title: t("l_waiting_for_the_ci_to_start"), hint: t("l_github_has_not_reported_a_workflow"), state: "pending" },
+  pending: { title: t("l_ci_is_running"), hint: t("l_the_pull_request_unlocks_when_ever"), state: "pending" },
+  failure: { title: t("l_ci_failed"), hint: t("l_the_pull_request_stays_blocked_ope"), state: "fail" },
+  success: { title: t("l_ci_passed"), hint: t("l_every_workflow_run_for_this_exact_"), state: "ok" },
 };
 
 function Step({ n, title, state, children }: { n: number; title: string; state: StageState; children?: React.ReactNode }) {
@@ -117,25 +117,25 @@ export function PublishDialog({ mode, localReady, localDetail, approval, onClose
       ref={ref}
       onClose={onClose}
       aria-labelledby="pub-title"
-      className="glass m-auto w-[min(600px,calc(100vw-32px))] rounded-2xl bg-ink/95 p-0 text-text backdrop:bg-black/60 backdrop:backdrop-blur-sm"
+      className="glass m-auto w-[min(600px,calc(100vw-32px))] rounded-2xl bg-surface p-0 text-text backdrop:bg-black/50"
     >
       <form onSubmit={onSubmit} className="space-y-5 p-6">
         <div className="flex items-start justify-between gap-4">
           <div>
             <h2 id="pub-title" className="text-lg font-semibold text-strong">
-              Publish {mode.kind === "rule" ? "rule" : "configuration"}
+              {mode.kind === "rule" ? t("pd_publish_rule") : t("pd_publish_config")}
             </h2>
             <p className="mt-1 text-sm text-muted">
-              A pull request can only be opened after the repository&apos;s real CI (GitHub Actions) has passed for the exact commit. Local tests are not enough.
+              {t("pd_intro")}
               {github.data?.repo && (
                 <>
                   {" "}
-                  Target: <span className="font-mono text-text">{github.data.repo}</span> → <span className="font-mono text-text">{github.data.base}</span>.
+                  {t("pd_target")} <span className="font-mono text-text">{github.data.repo}</span> → <span className="font-mono text-text">{github.data.base}</span>.
                 </>
               )}
             </p>
           </div>
-          <button type="button" onClick={onClose} aria-label="Close" className="rounded-md p-1 text-muted hover:bg-surface-2 hover:text-text">
+          <button type="button" onClick={onClose} aria-label={t("close")} className="rounded-md p-1 text-muted hover:bg-surface-2 hover:text-text">
             <X size={18} aria-hidden />
           </button>
         </div>
@@ -144,15 +144,10 @@ export function PublishDialog({ mode, localReady, localDetail, approval, onClose
         {github.data && !ready && (
           <div className="space-y-2 rounded-[10px] border border-warn/30 bg-warn-soft p-3 text-sm text-text">
             <p className="flex items-center gap-2 font-medium text-warn">
-              <AlertTriangle size={16} aria-hidden /> {github.data.configured ? "GitHub token missing" : "GitHub is not configured"}
+              <AlertTriangle size={16} aria-hidden /> {github.data.configured ? t("l_github_token_missing") : t("l_github_is_not_configured")}
             </p>
             {!github.data.configured && <pre className="rounded-md bg-code p-2 font-mono text-xs text-code-text">{SETUP_YAML}</pre>}
-            {!github.data.token && (
-              <p>
-                Set <code className="font-mono text-xs">VITRIX_GITHUB_TOKEN</code> in the environment of <code className="font-mono text-xs">vitrix serve</code> (Contents,
-                Pull requests: read/write; Actions: read) and restart the server.
-              </p>
-            )}
+            {github.data.configured && !github.data.token && <pre className="rounded-md bg-code p-2 font-mono text-xs text-code-text">{SETUP_YAML}</pre>}
           </div>
         )}
 
@@ -160,7 +155,7 @@ export function PublishDialog({ mode, localReady, localDetail, approval, onClose
           <div className="space-y-4">
             {mode.kind === "rule" && (
               <label className="block space-y-1.5">
-                <span className="text-sm font-medium text-strong">File inside rules/</span>
+                <span className="text-sm font-medium text-strong">{t("file_inside_rules")}</span>
                 <input
                   value={path}
                   onChange={(e) => setPath(e.target.value)}
@@ -170,13 +165,13 @@ export function PublishDialog({ mode, localReady, localDetail, approval, onClose
                   required
                 />
                 <span className="block text-xs text-subtle">
-                  {mode.ruleId ? "Change to an existing rule." : "Test cases go to the same path inside cases/."}
+                  {mode.ruleId ? t("l_change_to_an_existing_rule") : t("l_test_cases_go_to_the_same_path_ins")}
                 </span>
               </label>
             )}
             <label className="block space-y-1.5">
               <span className="text-sm font-medium text-strong">
-                Pull request title <span className="font-normal text-subtle">(optional)</span>
+                {t("pull_request_title")} <span className="font-normal text-subtle">(optional)</span>
               </span>
               <input
                 value={title}
@@ -190,25 +185,25 @@ export function PublishDialog({ mode, localReady, localDetail, approval, onClose
         )}
 
         <ol className="space-y-4 border-t border-line pt-4">
-          <Step n={1} title="Local quality gate" state={localState}>
+          <Step n={1} title={t("local_quality_gate")} state={localState}>
             <p className="text-[13px] text-muted">
-              {localReady === null && "Validating…"}
-              {localReady === true && (approval ?? "Lint, conversion, test cases and the quality gate pass locally.")}
-              {localReady === false && (localDetail || "Blocked by the local quality gate. Fix the rule before sending it to CI.")}
+              {localReady === null && t("l_validating")}
+              {localReady === true && (approval ?? t("l_lint_conversion_test_cases_and_the"))}
+              {localReady === false && (localDetail || t("l_blocked_by_the_local_quality_gate_"))}
             </p>
           </Step>
 
-          <Step n={2} title={sub ? CI_COPY[ciState ?? "none"].title : "Validate in the real CI"} state={ciStep}>
-            {!sub && <p className="text-[13px] text-muted">Pushes a vitrix/… branch with one commit. GitHub Actions runs the repository&apos;s workflow on it.</p>}
+          <Step n={2} title={sub ? CI_COPY[ciState ?? "none"].title : t("l_validate_in_the_real_ci")} state={ciStep}>
+            {!sub && <p className="text-[13px] text-muted">{t("pd_pushes")}</p>}
             {sub && (
               <div className="space-y-2">
                 <p className="text-[13px] text-muted">{CI_COPY[ciState ?? "none"].hint}</p>
                 <p className="text-xs text-subtle">
-                  Branch{" "}
+                  {t("branch")}{" "}
                   <a href={safeHref(sub.url)} target="_blank" rel="noreferrer" className="font-mono text-accent hover:underline">
                     {sub.branch}
                   </a>{" "}
-                  · commit <span className="font-mono">{sub.commit.slice(0, 7)}</span>
+                  {t("pd_commit")} <span className="font-mono">{sub.commit.slice(0, 7)}</span>
                 </p>
                 {ci.data && ci.data.runs.length > 0 && (
                   <ul className="space-y-1">
@@ -231,23 +226,23 @@ export function PublishDialog({ mode, localReady, localDetail, approval, onClose
             )}
           </Step>
 
-          <Step n={3} title={pr.data ? `Pull request #${pr.data.number} opened` : "Open the pull request"} state={prStep}>
+          <Step n={3} title={pr.data ? t("pd_pr_opened", { n: pr.data.number }) : t("l_open_the_pull_request")} state={prStep}>
             {!pr.data && (
               <p className="flex items-center gap-1.5 text-[13px] text-muted">
                 {ciState === "success" ? (
                   <>
-                    <CheckCircle2 size={14} className="text-good" aria-hidden /> Unlocked: CI passed for this commit.
+                    <CheckCircle2 size={14} className="text-good" aria-hidden /> {t("unlocked_ci_passed_for_this_commit")}
                   </>
                 ) : (
                   <>
-                    <CircleDashed size={14} aria-hidden /> Locked until the CI passes.
+                    <CircleDashed size={14} aria-hidden /> {t("locked_until_the_ci_passes")}
                   </>
                 )}
               </p>
             )}
             {pr.data && (
               <a href={safeHref(pr.data.url)} target="_blank" rel="noreferrer" className="inline-flex items-center gap-1.5 text-[13px] font-medium text-good hover:underline">
-                View on GitHub <ExternalLink size={13} aria-hidden />
+                {t("view_on_github")} <ExternalLink size={13} aria-hidden />
               </a>
             )}
           </Step>
@@ -258,18 +253,18 @@ export function PublishDialog({ mode, localReady, localDetail, approval, onClose
 
         <div className="flex flex-wrap justify-end gap-2">
           <button type="button" onClick={onClose} className={btnSecondary}>
-            {pr.data ? "Done" : "Close"}
+            {pr.data ? t("l_done") : t("l_close")}
           </button>
           {!sub && (
             <button type="submit" disabled={!canSubmit} className={btnPrimary}>
               {submit.isPending ? <Loader2 size={16} className="animate-spin" aria-hidden /> : <Rocket size={16} aria-hidden />}
-              {submit.isPending ? "Pushing…" : "Validate in CI"}
+              {submit.isPending ? t("l_pushing") : t("l_validate_in_ci")}
             </button>
           )}
           {sub && !pr.data && (
             <button type="button" disabled={ciState !== "success" || pr.isPending} onClick={() => pr.mutate()} className={btnPrimary}>
               {pr.isPending ? <Loader2 size={16} className="animate-spin" aria-hidden /> : <GitPullRequest size={16} aria-hidden />}
-              {pr.isPending ? "Opening…" : "Open pull request"}
+              {pr.isPending ? t("l_opening") : t("l_open_pull_request")}
             </button>
           )}
         </div>
