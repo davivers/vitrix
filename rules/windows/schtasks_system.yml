@@ -1,0 +1,28 @@
+title: Tarefa agendada criada como SYSTEM via schtasks
+id: 3f8b2d10-6a97-4e0c-b1d5-9c4a7e2f6b38
+status: test
+description: Detecta schtasks.exe criando tarefa executada como SYSTEM, pelo nome ou pelo SID
+author: time-deteccao
+date: 2026-10-30
+tags:
+  - attack.persistence
+  - attack.t1053.005
+logsource:
+  category: process_creation
+  product: windows
+detection:
+  selection_task:
+    Image|endswith: '\schtasks.exe'
+    CommandLine|contains|all:
+      - '/create'
+      - '/ru'
+  selection_user:
+    CommandLine|contains:
+      - 'SYSTEM'
+      - 'S-1-5-18'
+  condition: selection_task and selection_user
+falsepositives:
+  - Instaladores de software
+level: medium
+vitrix:
+  target: kql  # exemplo: esta regra sai em KQL; as demais usam o default_target

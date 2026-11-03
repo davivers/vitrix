@@ -1,0 +1,8 @@
+# Tudo em LF, inclusive no Windows: o CI recompila a interface no Linux e compara com o build commitado.
+* text=auto eol=lf
+
+*.woff2 binary
+*.woff binary
+*.png binary
+*.jpg binary
+*.ico binary

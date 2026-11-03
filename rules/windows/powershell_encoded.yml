@@ -1,0 +1,26 @@
+title: PowerShell com comando codificado
+id: 7c1e9a52-0d4b-4c7e-9f3a-2b6d8e41a0c5
+status: stable
+description: Detecta powershell.exe iniciado com argumento -EncodedCommand
+author: time-deteccao
+date: 2026-10-28
+tags:
+  - attack.execution
+  - attack.t1059.001
+logsource:
+  category: process_creation
+  product: windows
+detection:
+  selection:
+    Image|endswith: '\powershell.exe'
+    CommandLine|contains:
+      - ' -enc '
+      - ' -EncodedCommand '
+  filter_sccm:
+    # o agente do SCCM/MECM roda scripts codificados por padrão
+    ParentImage|endswith: '\CcmExec.exe'
+  condition: selection and not filter_sccm
+falsepositives:
+  - Scripts administrativos legítimos
+  - Agente do SCCM/MECM (excluído por filter_sccm)
+level: high

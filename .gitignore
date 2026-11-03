@@ -1,0 +1,19 @@
+__pycache__/
+*.egg-info/
+.pytest_cache/
+.venv/
+venv/
+build/
+.env
+
+# Saída compilada: gerada pelo CI, não editada à mão.
+dist/
+
+# Interface: dependências locais. O build em src/vitrix/ui/ É versionado.
+web/node_modules/
+
+# Ferramentas de qualidade e relatórios locais
+.coverage
+htmlcov/
+.ruff_cache/
+vitrix-report.md
