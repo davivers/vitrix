@@ -438,9 +438,11 @@ def cmd_init(cfg: Config, args: argparse.Namespace) -> int:
         dest.parent.mkdir(parents=True, exist_ok=True)
         dest.write_bytes(src.read_bytes())
     print(f"created a Vitrix detections repository in {target} ({len(files)} files)")
-    here = "" if target == Path.cwd() else f"cd {args.directory}\n  "
-    print(f"\nnext steps:\n  {here}vitrix check --strict --gate     # validate the example rules\n  vitrix serve                      # open the web UI\n"
-          "  git init && git add -A && git commit -m \"Initial detections\"\n"
+    # One command per line: works the same in bash, zsh, cmd and Windows PowerShell 5.1 (no `&&`).
+    here = "" if target == Path.cwd() else f'cd "{args.directory}"\n  '
+    print(f"\nnext steps (one command per line):\n  {here}vitrix check --strict --gate     # validate the example rules\n"
+          "  vitrix serve                      # open the web UI\n"
+          "  git init\n  git add -A\n  git commit -m \"Initial detections\"\n"
           "then push it to YOUR repository and set `github.repo` in vitrix.yml (see README.md).")
     return 0
 

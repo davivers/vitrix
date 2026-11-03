@@ -10,22 +10,47 @@ Detection-as-Code without depending on a SIEM. You write rules in [Sigma](https:
 
 **This repository is the Vitrix product, not your detections.** You install Vitrix and run it inside your own detections repository (a Git repo with your Sigma rules):
 
-```bash
-# 1. install (a virtualenv with Python 3.10–3.13; PyPI soon, for now straight from GitHub)
+**Requirements:** Python **3.10 to 3.14** (3.12 recommended) and Git. Python 3.15 is not supported yet: PyYAML has no prebuilt wheel for it, so pip would try to compile it and ask for Microsoft Visual C++. Always install into a virtual environment.
+
+**Windows (PowerShell)** — one command per line; Windows PowerShell 5.1 does not accept `&&`:
+
+```powershell
+# 1. a virtual environment with Python 3.12 (the `py` launcher ships with Python for Windows)
+py install 3.12                 # only if `py -0` does not list 3.12 yet
+py -3.12 -m venv .venv
+.\.venv\Scripts\Activate.ps1    # if blocked: Set-ExecutionPolicy -Scope CurrentUser RemoteSigned
+
+# 2. install Vitrix (PyPI soon, for now straight from GitHub)
 pip install "vitrix[api] @ git+https://github.com/davivers/vitrix.git"
 
-# 2. create your detections repository: vitrix.yml, example rules, test cases, replay logs, CI workflow
-vitrix init my-detections && cd my-detections
+# 3. create your detections repository: vitrix.yml, example rules, test cases, replay logs, CI workflow
+vitrix init my-detections
+cd my-detections
 
-# 3. work on it
-vitrix check --strict --gate   # lint + conversion + tests + replay + quality gate
-vitrix serve                   # the web UI on http://127.0.0.1:8000
+# 4. work on it
+vitrix check --strict --gate    # lint + conversion + tests + replay + quality gate
+vitrix serve                    # the web UI on http://127.0.0.1:8000
 
-# 4. make it yours: push it to your own repository, then in vitrix.yml set github.repo
-git init && git add -A && git commit -m 'Initial detections'
+# 5. make it yours: commit, push to your own repository, then set github.repo in vitrix.yml
+git init
+git add -A
+git commit -m "Initial detections"
 ```
 
+**Linux / macOS (bash, zsh):**
+
+```bash
+python3.12 -m venv .venv && . .venv/bin/activate
+pip install "vitrix[api] @ git+https://github.com/davivers/vitrix.git"
+vitrix init my-detections && cd my-detections
+vitrix check --strict --gate && vitrix serve
+git init && git add -A && git commit -m "Initial detections"
+```
+
+`vitrix: command not found` / `not recognized` means the install failed or the virtual environment is not active (activate it again in each new terminal).
+
 `vitrix init` copies a small template: two example Sigma rules with typed test cases, an attack-simulation dataset with expectations, a `vitrix.yml` with every option documented, and `.github/workflows/vitrix.yml` (the CI that validates each change). Edit or delete the examples. To publish from the UI (CI first, then the pull request) see [Publishing](#publishing-real-ci-first-then-the-pull-request).
+
 | Command | What it does |
 |---|---|
 | `vitrix init [dir] [--force]` | Creates a new detections repository from the template. Never overwrites without `--force`. |
@@ -277,7 +302,7 @@ API limits:
 
 ```bash
 git clone https://github.com/davivers/vitrix && cd vitrix
-pip install -e ".[dev]"                                   # engine + API + tests + lint (Python 3.10–3.13)
+pip install -e ".[dev]"                                   # engine + API + tests + lint (Python 3.10–3.14)
 pytest
 ruff check src tests && bandit -c pyproject.toml -r src -q
 

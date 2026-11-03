@@ -54,3 +54,19 @@ def test_the_project_itself_has_no_example_detections_in_its_root():
 
     root = Path(__file__).resolve().parents[1]
     assert not (root / "rules").exists() and not (root / "vitrix.yml").exists()  # the product repo is not a detections repo
+
+
+def test_init_next_steps_work_in_windows_powershell(tmp_path, capsys):
+    """Windows PowerShell 5.1 rejects `&&`: the printed next steps must be one command per line."""
+    main(["init", str(tmp_path / "repo")])
+    out = capsys.readouterr().out
+    assert "&&" not in out
+    assert "git init\n" in out and "vitrix check --strict --gate" in out
+
+
+def test_python_version_is_capped_where_dependencies_have_wheels():
+    """pip must refuse clearly on an unsupported Python instead of compiling PyYAML (needs MSVC on Windows)."""
+    from pathlib import Path
+
+    text = (Path(__file__).resolve().parents[1] / "pyproject.toml").read_text(encoding="utf-8")
+    assert 'requires-python = ">=3.10,<3.15"' in text

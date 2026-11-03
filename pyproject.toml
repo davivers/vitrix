@@ -7,7 +7,7 @@ name = "vitrix"            # nome ok; falta checar marca e domínio
 version = "0.1.0"
 description = "Detection-as-Code: valida, converte e testa regras Sigma sem precisar de um SIEM"
 readme = "README.md"
-requires-python = ">=3.10"
+requires-python = ">=3.10,<3.15"
 license = { text = "MIT" }
 dependencies = [
   "pysigma>=1.0",
