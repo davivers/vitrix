@@ -20,3 +20,8 @@ vitrix-report.md
 
 # Local accounts database and other runtime data
 .vitrix/
+
+# Personal / AI-assistant workspace files (kept locally, never published)
+.claude/
+CLAUDE.md
+.vscode/
