@@ -1,10 +1,10 @@
-"""Regex Workbench: desenvolver, testar e otimizar expressões regulares de regras Sigma.
+"""Regex Workbench: develop, test and optimise the regular expressions of Sigma rules.
 
-Usa o mesmo motor do avaliador local (`re` do Python), então o que passa aqui passa nos
-casos de teste. Cada análise roda num processo separado com tempo limite: uma regex com
-backtracking catastrófico estoura o tempo em vez de travar o servidor.
+Uses the same engine as the local evaluator (Python's `re`), so what passes here passes in
+the test cases. Each analysis runs in a separate process with a timeout: a regex with
+catastrophic backtracking hits the timeout instead of freezing the server.
 
-    python -m vitrix.regex_lab   (lê JSON da entrada padrão; uso interno)
+    python -m vitrix.regex_lab   (reads JSON from stdin; internal use)
 """
 
 from __future__ import annotations
@@ -19,13 +19,13 @@ import time
 from .lint import NESTED_QUANTIFIER
 
 TIMEOUT_S = 2.0
-_SLOTS = threading.BoundedSemaphore(2)  # no máximo 2 processos de regex ao mesmo tempo
+_SLOTS = threading.BoundedSemaphore(2)  # at most 2 regex processes at the same time
 MAX_SAMPLES = 50
 MAX_SAMPLE_LEN = 20_000
 MAX_PATTERN_LEN = 2_000
 FLAGS = {"i": re.IGNORECASE, "m": re.MULTILINE, "s": re.DOTALL}
-# \W, \S, \D, \B... logo depois de algo que parece caminho do Windows: provavelmente a barra
-# era literal (C:\Windows vira C: + "não-palavra" + indows).
+# \W, \S, \D, \B... right after something that looks like a Windows path: the backslash was
+# probably meant literally (C:\Windows becomes C: + "non-word" + indows).
 WINDOWS_PATH_ESCAPE = re.compile(r"[A-Za-z]:\\(?=[A-Za-z])|\\(?:Windows|System32|Users|Program|AppData|Temp)\b", re.IGNORECASE)
 
 
@@ -34,27 +34,27 @@ class RegexLabError(Exception):
 
 
 def lint_pattern(pattern: str) -> list[dict]:
-    """Avisos de desempenho e de armadilhas comuns. Não executa a regex."""
+    """Performance warnings and common pitfalls. Does not run the regex."""
     tips: list[dict] = []
 
     def tip(severity: str, message: str) -> None:
         tips.append({"severity": severity, "message": message})
 
     if NESTED_QUANTIFIER.search(pattern):
-        tip("error", "quantificador aninhado como (a+)+: backtracking catastrófico; reescreva sem repetir o grupo")
+        tip("error", "nested quantifier such as (a+)+: catastrophic backtracking; rewrite it without repeating the group")
     if re.search(r"(\.\*){2,}|\.\*\.\*", pattern):
-        tip("warning", ".* repetido: cada um multiplica o backtracking; um só basta")
+        tip("warning", "repeated .*: each one multiplies backtracking; one is enough")
     if pattern.startswith(".*") or pattern.endswith(".*"):
-        tip("info", "o modificador |re do Sigma já procura em qualquer posição: .* no início ou no fim é desnecessário")
+        tip("info", "Sigma's |re modifier already searches anywhere: a leading or trailing .* is unnecessary")
     if re.search(r"\((?!\?)[^()]*\|[^()]*\)", pattern) and not re.search(r"\(\?:", pattern):
-        tip("info", "grupo com captura: se não precisa do valor, use (?:...) que é mais leve")
+        tip("info", "capturing group: if you do not need the value, use (?:...) which is lighter")
     if WINDOWS_PATH_ESCAPE.search(pattern):
-        tip("warning", "barra invertida de caminho do Windows sem escape: em regex, \\W, \\S, \\U... são classes; escreva \\\\ para a barra")
+        tip("warning", "unescaped Windows path backslash: in regex \\W, \\S, \\U... are classes; write \\\\ for the backslash")
     literal = re.fullmatch(r"(\.\*)?((?:[^\\.*+?()\[\]{}|^$]|\\[\\.])+)(\.\*)?", pattern)
     if literal:
-        tip("info", "regex sem metacaracteres: Field|contains (ou startswith/endswith) é mais rápido e portável entre SIEMs")
+        tip("info", "regex without metacharacters: Field|contains (or startswith/endswith) is faster and portable across SIEMs")
     if len(pattern) > 300:
-        tip("warning", f"regex longa ({len(pattern)} caracteres): difícil de revisar e cara no SIEM")
+        tip("warning", f"long regex ({len(pattern)} characters): hard to review and expensive in the SIEM")
     return tips
 
 
@@ -82,37 +82,37 @@ def _run(pattern: str, flags: str, samples: list[str]) -> dict:
 
 
 def analyze(pattern: str, flags: str = "", samples: list[str] | None = None, timeout: float = TIMEOUT_S) -> dict:
-    """Compila, roda nas amostras (em subprocesso, com tempo limite) e dá dicas de otimização."""
+    """Compile, run on the samples (in a subprocess, with a timeout) and give optimisation tips."""
     samples = list(samples or [])
     if len(pattern) > MAX_PATTERN_LEN:
-        raise RegexLabError(f"regex com mais de {MAX_PATTERN_LEN} caracteres")
+        raise RegexLabError(f"regex longer than {MAX_PATTERN_LEN} characters")
     if len(samples) > MAX_SAMPLES:
-        raise RegexLabError(f"no máximo {MAX_SAMPLES} amostras")
+        raise RegexLabError(f"at most {MAX_SAMPLES} samples")
     if any(len(s) > MAX_SAMPLE_LEN for s in samples):
-        raise RegexLabError(f"amostra com mais de {MAX_SAMPLE_LEN} caracteres")
+        raise RegexLabError(f"sample longer than {MAX_SAMPLE_LEN} characters")
     bad = set(flags) - set(FLAGS)
     if bad:
-        raise RegexLabError(f"flag desconhecida: {''.join(sorted(bad))} (use i, m, s)")
+        raise RegexLabError(f"unknown flag: {''.join(sorted(bad))} (use i, m, s)")
 
     tips = lint_pattern(pattern)
     started = time.perf_counter()
     if not _SLOTS.acquire(timeout=timeout):
-        raise RegexLabError("muitas execuções ao mesmo tempo; tente de novo")
+        raise RegexLabError("too many runs at the same time; try again")
     try:
-        # Argumentos fixos (o próprio Python, modo isolado -I); a regex e as amostras vão pela
-        # entrada padrão como JSON, nunca pela linha de comando nem por shell.
+        # Fixed arguments (Python itself, isolated mode -I); the regex and samples go through
+        # stdin as JSON, never through the command line or a shell.
         proc = subprocess.run(  # nosec B603
             [sys.executable, "-I", "-m", "vitrix.regex_lab"],
             input=json.dumps({"pattern": pattern, "flags": flags, "samples": samples}),
             capture_output=True, text=True, encoding="utf-8", timeout=timeout,
         )
     except subprocess.TimeoutExpired:
-        return {"ok": False, "timeout": True, "error": f"a execução passou de {timeout:g} s: backtracking catastrófico provável",
+        return {"ok": False, "timeout": True, "error": f"the run took more than {timeout:g} s: catastrophic backtracking is likely",
                 "tips": tips, "sigma": None}
     finally:
         _SLOTS.release()
     if proc.returncode != 0:
-        raise RegexLabError(f"falha ao executar a regex: {proc.stderr.strip()[-300:]}")
+        raise RegexLabError(f"failed to run the regex: {proc.stderr.strip()[-300:]}")
     out = json.loads(proc.stdout)
     out["tips"] = tips
     out["timeout"] = False

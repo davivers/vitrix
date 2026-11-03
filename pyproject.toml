@@ -37,7 +37,7 @@ vitrix = "vitrix.cli:main"
 where = ["src"]
 
 [tool.setuptools.package-data]
-vitrix = ["ui/*", "ui/assets/*"]
+vitrix = ["ui/*", "ui/assets/*", "template/*", "template/*/*", "template/*/*/*", "template/*/*/*/*"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]

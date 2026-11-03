@@ -1,6 +1,0 @@
-# Expectativas do replay de simulacao_windows.jsonl (teste de regressão).
-# Se uma alteração mudar quantos eventos cada regra pega, `vitrix replay` e o quality gate acusam.
-expect:
-  windows/powershell_encoded.yml: 2   # os dois PowerShell codificados do ataque; o do SCCM fica de fora
-  windows/schtasks_system.yml: 1      # só a tarefa como SYSTEM; a de backup não
-others: 0                             # nenhuma outra regra deve disparar neste dataset

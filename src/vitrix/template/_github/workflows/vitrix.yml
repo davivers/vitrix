@@ -1,0 +1,51 @@
+name: vitrix
+
+on:
+  pull_request:
+  push:
+    # vitrix/** = branches pushed by the Vitrix UI ("Validate in CI"). The run on that branch is
+    # the real CI validation that unlocks "Open pull request" for that exact commit.
+    branches: [main, 'vitrix/**']
+
+permissions:
+  contents: read
+
+jobs:
+  validate:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0  # full history: rule age for the periodic review check
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      # Until Vitrix is on PyPI, install it from its repository. Pin a tag or commit for
+      # reproducible runs, e.g. ...vitrix.git@v0.1.0
+      - name: Install Vitrix
+        run: pip install "vitrix @ git+https://github.com/davivers/vitrix.git"
+
+      # Lint, conversion, test cases, replay and the quality gate.
+      # The summary shows up in the run's "Summary" tab.
+      - name: Validate
+        run: vitrix check --strict --gate --markdown "$GITHUB_STEP_SUMMARY"
+
+      - name: Report
+        if: always()
+        run: vitrix report -o vitrix-report.md || true
+
+      - name: Upload the report
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: vitrix-report
+          path: vitrix-report.md
+
+      - name: Upload the compiled queries
+        if: github.event_name == 'push'
+        uses: actions/upload-artifact@v4
+        with:
+          name: dist
+          path: dist/

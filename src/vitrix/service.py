@@ -1,7 +1,7 @@
-"""Camada de serviço: o que a API (e qualquer interface) consome.
+"""Service layer: what the API (and any UI) consumes.
 
-Tudo aqui devolve dicts simples, prontos para virar JSON. A CLI e a API usam as mesmas
-funções do motor por baixo, então os números das telas são os mesmos do `vitrix check`.
+Everything here returns plain dicts, ready to become JSON. The CLI and the API share the same
+engine functions, so the numbers on screen are the same as `vitrix check`.
 """
 
 from __future__ import annotations
@@ -18,26 +18,26 @@ from . import routing
 from .backends import available_targets, convert_text, load_extra_pipelines
 from .cases import CaseResult, cases_path, parse_cases, run_cases, run_rule_cases
 from .config import Config, ConfigError, parse_config_text
-from .github import GitHubClient, GitHubError, branch_slug
+from .github import GitHubClient, GitHubConfig, GitHubError, branch_slug
 from .lint import Issue, lint_doc, lint_files
 from .loader import RULE_SUFFIXES, RuleFile, RuleLoadError, find_rule_files, load_rule
 
-# Táticas do MITRE ATT&CK com o nome usado nas tags do Sigma (attack.<slug>).
+# MITRE ATT&CK tactics with the slug used in Sigma tags (attack.<slug>).
 TACTICS = [
-    ("initial_access", "Acesso inicial"),
-    ("execution", "Execução"),
-    ("persistence", "Persistência"),
-    ("privilege_escalation", "Escalação de privilégios"),
-    ("defense_evasion", "Evasão de defesa"),
-    ("credential_access", "Acesso a credenciais"),
-    ("discovery", "Descoberta"),
-    ("lateral_movement", "Movimentação lateral"),
-    ("collection", "Coleta"),
-    ("command_and_control", "Comando e controle"),
-    ("exfiltration", "Exfiltração"),
-    ("impact", "Impacto"),
-    ("reconnaissance", "Reconhecimento"),
-    ("resource_development", "Desenvolvimento de recursos"),
+    ("initial_access", "Initial Access"),
+    ("execution", "Execution"),
+    ("persistence", "Persistence"),
+    ("privilege_escalation", "Privilege Escalation"),
+    ("defense_evasion", "Defense Evasion"),
+    ("credential_access", "Credential Access"),
+    ("discovery", "Discovery"),
+    ("lateral_movement", "Lateral Movement"),
+    ("collection", "Collection"),
+    ("command_and_control", "Command and Control"),
+    ("exfiltration", "Exfiltration"),
+    ("impact", "Impact"),
+    ("reconnaissance", "Reconnaissance"),
+    ("resource_development", "Resource Development"),
 ]
 _TACTIC_SLUGS = {slug for slug, _ in TACTICS}
 TACTIC_IDS = {
@@ -50,7 +50,7 @@ _TECHNIQUE = re.compile(r"^attack\.(t\d{4}(?:\.\d{3})?)$", re.IGNORECASE)
 
 
 class ServiceError(Exception):
-    """Falha de configuração que a interface deve mostrar (ex.: pipeline extra inválido)."""
+    """Configuration failure the UI must show (e.g. an invalid extra pipeline)."""
 
 
 # --------------------------------------------------------------------------- helpers
@@ -62,7 +62,7 @@ def _issue(i: Issue) -> dict:
 
 def _case(r: CaseResult) -> dict:
     return {"name": r.name, "expect": r.expect, "got": r.got, "passed": r.passed, "error": r.error,
-            "kind": r.kind, "exercises_filter": r.exercises_filter}
+            "kind": r.kind, "exercises_filter": r.exercises_filter, "event": r.event}
 
 
 def _state(issues: list[Issue], results: list[CaseResult], conversion_failed: bool = False) -> str:
@@ -77,7 +77,7 @@ def _extra_pipelines(cfg: Config) -> list:
     try:
         return load_extra_pipelines(cfg.extra_pipelines)
     except Exception as exc:
-        raise ServiceError(f"não foi possível carregar extra_pipelines: {exc}") from exc
+        raise ServiceError(f"could not load extra_pipelines: {exc}") from exc
 
 
 def summarize(doc: object) -> dict:
@@ -87,7 +87,7 @@ def summarize(doc: object) -> dict:
     tactics = sorted({t[len("attack."):] for t in tags if t.startswith("attack.") and t[len("attack."):] in _TACTIC_SLUGS})
     techniques = sorted({m.group(1).upper() for t in tags if (m := _TECHNIQUE.match(t))})
     return {
-        "sigma_id": str(doc.get("id", "")),  # UUID da regra; "id" nas respostas é o caminho usado na URL
+        "sigma_id": str(doc.get("id", "")),  # the rule UUID; "id" in responses is the path used in URLs
         "title": str(doc.get("title", "")),
         "status": doc.get("status"),
         "level": doc.get("level"),
@@ -103,7 +103,7 @@ def _first_detection(docs: list) -> object:
 
 
 def rule_id(cfg: Config, path: Path) -> str:
-    """Identificador estável usado nas URLs: caminho relativo à pasta de regras."""
+    """Stable id used in URLs: path relative to the rules folder."""
     try:
         return path.resolve().relative_to(cfg.rules_dir.resolve()).as_posix()
     except ValueError:
@@ -111,7 +111,7 @@ def rule_id(cfg: Config, path: Path) -> str:
 
 
 def resolve_rule(cfg: Config, rid: str) -> Path | None:
-    """Resolve um id em arquivo. Só aceita arquivos de regra dentro da pasta de regras."""
+    """Resolve an id to a file. Only rule files inside the rules folder are accepted."""
     base = cfg.rules_dir.resolve()
     candidate = (base / rid).resolve()
     try:
@@ -129,12 +129,12 @@ def convert_all(text: str, target_names: list[str], extra: list) -> dict:
     for name in target_names:
         target = registry.get(name)
         if target is None:
-            out[name] = {"ok": False, "label": name, "error": "alvo desconhecido"}
+            out[name] = {"ok": False, "label": name, "error": "unknown target"}
             continue
         try:
             out[name] = {"ok": True, "label": target.label, "extension": target.extension,
                          "query": convert_text(text, target, extra)}
-        except Exception as exc:  # erros do pySigma e de plugins de terceiros
+        except Exception as exc:  # pySigma and third-party plugin errors
             message = " ".join(str(exc).split()) or type(exc).__name__
             out[name] = {"ok": False, "label": target.label, "error": f"{type(exc).__name__}: {message}"}
     return out
@@ -152,21 +152,21 @@ def _load_all(cfg: Config) -> tuple[list[RuleFile], dict[str, str]]:
 
 
 def _top_issues(issues: list[Issue], problems: list[Issue], results: list[CaseResult], conv: dict, limit: int = 3) -> list[dict]:
-    """As pendências que explicam o estado da regra, erros primeiro (para a lista de pendências)."""
+    """The problems that explain the rule state, errors first (for the to-do list)."""
     found: list[dict] = []
     for c in conv.values():
         if not c["ok"]:
-            found.append({"severity": "error", "message": f"falha de conversão ({c['label']}): {c.get('error', '')}"})
+            found.append({"severity": "error", "message": f"conversion failed ({c['label']}): {c.get('error', '')}"})
     for r in results:
         if not r.passed:
-            detail = r.error or f"esperado {r.expect}, obtido {r.got}"
-            found.append({"severity": "error", "message": f"caso “{r.name}”: {detail}"})
+            detail = r.error or f"expected {r.expect}, got {r.got}"
+            found.append({"severity": "error", "message": f"case “{r.name}”: {detail}"})
     found.extend(_issue(i) for i in [*issues, *problems])
     found.sort(key=lambda i: i["severity"] != "error")
     return found[:limit]
 
 
-# --------------------------------------------------------------------------- consultas
+# --------------------------------------------------------------------------- queries
 
 
 def list_rules(cfg: Config) -> list[dict]:
@@ -183,14 +183,17 @@ def list_rules(cfg: Config) -> list[dict]:
     for rf in files:
         issues = issues_by_rule.get(rf.rel, [])
         results, problems = run_rule_cases(cfg, rf)
-        chosen = routing.resolve(cfg, rule_id(cfg, rf.path), routing.first_detection(rf.docs))
+        doc = routing.first_detection(rf.docs)
+        chosen = routing.resolve(cfg, rule_id(cfg, rf.path), doc)
         conv = convert_all(rf.text, chosen.targets, extra)
+        ls = doc.get("logsource") if isinstance(doc, dict) and isinstance(doc.get("logsource"), dict) else {}
         out.append({
             "issues": _top_issues(issues, problems, results, conv),
             "id": rule_id(cfg, rf.path),
             "file": rf.rel,
             **summarize(_first_detection(rf.docs)),
-            "targets": chosen.targets,  # linguagem(ns) final(is)
+            "logsource": " / ".join(str(ls[k]) for k in ("product", "category", "service") if ls.get(k)) or None,
+            "targets": chosen.targets,  # final query language(s)
             "target_source": chosen.source,  # rule | route | default | all
             "conversion": {name: c["ok"] for name, c in conv.items()},
             "state": _state([*issues, *problems], results, any(not c["ok"] for c in conv.values())),
@@ -203,7 +206,7 @@ def list_rules(cfg: Config) -> list[dict]:
     for rel, message in broken.items():
         out.append({
             "id": rel, "file": rel, "sigma_id": "", "title": rel, "status": None, "level": None, "description": "",
-            "tags": [], "tactics": [], "techniques": [], "targets": [], "target_source": None, "conversion": {},
+            "tags": [], "tactics": [], "techniques": [], "logsource": None, "targets": [], "target_source": None, "conversion": {},
             "state": "fail", "error": message, "issues": [{"severity": "error", "message": message}],
             "lint": {"errors": 1, "warnings": 0}, "tests": {"total": 0, "passed": 0},
         })
@@ -211,7 +214,7 @@ def list_rules(cfg: Config) -> list[dict]:
 
 
 def rule_detail(cfg: Config, rid: str) -> dict:
-    """Tudo sobre uma regra. Levanta KeyError se o id não existe."""
+    """Everything about one rule. Raises KeyError if the id does not exist."""
     path = resolve_rule(cfg, rid)
     if path is None:
         raise KeyError(rid)
@@ -230,7 +233,7 @@ def rule_detail(cfg: Config, rid: str) -> dict:
     results, problems = run_rule_cases(cfg, rf)
     cpath = cases_path(cfg, rf)
     chosen = routing.resolve(cfg, rid, routing.first_detection(rf.docs))
-    # a linguagem final vem primeiro; os demais alvos ativos ficam para pré-visualização
+    # the final language comes first; the other active targets are previews
     conversions = convert_all(rf.text, list(dict.fromkeys([*chosen.targets, *cfg.targets])), _extra_pipelines(cfg))
     conv_failed = any(not conversions[t]["ok"] for t in chosen.targets if t in conversions)
     return {
@@ -253,22 +256,22 @@ def rule_detail(cfg: Config, rid: str) -> dict:
 
 
 def validate_text(cfg: Config, text: str, cases_text: str | None = None, targets: list[str] | None = None) -> dict:
-    """Valida uma regra que ainda não foi salva: lint, conversão e (opcional) casos de teste."""
+    """Validate an unsaved rule: lint, conversion and (optionally) test cases."""
     rel = "<editor>"
     try:
         docs = [d for d in yaml.safe_load_all(text) if d is not None]
     except yaml.YAMLError as exc:
-        return {"state": "fail", "lint": [{"severity": "error", "message": f"YAML inválido: {exc}"}],
-                "conversions": {}, "tests": None}
+        return {"state": "fail", "lint": [{"severity": "error", "message": f"invalid YAML: {exc}"}],
+                "conversions": {}, "tests": None, "targets": [], "target_source": None}
 
     issues: list[Issue] = []
     if not docs:
-        issues.append(Issue("error", rel, "documento vazio"))
+        issues.append(Issue("error", rel, "empty document"))
     for doc in docs:
         issues.extend(lint_doc(doc, rel, set(available_targets())))
 
     chosen = routing.resolve(cfg, None, routing.first_detection(docs)) if docs else routing.Resolved(list(cfg.targets), "all")
-    counted = list(targets) if targets else chosen.targets  # só a linguagem final reprova a regra
+    counted = list(targets) if targets else chosen.targets  # only the final language fails the rule
     names = list(dict.fromkeys([*counted, *([] if targets else cfg.targets)]))
     conversions = convert_all(text, names, _extra_pipelines(cfg)) if docs else {}
 
@@ -289,7 +292,7 @@ def validate_text(cfg: Config, text: str, cases_text: str | None = None, targets
 
 
 def repo_stats(cfg: Config) -> dict:
-    """Números para os dashboards, todos derivados do repositório (sem dados de SIEM nem de CI)."""
+    """Numbers for the dashboards, all derived from the repository (no SIEM or CI data)."""
     rules = list_rules(cfg)
     tactic_counts: Counter[str] = Counter()
     techniques: set[str] = set()
@@ -301,7 +304,7 @@ def repo_stats(cfg: Config) -> dict:
     covered = [t for t in tactics if t["count"] > 0]
     parsed = [r for r in rules if "error" not in r]
     return {
-        # etapas do pipeline, na ordem do `vitrix check`
+        # pipeline stages, in `vitrix check` order
         "pipeline": {
             "parse": {"ok": len(parsed), "failed": len(rules) - len(parsed)},
             "validation": {s: sum(r["state"] == s for r in rules) for s in ("ok", "warn", "fail")},
@@ -310,9 +313,10 @@ def repo_stats(cfg: Config) -> dict:
         },
         "rules": {
             "total": len(rules),
-            "by_status": dict(Counter(r["status"] or "sem status" for r in rules)),
-            "by_level": dict(Counter(r["level"] or "sem level" for r in rules)),
+            "by_status": dict(Counter(r["status"] or "no status" for r in rules)),
+            "by_level": dict(Counter(r["level"] or "no level" for r in rules)),
             "by_state": dict(Counter(r["state"] for r in rules)),
+            "by_logsource": dict(Counter(r.get("logsource") or "(no logsource)" for r in rules)),
         },
         "mitre": {
             "tactics": sorted(tactics, key=lambda t: (-t["count"], t["name"])),
@@ -338,102 +342,142 @@ def repo_stats(cfg: Config) -> dict:
     }
 
 
-# --------------------------------------------------------------------------- pull requests
+# --------------------------------------------------------------------------- changes: CI first, then pull request
 
 _SAFE_SEGMENT = re.compile(r"^[A-Za-z0-9_][A-Za-z0-9._-]*$")
 
 
 class ChangeError(Exception):
-    """Pedido de mudança inválido (caminho ruim, regra reprovada). Vira HTTP 422."""
+    """Invalid change request (bad path, failing rule). Becomes HTTP 422."""
 
 
 def normalize_rule_path(path: str) -> str:
-    """Valida o caminho da regra dentro de rules/ (ex.: windows/minha_regra.yml)."""
+    """Validate the rule path inside rules/ (e.g. windows/my_rule.yml)."""
     raw = path.strip().replace("\\", "/")
     parts = [p for p in raw.split("/") if p]
     if not parts or raw.startswith("/") or any(not _SAFE_SEGMENT.match(p) for p in parts):
-        raise ChangeError("caminho inválido: use pastas e nomes com letras, números, '.', '_' ou '-' (ex.: windows/minha_regra.yml)")
+        raise ChangeError("invalid path: use folders and names with letters, digits, '.', '_' or '-' (e.g. windows/my_rule.yml)")
     if Path(parts[-1]).suffix not in RULE_SUFFIXES:
-        raise ChangeError("o arquivo da regra deve terminar em .yml ou .yaml")
+        raise ChangeError("the rule file must end in .yml or .yaml")
     return "/".join(parts)
 
 
-def _pr_body(summary: dict, validation: dict, rule_repo_path: str, cases_repo_path: str | None, is_new: bool) -> str:
+def _require_github(cfg: Config) -> GitHubConfig:
+    if cfg.github is None:
+        raise GitHubError("configure the 'github' section in vitrix.yml (repo and base) to validate in CI and open pull requests", status=503)
+    return cfg.github
+
+
+def _change_body(summary: dict, validation: dict, quality: dict, rule_repo_path: str, cases_repo_path: str | None, is_new: bool) -> str:
     tests = validation.get("tests") or {"results": []}
     passed = sum(r["passed"] for r in tests["results"])
     warnings = [i["message"] for i in validation["lint"] if i["severity"] == "warning"]
     lines = [
-        f"{'Nova regra' if is_new else 'Alteração de regra'} enviada pela interface do Vitrix.",
+        f"{'New rule' if is_new else 'Rule change'} submitted from the Vitrix UI.",
         "",
-        f"- **Regra:** {summary['title'] or '(sem título)'} (`{rule_repo_path}`)",
+        f"- **Rule:** {summary['title'] or '(untitled)'} (`{rule_repo_path}`)",
         f"- **level:** `{summary['level'] or '—'}` · **status:** `{summary['status'] or '—'}`",
         f"- **ATT&CK:** {', '.join(summary['techniques']) or '—'}",
-        f"- **Linguagem final:** {', '.join(validation['targets']) or '—'}",
-        f"- **Testes locais:** {passed}/{len(tests['results'])}" + (f" (`{cases_repo_path}`)" if cases_repo_path else " (sem casos)"),
+        f"- **Final language:** {', '.join(validation['targets']) or '—'}",
+        f"- **Local tests:** {passed}/{len(tests['results'])}" + (f" (`{cases_repo_path}`)" if cases_repo_path else " (no cases)"),
+        f"- **Local quality gate:** {'ready' if quality['ready'] else 'blocked'} · health {quality['score']}/100",
     ]
     if warnings:
-        lines += ["", "**Avisos do lint:**", *[f"- {w}" for w in warnings]]
-    lines += ["", "O CI do repositório roda `vitrix check` neste PR."]
+        lines += ["", "**Lint warnings:**", *[f"- {w}" for w in warnings]]
     return "\n".join(lines)
 
 
-def propose_change(
-    cfg: Config,
-    path: str,
-    rule_text: str,
-    cases_text: str | None,
-    title: str | None = None,
-    client: GitHubClient | None = None,
-) -> dict:
-    """Abre um PR com a regra (e os casos) editados. Nada é gravado no disco local.
+def submit_rule(cfg: Config, path: str, rule_text: str, cases_text: str | None, title: str | None = None,
+                client: GitHubClient | None = None, submitted_by: str = "") -> dict:
+    """Step 1: send the rule (and its cases) to a new branch so the real CI validates it.
 
-    Regras reprovadas (estado "fail") não viram PR: o CI reprovaria do mesmo jeito.
+    Rules blocked by the local quality gate are not sent: CI would fail them the same way.
+    Nothing is written to the local disk and no pull request is opened yet.
     """
-    if cfg.github is None:
-        raise GitHubError("configure a seção 'github' no vitrix.yml (repo e base) para abrir pull requests", status=503)
+    from .flow import draft_quality
+
+    gh = _require_github(cfg)
     rel = normalize_rule_path(path)
-    validation = validate_text(cfg, rule_text, cases_text if cases_text and cases_text.strip() else None)
-    if validation["state"] == "fail":
-        raise ChangeError("a regra está reprovada (erros de lint, conversão ou testes); corrija antes de abrir o pull request")
+    cases = cases_text if cases_text and cases_text.strip() else None
+    validation = validate_text(cfg, rule_text, cases)
+    quality = draft_quality(cfg, validation, rule_text, cases is not None, rel)
+    if validation["state"] == "fail" or not quality["ready"]:
+        reasons = "; ".join(quality["blockers"][:3]) or "lint, conversion or test errors"
+        raise ChangeError(f"the rule is blocked by the local quality gate ({reasons}); fix it before sending it to CI")
 
     docs = [d for d in yaml.safe_load_all(rule_text) if d is not None]
     summary = summarize(_first_detection(docs))
     rule_file = cfg.rules_dir / rel
     is_new = not rule_file.is_file()
-    rule_repo_path = cfg.github.repo_path(cfg.rel(rule_file))
+    rule_repo_path = gh.repo_path(cfg.rel(rule_file))
     files = {rule_repo_path: rule_text}
     cases_repo_path = None
-    if cases_text and cases_text.strip():
-        cases_repo_path = cfg.github.repo_path(cfg.rel(cfg.cases_dir / rel))
-        files[cases_repo_path] = cases_text
+    if cases:
+        cases_repo_path = gh.repo_path(cfg.rel(cfg.cases_dir / rel))
+        files[cases_repo_path] = cases
 
     name = summary["title"] or rel
-    pr_title = (title or "").strip() or f"{'feat' if is_new else 'tune'}: {'nova regra' if is_new else 'ajusta'} {name}"
-    client = client or GitHubClient(cfg.github)
-    pr = client.open_pull_request(files, pr_title[:200], _pr_body(summary, validation, rule_repo_path, cases_repo_path, is_new), branch_slug(rel))
-    return {**pr, "title": pr_title[:200], "files": sorted(files), "is_new": is_new, "state": validation["state"]}
+    pr_title = ((title or "").strip() or f"{'feat' if is_new else 'tune'}: {'new rule' if is_new else 'update'} {name}")[:200]
+    body = _change_body(summary, validation, quality, rule_repo_path, cases_repo_path, is_new)
+    client = client or GitHubClient(gh)
+    message = f"{pr_title}\n\n{body}" + (f"\n\n{submitted_by}" if submitted_by else "")
+    pushed = client.push_branch(files, message, branch_slug(rel))
+    return {**pushed, "title": pr_title, "files": sorted(files), "is_new": is_new}
+
+
+def submit_config(cfg: Config, text: str, title: str | None = None, client: GitHubClient | None = None, submitted_by: str = "") -> dict:
+    """Step 1 for vitrix.yml: an invalid configuration is never sent."""
+    gh = _require_github(cfg)
+    check = validate_config_text(cfg, text)
+    if not check["ok"]:
+        raise ChangeError("invalid configuration: " + "; ".join(check["errors"]))
+    repo_path = gh.repo_path(cfg.rel(cfg.path) if cfg.path else "vitrix.yml")
+    pr_title = ((title or "").strip() or "chore: update vitrix.yml")[:200]
+    body = "\n".join([
+        "Change to `vitrix.yml` submitted from the Vitrix Settings page.",
+        "",
+        f"- **targets:** {', '.join(check['config']['targets'])}",
+        f"- **default_target:** {check['config']['default_target'] or '—'}",
+        f"- **routes:** {len(check['config']['routes'])}",
+        *([""] + ["**Warnings:**"] + [f"- {w}" for w in check["warnings"]] if check["warnings"] else []),
+    ])
+    client = client or GitHubClient(gh)
+    message = f"{pr_title}\n\n{body}" + (f"\n\n{submitted_by}" if submitted_by else "")
+    pushed = client.push_branch({repo_path: text}, message, "config")
+    return {**pushed, "title": pr_title, "files": [repo_path], "is_new": False}
+
+
+def ci_status(cfg: Config, commit: str, client: GitHubClient | None = None) -> dict:
+    """State of the real CI for one commit pushed by step 1."""
+    return (client or GitHubClient(_require_github(cfg))).ci_status(commit)
+
+
+def open_pull_request(cfg: Config, branch: str, commit: str, title: str | None = None, client: GitHubClient | None = None) -> dict:
+    """Step 2: open the pull request, only if the real CI passed for that exact commit."""
+    return (client or GitHubClient(_require_github(cfg))).open_validated_pull_request(branch, commit, (title or "").strip()[:200] or None)
 
 
 def github_status(cfg: Config) -> dict:
-    """O que a interface precisa saber para mostrar (ou não) o botão de PR. Nunca expõe o token."""
+    """What the UI needs to show (or hide) the CI and PR buttons. Never exposes the token."""
     from .github import token_from_env
 
     if cfg.github is None:
-        return {"configured": False, "repo": None, "base": None, "token": token_from_env() is not None}
-    return {"configured": True, "repo": cfg.github.repo, "base": cfg.github.base, "token": token_from_env() is not None}
+        return {"configured": False, "repo": None, "base": None, "workflow": None, "token": token_from_env() is not None}
+    return {"configured": True, "repo": cfg.github.repo, "base": cfg.github.base, "workflow": cfg.github.workflow,
+            "token": token_from_env() is not None}
 
 
-# --------------------------------------------------------------------------- conector do GitHub (leitura)
+# --------------------------------------------------------------------------- GitHub connector (read-only)
 
-ACTIVITY_TTL = 60.0  # segundos; a API do GitHub limita a 5.000 chamadas/hora por token
+ACTIVITY_TTL = 60.0  # seconds; the GitHub API allows 5,000 calls/hour per token
 _activity_cache: dict[tuple[str, str], tuple[float, dict]] = {}
 
 
 def github_activity(cfg: Config, client: GitHubClient | None = None, refresh: bool = False) -> dict:
-    """PRs abertos, tempo até o merge e execuções de CI, do GitHub. Nunca levanta exceção:
-    sem configuração, sem token ou com erro, devolve `available: false` e o motivo."""
+    """Open PRs, time to merge and CI runs from GitHub. Never raises: without configuration,
+    token or on error it returns `available: false` and the reason."""
     if cfg.github is None:
-        return {"available": False, "reason": "not_configured", "message": "configure a seção 'github' no vitrix.yml"}
+        return {"available": False, "reason": "not_configured", "message": "configure the 'github' section in vitrix.yml"}
     key = (cfg.github.repo, cfg.github.base)
     cached = _activity_cache.get(key)
     if cached and not refresh and time.monotonic() - cached[0] < ACTIVITY_TTL:
@@ -448,11 +492,11 @@ def github_activity(cfg: Config, client: GitHubClient | None = None, refresh: bo
     return data
 
 
-# --------------------------------------------------------------------------- vitrix.yml pela interface
+# --------------------------------------------------------------------------- vitrix.yml from the UI
 
 
 def config_view(cfg: Config) -> dict:
-    """Configuração efetiva e o texto do vitrix.yml (para a tela de Configurações)."""
+    """Effective configuration and the vitrix.yml text (for the Settings page)."""
     return {
         "path": cfg.rel(cfg.path) if cfg.path else None,
         "text": cfg.path.read_text(encoding="utf-8") if cfg.path else "",
@@ -462,14 +506,17 @@ def config_view(cfg: Config) -> dict:
         "rules_dir": cfg.rel(cfg.rules_dir),
         "cases_dir": cfg.rel(cfg.cases_dir),
         "output_dir": cfg.rel(cfg.output_dir),
+        "datasets_dir": cfg.rel(cfg.datasets_dir) if cfg.datasets_dir else None,
         "extra_pipelines": [cfg.rel(p) for p in cfg.extra_pipelines],
         "require_cases": cfg.require_cases,
-        "github": {"repo": cfg.github.repo, "base": cfg.github.base, "path": cfg.github.path} if cfg.github else None,
+        "quality_gate": dict(vars(cfg.gate)),
+        "github": {"repo": cfg.github.repo, "base": cfg.github.base, "path": cfg.github.path, "workflow": cfg.github.workflow}
+        if cfg.github else None,
     }
 
 
 def validate_config_text(cfg: Config, text: str) -> dict:
-    """Valida um vitrix.yml editado, como se substituísse o atual. Não grava nada."""
+    """Validate an edited vitrix.yml as if it replaced the current one. Writes nothing."""
     try:
         new = parse_config_text(text, cfg.root)
     except ConfigError as exc:
@@ -479,41 +526,17 @@ def validate_config_text(cfg: Config, text: str) -> dict:
     known = set(available_targets())
     unknown = sorted(routing.config_target_names(new) - known)
     if unknown:
-        errors.append(f"alvo desconhecido: {', '.join(unknown)} (disponíveis: {', '.join(sorted(known))})")
+        errors.append(f"unknown target: {', '.join(unknown)} (available: {', '.join(sorted(known))})")
     if new.default_target and new.default_target not in new.targets:
-        warnings.append(f"default_target '{new.default_target}' não está em targets: só aparece nas regras sem rota")
+        warnings.append(f"default_target '{new.default_target}' is not in targets: it only applies to rules without a route")
     for p in new.extra_pipelines:
         if not p.is_file():
-            errors.append(f"extra_pipelines: arquivo não encontrado: {new.rel(p)}")
+            errors.append(f"extra_pipelines: file not found: {new.rel(p)}")
     if not new.rules_dir.is_dir():
-        warnings.append(f"rules_dir '{new.rel(new.rules_dir)}' não existe neste repositório")
+        warnings.append(f"rules_dir '{new.rel(new.rules_dir)}' does not exist in this repository")
     if new.github is None:
-        warnings.append("sem a seção 'github': a interface não abre pull requests nem mostra o CI")
+        warnings.append("no 'github' section: the UI cannot validate in CI, open pull requests or show CI data")
     view = config_view(new)
     view.pop("text")
     view.pop("path")
     return {"ok": not errors, "errors": errors, "warnings": warnings, "config": view}
-
-
-def propose_config_change(cfg: Config, text: str, title: str | None = None, client: GitHubClient | None = None) -> dict:
-    """Abre um PR alterando o vitrix.yml. Configuração inválida não vira PR."""
-    if cfg.github is None:
-        raise GitHubError("configure a seção 'github' no vitrix.yml (repo e base) para abrir pull requests", status=503)
-    check = validate_config_text(cfg, text)
-    if not check["ok"]:
-        raise ChangeError("configuração inválida: " + "; ".join(check["errors"]))
-    repo_path = cfg.github.repo_path(cfg.rel(cfg.path) if cfg.path else "vitrix.yml")
-    pr_title = ((title or "").strip() or "chore: atualiza vitrix.yml")[:200]
-    body = "\n".join([
-        "Alteração do `vitrix.yml` enviada pela tela de Configurações do Vitrix.",
-        "",
-        f"- **targets:** {', '.join(check['config']['targets'])}",
-        f"- **default_target:** {check['config']['default_target'] or '—'}",
-        f"- **rotas:** {len(check['config']['routes'])}",
-        *([""] + ["**Avisos:**"] + [f"- {w}" for w in check["warnings"]] if check["warnings"] else []),
-        "",
-        "O CI do repositório roda `vitrix check` neste PR.",
-    ])
-    client = client or GitHubClient(cfg.github)
-    pr = client.open_pull_request({repo_path: text}, pr_title, body, "config")
-    return {**pr, "title": pr_title, "files": [repo_path], "is_new": False, "state": "ok"}

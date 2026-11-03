@@ -1,149 +1,258 @@
 import { useQuery } from "@tanstack/react-query";
 import clsx from "clsx";
-import { AlertTriangle, CheckCircle2, Filter, Play, XCircle } from "lucide-react";
+import { AlertTriangle, CheckCircle2, ChevronRight, Play, Search, XCircle } from "lucide-react";
 import { useMemo, useState } from "react";
 import { Link } from "react-router-dom";
 import { api } from "../api";
-import { StatTile, pct } from "../components/dash";
+import { DonutChart, SERIES_COLORS } from "../components/charts";
+import { Section, pct } from "../components/dash";
 import { KIND_LABEL, KindTag } from "../components/flow";
-import { Card, ErrorBox, PageHeader } from "../components/ui";
-import type { CaseKind } from "../types";
+import { Card, ErrorBox, LevelTag, PageHeader, btnPrimary } from "../components/ui";
+import type { CaseKind, CaseResult, SuiteRule } from "../types";
 
 const KINDS: CaseKind[] = ["positive", "negative", "false_positive", "edge"];
 
+const passed = (r: SuiteRule) => r.results.filter((c) => c.passed).length;
+const failing = (r: SuiteRule) => r.results.some((c) => !c.passed) || r.problems.some((p) => p.severity === "error");
+
+/** One test case: a compact row that expands to the event that was tested. */
+function CaseRow({ c }: { c: CaseResult }) {
+  const [open, setOpen] = useState(!c.passed);
+  const expectedLabel = c.expect === "match" ? "should match" : "should not match";
+  return (
+    <li>
+      <button type="button" onClick={() => setOpen(!open)} aria-expanded={open} className="flex w-full items-center gap-3 px-4 py-2.5 text-left hover:bg-surface">
+        {c.passed ? <CheckCircle2 size={16} className="shrink-0 text-good" aria-label="passed" /> : <XCircle size={16} className="shrink-0 text-bad" aria-label="failed" />}
+        <span className="min-w-0 flex-1 truncate text-[13.5px] text-text">{c.name}</span>
+        <KindTag kind={c.kind} />
+        <ChevronRight size={15} className={clsx("shrink-0 text-subtle transition-transform", open && "rotate-90")} aria-hidden />
+      </button>
+      {open && (
+        <div className="space-y-3 border-t border-line bg-black/10 px-4 py-3 text-[12.5px]">
+          <div className="flex flex-wrap items-center gap-x-5 gap-y-1">
+            <span className="text-muted">
+              Expected: <b className="font-mono text-text">{c.expect}</b> <span className="text-subtle">({expectedLabel})</span>
+            </span>
+            <span className="text-muted">
+              Got: <b className={clsx("font-mono", c.passed ? "text-text" : "text-bad")}>{c.got}</b>
+            </span>
+            {c.exercises_filter && <span className="text-xs text-accent">proves the exclusion</span>}
+          </div>
+          {c.error && <p className="text-bad [overflow-wrap:anywhere]">{c.error}</p>}
+          {c.event && (
+            <dl className="grid grid-cols-[minmax(6rem,11rem)_1fr] gap-x-4 gap-y-1 rounded-lg border border-line bg-code p-3 font-mono text-[12px]">
+              {Object.entries(c.event).map(([k, v]) => (
+                <div key={k} className="contents">
+                  <dt className="truncate text-[#93c5fd]" title={k}>
+                    {k}
+                  </dt>
+                  <dd className="text-code-text [overflow-wrap:anywhere]">{typeof v === "string" ? v : JSON.stringify(v)}</dd>
+                </div>
+              ))}
+            </dl>
+          )}
+        </div>
+      )}
+    </li>
+  );
+}
+
+function RulePanel({ rule }: { rule: SuiteRule }) {
+  const [kind, setKind] = useState<"all" | CaseKind>("all");
+  const counts = useMemo(() => Object.fromEntries(KINDS.map((k) => [k, rule.results.filter((c) => c.kind === k).length])) as Record<CaseKind, number>, [rule]);
+  const shown = rule.results.filter((c) => kind === "all" || c.kind === kind);
+  const missing = KINDS.filter((k) => counts[k] === 0 && (k === "false_positive" || k === "edge"));
+  return (
+    <Card className="overflow-hidden">
+      <div className="flex flex-wrap items-start justify-between gap-3 border-b border-line px-4 py-3">
+        <div className="min-w-0">
+          <h2 className="truncate text-[15px] font-semibold text-strong">{rule.title || rule.id}</h2>
+          <p className="font-mono text-xs text-subtle">{rule.id}</p>
+        </div>
+        <div className="flex items-center gap-3">
+          <LevelTag level={rule.level} />
+          <Link to={`/editor/${rule.id}`} className="text-xs font-medium text-accent hover:underline">
+            Open in the Editor
+          </Link>
+        </div>
+      </div>
+
+      <div className="flex flex-wrap items-center gap-1.5 border-b border-line px-4 py-2.5" role="group" aria-label="Case kind">
+        {(["all", ...KINDS] as const).map((k) => {
+          const n = k === "all" ? rule.results.length : counts[k];
+          return (
+            <button
+              key={k}
+              type="button"
+              aria-pressed={kind === k}
+              disabled={n === 0}
+              onClick={() => setKind(k)}
+              className={clsx(
+                "rounded-full px-3 py-1 text-xs transition-colors disabled:cursor-default disabled:opacity-40",
+                kind === k ? "bg-accent-soft font-semibold text-strong" : "text-muted hover:bg-surface-2 hover:text-text",
+              )}
+            >
+              {k === "all" ? "All" : KIND_LABEL[k]} <span className="tabular-nums text-subtle">{n}</span>
+            </button>
+          );
+        })}
+        <span className="ml-auto text-xs tabular-nums text-muted">
+          {passed(rule)}/{rule.results.length} passing
+        </span>
+      </div>
+
+      {missing.length > 0 && (
+        <p className="flex items-center gap-2 border-b border-line bg-warn-soft px-4 py-2 text-xs text-text">
+          <AlertTriangle size={14} className="shrink-0 text-warn" aria-hidden />
+          No {missing.map((k) => KIND_LABEL[k].toLowerCase()).join(" or ")} case: the quality gate recommends one{missing.includes("false_positive") ? " (required for high and critical rules)" : ""}.
+        </p>
+      )}
+
+      <ul className="divide-y divide-line">
+        {shown.map((c, i) => (
+          <CaseRow key={`${c.name}-${i}`} c={c} />
+        ))}
+        {shown.length === 0 && <li className="px-4 py-8 text-center text-sm text-muted">No case of this kind.</li>}
+      </ul>
+
+      {rule.problems.length > 0 && (
+        <ul className="space-y-1 border-t border-line px-4 py-3 text-[12.5px]">
+          {rule.problems.map((p, i) => (
+            <li key={i} className="flex gap-2">
+              {p.severity === "error" ? <XCircle size={14} className="mt-0.5 shrink-0 text-bad" aria-hidden /> : <AlertTriangle size={14} className="mt-0.5 shrink-0 text-warn" aria-hidden />}
+              <span className="text-text">{p.message}</span>
+            </li>
+          ))}
+        </ul>
+      )}
+    </Card>
+  );
+}
+
 export default function TestSuitesPage() {
   const { data, error, isFetching, refetch } = useQuery({ queryKey: ["tests"], queryFn: api.tests });
-  const [kind, setKind] = useState<"all" | CaseKind>("all");
-  const [onlyFailed, setOnlyFailed] = useState(false);
+  const [selected, setSelected] = useState<string | null>(null);
+  const [q, setQ] = useState("");
+  const [onlyFailing, setOnlyFailing] = useState(false);
 
-  const rules = useMemo(
-    () =>
-      (data?.rules ?? [])
-        .map((r) => ({ ...r, shown: r.results.filter((c) => (kind === "all" || c.kind === kind) && (!onlyFailed || !c.passed)) }))
-        .filter((r) => r.shown.length > 0 || (onlyFailed && r.problems.some((p) => p.severity === "error"))),
-    [data, kind, onlyFailed],
-  );
+  const rules = useMemo(() => {
+    const needle = q.trim().toLowerCase();
+    return [...(data?.rules ?? [])]
+      .filter((r) => (!needle || `${r.title} ${r.id}`.toLowerCase().includes(needle)) && (!onlyFailing || failing(r)))
+      .sort((a, b) => Number(failing(b)) - Number(failing(a)) || a.id.localeCompare(b.id));
+  }, [data, q, onlyFailing]);
+
+  const current = (data?.rules ?? []).find((r) => r.id === selected) ?? rules[0] ?? null;
+  const failingRules = (data?.rules ?? []).filter(failing).length;
 
   return (
     <div className="mx-auto max-w-7xl px-4 py-8 sm:px-8">
       <PageHeader
         title="Test suites"
-        subtitle="Todos os casos de teste do repositório, rodados no avaliador local. Cada caso tem um tipo: positivo, negativo, falso positivo ou borda."
+        subtitle="Every test case in the repository, run by the local evaluator. Pick a rule to see its cases; open a case to see the exact event that was tested."
         actions={
-          <button
-            type="button"
-            onClick={() => refetch()}
-            className="inline-flex items-center gap-2 rounded-[10px] bg-brand px-4 py-2 text-[13.5px] font-semibold text-strong hover:brightness-110"
-          >
-            <Play size={15} className={isFetching ? "animate-pulse" : undefined} aria-hidden /> {isFetching ? "Executando…" : "Executar suites"}
+          <button type="button" onClick={() => refetch()} className={btnPrimary}>
+            <Play size={15} className={isFetching ? "animate-pulse" : undefined} aria-hidden /> {isFetching ? "Running…" : "Run suites"}
           </button>
         }
       />
       {error && <ErrorBox message={(error as Error).message} />}
       {data && (
         <>
-          <div className="mb-5 grid gap-4 sm:grid-cols-2 xl:grid-cols-5">
-            <StatTile
-              label="Todos os casos"
-              value={`${data.passed}/${data.total}`}
-              sub={`${pct(data.passed, data.total)}% aprovados · ${data.duration_ms} ms`}
-              status={data.passed === data.total ? "ok" : "fail"}
-            />
-            {KINDS.map((k) => (
-              <StatTile
-                key={k}
-                label={KIND_LABEL[k]}
-                value={`${data.by_kind[k].passed}/${data.by_kind[k].total}`}
-                sub={data.by_kind[k].total ? (data.by_kind[k].passed === data.by_kind[k].total ? "todos aprovados" : "há reprovados") : "nenhum caso"}
-                status={data.by_kind[k].total === 0 ? "warn" : data.by_kind[k].passed === data.by_kind[k].total ? "ok" : "fail"}
+          <div className="mb-5 grid gap-4 lg:grid-cols-[minmax(0,1.3fr)_minmax(0,1fr)]">
+            <Section title="Cases by kind" aside={`${data.total} cases · ${data.duration_ms} ms`}>
+              <DonutChart
+                ariaLabel="Test cases by kind"
+                unit=" cases"
+                centerValue={`${pct(data.passed, data.total)}%`}
+                centerLabel={`${data.passed}/${data.total} passing`}
+                slices={KINDS.map((k, i) => ({ key: k, label: KIND_LABEL[k], value: data.by_kind[k].total, color: SERIES_COLORS[i] }))}
               />
-            ))}
+            </Section>
+            <Section title="Health of the suites">
+              <ul className="space-y-3 text-[13px]">
+                <li className="flex items-center justify-between gap-3">
+                  <span className="flex items-center gap-2 text-muted">
+                    {failingRules ? <XCircle size={15} className="text-bad" aria-hidden /> : <CheckCircle2 size={15} className="text-good" aria-hidden />}
+                    Rules with failing cases
+                  </span>
+                  <b className="tabular-nums text-strong">{failingRules}</b>
+                </li>
+                {KINDS.slice(2).map((k) => {
+                  const withKind = data.rules.filter((r) => r.results.some((c) => c.kind === k)).length;
+                  return (
+                    <li key={k} className="flex items-center justify-between gap-3">
+                      <span className="flex items-center gap-2 text-muted">
+                        {withKind === data.rules.length ? <CheckCircle2 size={15} className="text-good" aria-hidden /> : <AlertTriangle size={15} className="text-warn" aria-hidden />}
+                        Rules with a {KIND_LABEL[k].toLowerCase()} case
+                      </span>
+                      <b className="tabular-nums text-strong">
+                        {withKind}/{data.rules.length}
+                      </b>
+                    </li>
+                  );
+                })}
+                <li className="flex items-center justify-between gap-3">
+                  <span className="flex items-center gap-2 text-muted">
+                    <CheckCircle2 size={15} className="text-good" aria-hidden /> Exclusions proven by a case
+                  </span>
+                  <b className="tabular-nums text-strong">{data.rules.flatMap((r) => r.results).filter((c) => c.exercises_filter).length}</b>
+                </li>
+              </ul>
+            </Section>
           </div>
 
-          <div className="mb-4 flex flex-wrap items-center gap-3">
-            <div className="flex gap-1 rounded-[10px] border border-line bg-surface p-1" role="group" aria-label="Tipo de caso">
-              {(["all", ...KINDS] as const).map((k) => (
-                <button
-                  key={k}
-                  type="button"
-                  aria-pressed={kind === k}
-                  onClick={() => setKind(k)}
-                  className={clsx("rounded-md px-3 py-1 text-[13px]", kind === k ? "bg-accent-soft font-medium text-strong" : "text-muted hover:text-text")}
-                >
-                  {k === "all" ? "Todos" : KIND_LABEL[k]}
-                </button>
+          <div className="grid items-start gap-5 lg:grid-cols-[21rem_minmax(0,1fr)]">
+            <Card className="overflow-hidden lg:sticky lg:top-4">
+              <div className="space-y-2 border-b border-line p-3">
+                <label className="relative block">
+                  <span className="sr-only">Search rules</span>
+                  <Search size={15} className="absolute left-3 top-1/2 -translate-y-1/2 text-subtle" aria-hidden />
+                  <input
+                    value={q}
+                    onChange={(e) => setQ(e.target.value)}
+                    placeholder="Search rules"
+                    className="w-full rounded-[10px] border border-line bg-surface py-1.5 pl-9 pr-3 text-sm text-text placeholder:text-subtle focus:border-accent/50"
+                  />
+                </label>
+                <label className="flex items-center gap-2 text-xs text-muted">
+                  <input type="checkbox" checked={onlyFailing} onChange={(e) => setOnlyFailing(e.target.checked)} className="accent-[#8b7cf6]" /> Failing only
+                </label>
+              </div>
+              <ul className="max-h-[560px] divide-y divide-line overflow-auto">
+                {rules.map((r) => {
+                  const bad = failing(r);
+                  const on = current?.id === r.id;
+                  return (
+                    <li key={r.id}>
+                      <button
+                        type="button"
+                        onClick={() => setSelected(r.id)}
+                        aria-current={on}
+                        className={clsx("flex w-full items-center gap-3 px-3 py-2.5 text-left", on ? "bg-accent-soft" : "hover:bg-surface")}
+                      >
+                        {bad ? <XCircle size={16} className="shrink-0 text-bad" aria-label="failing" /> : <CheckCircle2 size={16} className="shrink-0 text-good" aria-label="passing" />}
+                        <span className="min-w-0 flex-1">
+                          <span className="block truncate text-[13px] font-medium text-strong">{r.title || r.id}</span>
+                          <span className="block truncate font-mono text-[11px] text-subtle">{r.id}</span>
+                        </span>
+                        <span className="text-xs tabular-nums text-muted">
+                          {passed(r)}/{r.results.length}
+                        </span>
+                      </button>
+                    </li>
+                  );
+                })}
+                {rules.length === 0 && <li className="px-3 py-6 text-center text-sm text-muted">No rule matches.</li>}
+              </ul>
+            </Card>
+
+            <div className="min-w-0 space-y-4">
+              {current ? <RulePanel key={current.id} rule={current} /> : <p className="text-sm text-muted">Select a rule.</p>}
+              {data.broken.map((b) => (
+                <ErrorBox key={b.file} message={`${b.file}: ${b.error}`} />
               ))}
             </div>
-            <label className="flex items-center gap-2 text-[13px] text-muted">
-              <input type="checkbox" checked={onlyFailed} onChange={(e) => setOnlyFailed(e.target.checked)} className="accent-[#8b7cf6]" />
-              <Filter size={14} aria-hidden /> Só reprovados
-            </label>
-          </div>
-
-          <div className="space-y-4">
-            {rules.map((r) => (
-              <Card key={r.id} className="overflow-hidden">
-                <div className="flex flex-wrap items-center justify-between gap-2 border-b border-line px-4 py-3">
-                  <span>
-                    <Link to={`/editor/${r.id}`} className="text-[13.5px] font-semibold text-strong hover:text-accent">
-                      {r.title || r.id}
-                    </Link>
-                    <span className="ml-2 font-mono text-[11.5px] text-subtle">{r.id}</span>
-                  </span>
-                  <span className="text-xs text-muted tabular-nums">
-                    {r.results.filter((c) => c.passed).length}/{r.results.length} casos
-                  </span>
-                </div>
-                <table className="w-full text-left text-[13px]">
-                  <caption className="sr-only">Casos de {r.id}</caption>
-                  <thead className="text-[11px] uppercase tracking-wide text-subtle">
-                    <tr>
-                      <th className="px-4 py-2 font-medium">Resultado</th>
-                      <th className="px-4 py-2 font-medium">Caso</th>
-                      <th className="px-4 py-2 font-medium">Tipo</th>
-                      <th className="px-4 py-2 font-medium">Esperado</th>
-                      <th className="px-4 py-2 font-medium">Obtido</th>
-                    </tr>
-                  </thead>
-                  <tbody>
-                    {r.shown.map((c, i) => (
-                      <tr key={i} className="border-t border-line">
-                        <td className="px-4 py-2">
-                          <span className={clsx("inline-flex items-center gap-1 text-xs font-semibold", c.passed ? "text-good" : "text-bad")}>
-                            {c.passed ? <CheckCircle2 size={14} aria-hidden /> : <XCircle size={14} aria-hidden />}
-                            {c.passed ? "passou" : "falhou"}
-                          </span>
-                        </td>
-                        <td className="px-4 py-2 text-text">
-                          {c.name}
-                          {c.exercises_filter && <span className="ml-2 text-xs text-subtle">· prova a exclusão</span>}
-                          {c.error && <span className="block text-xs text-bad">{c.error}</span>}
-                        </td>
-                        <td className="px-4 py-2">
-                          <KindTag kind={c.kind} />
-                        </td>
-                        <td className="px-4 py-2 font-mono text-xs text-muted">{c.expect}</td>
-                        <td className="px-4 py-2 font-mono text-xs text-muted">{c.got}</td>
-                      </tr>
-                    ))}
-                  </tbody>
-                </table>
-                {r.problems.length > 0 && (
-                  <ul className="space-y-1 border-t border-line px-4 py-2.5 text-[12.5px]">
-                    {r.problems.map((p, i) => (
-                      <li key={i} className="flex gap-2">
-                        {p.severity === "error" ? <XCircle size={14} className="mt-0.5 shrink-0 text-bad" aria-hidden /> : <AlertTriangle size={14} className="mt-0.5 shrink-0 text-warn" aria-hidden />}
-                        <span className="text-text">{p.message}</span>
-                      </li>
-                    ))}
-                  </ul>
-                )}
-              </Card>
-            ))}
-            {rules.length === 0 && <p className="text-sm text-muted">Nenhum caso com esse filtro.</p>}
-            {data.broken.map((b) => (
-              <ErrorBox key={b.file} message={`${b.file}: ${b.error}`} />
-            ))}
           </div>
         </>
       )}

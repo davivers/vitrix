@@ -1,0 +1,12 @@
+# Compiled queries: built by CI, not edited by hand
+dist/
+
+# Vitrix runtime data (accounts database, etc.)
+.vitrix/
+
+# Local tooling
+.venv/
+venv/
+__pycache__/
+vitrix-report.md
+.env

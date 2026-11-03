@@ -17,3 +17,6 @@ web/node_modules/
 htmlcov/
 .ruff_cache/
 vitrix-report.md
+
+# Local accounts database and other runtime data
+.vitrix/

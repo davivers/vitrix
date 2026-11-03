@@ -1,7 +1,7 @@
-"""Alvos de conversão (SIEMs) e plugins.
+"""Conversion targets (SIEMs) and plugins.
 
-Cada alvo sabe criar um backend do pySigma já com o pipeline de campos padrão.
-Plugins de terceiros registram novos alvos pelo entry point `vitrix.targets`.
+Each target knows how to build a pySigma backend with its default field pipeline.
+Third-party plugins register new targets through the `vitrix.targets` entry point.
 """
 
 from __future__ import annotations
@@ -17,13 +17,13 @@ from typing import Any
 @dataclass(frozen=True)
 class Target:
     name: str  # nome usado no vitrix.yml e na CLI
-    label: str  # nome para humanos
-    extension: str  # extensão do arquivo gerado
-    factory: Callable[[list], Any]  # recebe pipelines extras e devolve um backend do pySigma
+    label: str  # human-readable name
+    extension: str  # extension of the generated file
+    factory: Callable[[list], Any]  # takes extra pipelines and returns a pySigma backend
 
 
 def _combine(extra: list, default: Any) -> Any:
-    """Pipelines do usuário vêm antes do padrão, para renomear campos antes do mapeamento do SIEM."""
+    """User pipelines run before the default one, to rename fields before the SIEM mapping."""
     combined = None
     for pipeline in [*extra, default]:
         combined = pipeline if combined is None else combined + pipeline
@@ -76,8 +76,8 @@ def available_targets() -> dict[str, Target]:
         try:
             obj = ep.load()
             target = obj if isinstance(obj, Target) else obj()
-        except Exception as exc:  # um plugin quebrado não pode derrubar os outros
-            print(f"aviso: plugin '{ep.name}' não pôde ser carregado: {exc}")
+        except Exception as exc:  # a broken plugin must not take the others down
+            print(f"warning: plugin '{ep.name}' could not be loaded: {exc}")
             continue
         targets[target.name] = target
     return targets
@@ -90,10 +90,10 @@ def load_extra_pipelines(paths: list[Path]) -> list:
 
 
 def convert_text(text: str, target: Target, extra: list) -> str:
-    """Converte o texto de um arquivo Sigma para o alvo.
+    """Convert the text of a Sigma file for the target.
 
-    O pySigma altera a regra durante a conversão (renomeia campos). Por isso cada
-    chamada lê o YAML do zero: reaproveitar a mesma coleção entre alvos contamina o segundo.
+    pySigma mutates the rule while converting (it renames fields). So every call parses the
+    YAML again: reusing one collection across targets would contaminate the second one.
     """
     from sigma.collection import SigmaCollection
 

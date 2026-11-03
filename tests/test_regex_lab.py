@@ -28,15 +28,15 @@ def test_regex_invalida_aponta_posicao():
 def test_backtracking_catastrofico_estoura_o_tempo_sem_travar():
     out = analyze("(a+)+$", "", ["a" * 40 + "!"], timeout=1.0)
     assert out["timeout"] is True and out["ok"] is False
-    assert any("aninhado" in t["message"] for t in out["tips"])
+    assert any("nested" in t["message"] for t in out["tips"])
 
 
 def test_dicas_de_otimizacao():
     msgs = [t["message"] for t in lint_pattern(".*mimikatz.*")]
-    assert any("desnecessário" in m for m in msgs)
+    assert any("unnecessary" in m for m in msgs)
     assert any("contains" in m for m in msgs)
     msgs = [t["message"] for t in lint_pattern(f"C:{BS}Windows{BS}System32{BS}cmd{BS}.exe")]
-    assert any("caminho do Windows" in m for m in msgs)
+    assert any("Windows path" in m for m in msgs)
     assert lint_pattern(r"^(?:cmd|powershell)\.exe$") == []
 
 

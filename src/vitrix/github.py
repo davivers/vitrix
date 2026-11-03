@@ -1,21 +1,27 @@
-"""Abre pull requests no GitHub com as regras editadas na interface.
+"""GitHub integration: CI-validated pull requests and a read-only connector.
 
-Nada é gravado no disco local: os arquivos vão direto para um branch novo no GitHub, em um
-único commit, e o pull request é aberto contra o branch base. O CI do próprio repositório
-valida a regra como em qualquer outro PR.
+Nothing is written to the local disk. A change made in the UI goes through two steps:
 
-Configuração no vitrix.yml:
+1. **Validate in CI** (`push_branch`): the files go to a new `vitrix/...` branch in one commit.
+   The repository's own GitHub Actions workflow runs on that push (`vitrix check --gate`).
+2. **Open pull request** (`open_validated_pull_request`): allowed only when every workflow run
+   for that exact commit finished successfully, and the branch still points to that commit.
+   The server checks both right before opening the PR, so the UI cannot skip the real CI.
+
+Configuration in vitrix.yml:
 
     github:
-      repo: minha-org/deteccoes   # obrigatório
-      base: main                  # branch de destino (padrão: main)
-      path: ""                    # pasta do projeto Vitrix dentro do repositório (padrão: raiz)
+      repo: my-org/detections    # required
+      base: main                 # target branch (default: main)
+      path: ""                   # folder of the Vitrix project inside the repository (default: root)
+      workflow: vitrix           # optional: only runs of this workflow (name or file) count as CI
 
-O token vem SEMPRE do ambiente (`VITRIX_GITHUB_TOKEN` ou `GITHUB_TOKEN`), nunca do vitrix.yml.
-Permissões mínimas de um token fine-grained: Contents (leitura e escrita) e Pull requests
-(leitura e escrita) no repositório configurado.
+The token ALWAYS comes from the environment (`VITRIX_GITHUB_TOKEN` or `GITHUB_TOKEN`), never
+from vitrix.yml. Minimum fine-grained permissions on the repository: Contents (read/write),
+Pull requests (read/write) and Actions (read).
 
-Usa só a biblioteca padrão (urllib), sem dependências novas.
+The workflow must run on pushes to `vitrix/**` branches (see .github/workflows/vitrix.yml).
+Standard library only (urllib), no new dependencies.
 """
 
 from __future__ import annotations
@@ -36,12 +42,14 @@ from urllib.parse import quote
 
 API_URL = "https://api.github.com"
 TOKEN_ENVS = ("VITRIX_GITHUB_TOKEN", "GITHUB_TOKEN")
+BRANCH_PREFIX = "vitrix/"
 _REPO = re.compile(r"^[A-Za-z0-9-]+/[A-Za-z0-9._-]+$")
 _BRANCH = re.compile(r"^[A-Za-z0-9._/-]+$")
+_SHA = re.compile(r"^[0-9a-f]{40}$")
 
 
 class GitHubError(Exception):
-    """Falha ao falar com o GitHub. `status` é o código HTTP sugerido para a API do Vitrix."""
+    """Failure talking to GitHub. `status` is the HTTP status suggested for the Vitrix API."""
 
     def __init__(self, message: str, status: int = 502):
         super().__init__(message)
@@ -52,29 +60,33 @@ class GitHubError(Exception):
 class GitHubConfig:
     repo: str
     base: str = "main"
-    path: str = ""  # prefixo do projeto Vitrix dentro do repositório
+    path: str = ""  # prefix of the Vitrix project inside the repository
+    workflow: str | None = None  # only runs of this workflow count as CI (None = every workflow)
 
     def repo_path(self, rel: str) -> str:
-        """Caminho no repositório de um arquivo relativo à raiz do projeto Vitrix."""
+        """Repository path of a file relative to the Vitrix project root."""
         return str(PurePosixPath(self.path, rel)) if self.path else rel
 
 
 def parse_config(data: object) -> GitHubConfig | None:
-    """Valida a seção `github:` do vitrix.yml. Levanta ValueError com a mensagem para o usuário."""
+    """Validate the `github:` section of vitrix.yml. Raises ValueError with a user-facing message."""
     if data is None:
         return None
     if not isinstance(data, dict):
-        raise ValueError("'github' deve ser um mapa com repo, base e path")
+        raise ValueError("'github' must be a mapping with repo, base and path")
     repo = data.get("repo")
     if not isinstance(repo, str) or not _REPO.match(repo.strip()):
-        raise ValueError("github.repo deve ter o formato dono/repositorio")
+        raise ValueError("github.repo must look like owner/repository")
     base = data.get("base", "main")
     if not isinstance(base, str) or not _BRANCH.match(base) or ".." in base:
-        raise ValueError("github.base deve ser o nome de um branch")
+        raise ValueError("github.base must be a branch name")
     path = data.get("path", "") or ""
     if not isinstance(path, str) or path.startswith("/") or "\\" in path or ".." in PurePosixPath(path).parts:
-        raise ValueError("github.path deve ser uma pasta relativa dentro do repositório")
-    return GitHubConfig(repo=repo.strip(), base=base, path=path.strip("/"))
+        raise ValueError("github.path must be a relative folder inside the repository")
+    workflow = data.get("workflow")
+    if workflow is not None and (not isinstance(workflow, str) or not workflow.strip()):
+        raise ValueError("github.workflow must be a workflow name or file name")
+    return GitHubConfig(repo=repo.strip(), base=base, path=path.strip("/"), workflow=workflow.strip() if workflow else None)
 
 
 def token_from_env() -> str | None:
@@ -85,15 +97,15 @@ def token_from_env() -> str | None:
     return None
 
 
-# Assinatura do transporte: (método, url, corpo) -> (status, json). Injetável nos testes.
+# Transport signature: (method, url, body) -> (status, json). Injectable in tests.
 Transport = Callable[[str, str, dict | None], tuple[int, object]]
 
 
 def _urllib_transport(token: str) -> Transport:
     def send(method: str, url: str, body: dict | None) -> tuple[int, object]:
-        # o token só pode ir para a API do GitHub, por HTTPS (nunca file:, http: ou outro host)
+        # the token may only go to the GitHub API over HTTPS (never file:, http: or another host)
         if not url.startswith(API_URL + "/"):
-            raise GitHubError(f"URL fora da API do GitHub recusada: {url[:80]}")
+            raise GitHubError(f"refused URL outside the GitHub API: {url[:80]}")
         data = json.dumps(body).encode() if body is not None else None
         req = urllib.request.Request(url, data=data, method=method, headers={
             "Accept": "application/vnd.github+json",
@@ -103,7 +115,7 @@ def _urllib_transport(token: str) -> Transport:
             **({"Content-Type": "application/json"} if data else {}),
         })
         try:
-            # URL conferida acima: só https://api.github.com/
+            # URL checked above: only https://api.github.com/
             with urllib.request.urlopen(req, timeout=20) as res:  # nosec B310
                 return res.status, json.loads(res.read() or b"null")
         except urllib.error.HTTPError as exc:
@@ -113,7 +125,7 @@ def _urllib_transport(token: str) -> Transport:
                 payload = None
             return exc.code, payload
         except (urllib.error.URLError, TimeoutError) as exc:
-            raise GitHubError(f"não consegui falar com o GitHub: {exc}") from exc
+            raise GitHubError(f"could not reach GitHub: {exc}") from exc
 
     return send
 
@@ -124,7 +136,7 @@ class GitHubClient:
         if transport is None:
             if not token:
                 raise GitHubError(
-                    f"defina {TOKEN_ENVS[0]} (ou GITHUB_TOKEN) no ambiente do `vitrix serve` para abrir pull requests",
+                    f"set {TOKEN_ENVS[0]} (or GITHUB_TOKEN) in the environment of `vitrix serve` to use GitHub",
                     status=503,
                 )
             transport = _urllib_transport(token)
@@ -136,36 +148,94 @@ class GitHubClient:
         if status not in ok:
             message = payload.get("message") if isinstance(payload, dict) else None
             hint = {
-                401: "token do GitHub inválido ou expirado",
-                403: "o token não tem permissão de escrita (Contents e Pull requests) neste repositório",
-                404: f"repositório {self.cfg.repo} ou branch {self.cfg.base} não encontrado (ou o token não tem acesso)",
+                401: "GitHub token is invalid or expired",
+                403: "the token lacks permission (Contents, Pull requests and Actions) on this repository",
+                404: f"repository {self.cfg.repo} or branch {self.cfg.base} not found (or the token has no access)",
             }.get(status)
-            raise GitHubError(f"GitHub respondeu {status}: {hint or message or 'erro desconhecido'}")
+            raise GitHubError(f"GitHub answered {status}: {hint or message or 'unknown error'}")
         return payload
 
-    def open_pull_request(self, files: dict[str, str], title: str, body: str, branch_hint: str) -> dict:
-        """Cria branch + um commit com `files` (caminho no repositório -> texto) e abre o PR."""
-        base_ref = self._call("GET", f"/git/ref/heads/{self.cfg.base}")
+    # ----------------------------------------------------------------------- step 1: CI validation
+
+    def push_branch(self, files: dict[str, str], message: str, branch_hint: str) -> dict:
+        """Create a `vitrix/...` branch with one commit holding `files` (repo path -> text).
+
+        The push triggers the repository's CI. Nothing is merged and no PR is opened yet.
+        """
+        base_ref = self._call("GET", f"/git/ref/heads/{quote(self.cfg.base, safe='/')}")
         base_sha = base_ref["object"]["sha"]
         base_commit = self._call("GET", f"/git/commits/{base_sha}")
         tree = self._call("POST", "/git/trees", {
             "base_tree": base_commit["tree"]["sha"],
             "tree": [{"path": p, "mode": "100644", "type": "blob", "content": text} for p, text in sorted(files.items())],
         })
-        commit = self._call("POST", "/git/commits", {"message": title, "tree": tree["sha"], "parents": [base_sha]})
-        branch = f"vitrix/{branch_hint}-{secrets.token_hex(3)}"
+        commit = self._call("POST", "/git/commits", {"message": message, "tree": tree["sha"], "parents": [base_sha]})
+        branch = f"{BRANCH_PREFIX}{branch_hint}-{secrets.token_hex(3)}"
         self._call("POST", "/git/refs", {"ref": f"refs/heads/{branch}", "sha": commit["sha"]})
-        pr = self._call("POST", "/pulls", {"title": title, "head": branch, "base": self.cfg.base, "body": body})
-        return {"url": pr.get("html_url"), "number": pr.get("number"), "branch": branch, "commit": commit["sha"]}
+        return {"branch": branch, "commit": commit["sha"], "base": self.cfg.base, "base_commit": base_sha,
+                "url": f"https://github.com/{self.cfg.repo}/tree/{quote(branch, safe='/')}"}
 
+    def ci_status(self, commit: str) -> dict:
+        """Aggregate state of the real CI (GitHub Actions) for one exact commit.
 
+        none: no workflow run yet (queued on GitHub, or the workflow does not run on vitrix/**)
+        pending: at least one run still going · failure: any run failed · success: all passed
+        """
+        if not _SHA.match(commit):
+            raise GitHubError("invalid commit id", status=422)
+        data = self._call("GET", f"/actions/runs?head_sha={commit}&per_page=50") or {}
+        runs = [r for r in data.get("workflow_runs", []) if r.get("head_sha") == commit]
+        if self.cfg.workflow:
+            wanted = self.cfg.workflow
+            runs = [r for r in runs if r.get("name") == wanted or str(r.get("path", "")).endswith("/" + wanted)
+                    or str(r.get("path", "")).endswith("/" + wanted + ".yml")]
+        # a re-run creates a new run for the same workflow: keep the newest per workflow
+        latest: dict[str, dict] = {}
+        for r in sorted(runs, key=lambda r: r.get("run_attempt", 1) * 10**12 + int(r.get("id") or 0)):
+            latest[str(r.get("workflow_id") or r.get("name"))] = r
+        items = [_run(r) for r in latest.values()]
+        states = [i["state"] for i in items]
+        if not items:
+            state = "none"
+        elif "pending" in states:
+            state = "pending"
+        elif "failure" in states:
+            state = "failure"
+        else:
+            state = "success"
+        return {"commit": commit, "state": state, "runs": items, "workflow": self.cfg.workflow}
 
-    # ----------------------------------------------------------------------- leitura (conector)
+    # ----------------------------------------------------------------------- step 2: pull request
+
+    def open_validated_pull_request(self, branch: str, commit: str, title: str | None = None) -> dict:
+        """Open the PR only if the real CI passed for `commit` and `branch` still points to it.
+
+        Title and description come from the commit message written in step 1 (`title` overrides
+        the first line).
+        """
+        if not branch.startswith(BRANCH_PREFIX) or not _BRANCH.match(branch) or ".." in branch:
+            raise GitHubError(f"only {BRANCH_PREFIX}* branches created by Vitrix can be proposed", status=422)
+        ref = self._call("GET", f"/git/ref/heads/{quote(branch, safe='/')}")
+        if (ref.get("object") or {}).get("sha") != commit:
+            raise GitHubError("the branch changed after CI validation; validate again", status=409)
+        ci = self.ci_status(commit)
+        if ci["state"] != "success":
+            reason = {"none": "CI has not run for this commit yet", "pending": "CI is still running",
+                      "failure": "CI failed for this commit"}[ci["state"]]
+            raise GitHubError(f"pull request blocked: {reason}", status=409)
+        message = (self._call("GET", f"/git/commits/{commit}") or {}).get("message") or ""
+        first, _, rest = message.partition("\n")
+        runs = "\n".join(f"- [{r['name']} #{r['number']}]({r['url']}): {r['conclusion']}" for r in ci["runs"])
+        pr = self._call("POST", "/pulls", {"title": title or first.strip() or branch, "head": branch, "base": self.cfg.base,
+                                            "body": f"{rest.strip()}\n\n**Validated by CI before opening:**\n{runs}".strip()})
+        return {"url": pr.get("html_url"), "number": pr.get("number"), "branch": branch, "commit": commit, "ci": ci}
+
+    # ----------------------------------------------------------------------- read-only connector
 
     def activity(self, now: datetime | None = None) -> dict:
-        """Estado do repositório no GitHub: HEAD do base, PRs abertos, tempo até o merge e CI.
+        """Repository state on GitHub: base HEAD, open PRs, time to merge and CI.
 
-        Só leitura. São 6 chamadas à API; quem chama deve guardar o resultado em cache.
+        Read-only. Six API calls; callers should cache the result.
         """
         now = now or datetime.now(timezone.utc)
         base = quote(self.cfg.base, safe="")
@@ -176,7 +246,7 @@ class GitHubClient:
         base_runs = (self._call("GET", f"/actions/runs?branch={base}&per_page=20") or {}).get("workflow_runs", [])
         pr_runs = (self._call("GET", "/actions/runs?event=pull_request&per_page=50") or {}).get("workflow_runs", [])
 
-        # último run de cada branch de PR (a API devolve do mais novo para o mais antigo)
+        # newest run per PR branch (the API returns newest first)
         latest_by_branch: dict[str, dict] = {}
         for run in pr_runs:
             latest_by_branch.setdefault(run.get("head_branch") or "", run)
@@ -195,7 +265,7 @@ class GitHubClient:
                 "created_at": pr.get("created_at"),
                 "age_hours": _hours(created, now),
                 "ci": _run_state(latest_by_branch.get(branch)),
-                "from_vitrix": branch.startswith("vitrix/"),
+                "from_vitrix": branch.startswith(BRANCH_PREFIX),
             })
 
         merge_hours = [
@@ -218,7 +288,7 @@ class GitHubClient:
                 "items": pulls,
             },
             "merge": {
-                "sample": len(merge_hours),  # PRs mesclados entre os 50 fechados mais recentes
+                "sample": len(merge_hours),  # merged PRs among the 50 most recently closed
                 "median_hours": round(median(merge_hours), 1) if merge_hours else None,
                 "p90_hours": round(sorted(merge_hours)[max(0, -(-len(merge_hours) * 9 // 10) - 1)], 1) if merge_hours else None,
             },
@@ -247,7 +317,7 @@ def _hours(start: datetime | None, end: datetime | None) -> float | None:
 
 
 def _run_state(run: dict | None) -> str | None:
-    """success | failure | pending | None (sem execução). Cancelado e afins contam como falha."""
+    """success | failure | pending | None (no run). Cancelled and the like count as failure."""
     if not run:
         return None
     if run.get("status") != "completed":
@@ -273,7 +343,7 @@ def _run(run: dict) -> dict:
 
 
 def branch_slug(rel: str) -> str:
-    """Nome curto e seguro para o branch, a partir do caminho da regra."""
+    """Short, safe branch name derived from the rule path."""
     stem = PurePosixPath(rel).with_suffix("").as_posix()
     slug = re.sub(r"[^A-Za-z0-9]+", "-", stem).strip("-").lower()
-    return slug[:48] or "regra"
+    return slug[:48] or "rule"

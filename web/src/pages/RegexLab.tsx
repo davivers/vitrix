@@ -32,12 +32,12 @@ const START_SAMPLES = [
 ];
 
 const FLAG_INFO: [string, string][] = [
-  ["i", "ignorar maiúsculas"],
-  ["m", "^ e $ por linha"],
-  ["s", ". casa quebra de linha"],
+  ["i", "ignore case"],
+  ["m", "^ and $ per line"],
+  ["s", ". matches newlines"],
 ];
 
-/** Destaca os trechos que casaram, sem innerHTML. */
+/** Highlights the matched spans, without innerHTML. */
 function Highlighted({ text, matches }: { text: string; matches: Match[] }) {
   const parts: { t: string; hit: boolean }[] = [];
   let pos = 0;
@@ -109,7 +109,7 @@ export default function RegexLabPage() {
       setCopied(true);
       setTimeout(() => setCopied(false), 1500);
     } catch {
-      /* sem permissão */
+      /* no clipboard permission */
     }
   };
 
@@ -117,12 +117,12 @@ export default function RegexLabPage() {
     <div className="mx-auto max-w-6xl px-4 py-8 sm:px-8">
       <PageHeader
         title="Regex Workbench"
-        subtitle="Desenvolva, teste e otimize expressões regulares com o mesmo motor dos testes locais (re do Python). Cada execução tem tempo limite de 2 s."
+        subtitle="Develop, test and optimise regular expressions with the same engine as the local tests (Python's re). Every run has a 2 s timeout."
       />
 
       <Card className="mb-5 p-5">
         <label className="block">
-          <span className="mb-1.5 block text-sm font-medium text-strong">Expressão</span>
+          <span className="mb-1.5 block text-sm font-medium text-strong">Expression</span>
           <span className="flex items-stretch overflow-hidden rounded-[10px] border border-line bg-code focus-within:border-accent/50">
             <span className="grid place-items-center px-3 font-mono text-subtle">/</span>
             <input
@@ -145,33 +145,33 @@ export default function RegexLabPage() {
           <span className="ml-auto flex items-center gap-1.5 text-xs text-muted" aria-live="polite">
             {pending ? (
               <>
-                <Loader2 size={13} className="animate-spin" aria-hidden /> testando…
+                <Loader2 size={13} className="animate-spin" aria-hidden /> testing…
               </>
             ) : result?.timeout ? (
               <>
-                <Timer size={13} className="text-bad" aria-hidden /> estourou o tempo
+                <Timer size={13} className="text-bad" aria-hidden /> timed out
               </>
             ) : result?.ok ? (
               <>
-                <CheckCircle2 size={13} className="text-good" aria-hidden /> {hits}/{samples.length} amostras casaram · mais lenta {slowest} ms
+                <CheckCircle2 size={13} className="text-good" aria-hidden /> {hits}/{samples.length} samples matched · slowest {slowest} ms
               </>
             ) : result ? (
               <>
-                <XCircle size={13} className="text-bad" aria-hidden /> regex inválida
+                <XCircle size={13} className="text-bad" aria-hidden /> invalid regex
               </>
             ) : null}
           </span>
         </div>
-        {result && !result.ok && <div className="mt-3"><ErrorBox message={result.error + (result.position !== undefined ? ` (posição ${result.position})` : "")} /></div>}
+        {result && !result.ok && <div className="mt-3"><ErrorBox message={result.error + (result.position !== undefined ? ` (position ${result.position})` : "")} /></div>}
         {error && <div className="mt-3"><ErrorBox message={error} /></div>}
       </Card>
 
       <div className="grid gap-5 lg:grid-cols-[1fr_20rem]">
         <Card className="p-5">
           <div className="mb-3 flex items-center justify-between">
-            <h2 className="text-[15px] font-semibold text-strong">Amostras</h2>
+            <h2 className="text-[15px] font-semibold text-strong">Samples</h2>
             <button type="button" onClick={() => setSamples([...samples, ""])} className="inline-flex items-center gap-1.5 rounded-md px-2 py-1 text-xs text-muted hover:bg-surface-2 hover:text-text">
-              <Plus size={13} aria-hidden /> amostra
+              <Plus size={13} aria-hidden /> sample
             </button>
           </div>
           <ul className="space-y-3">
@@ -183,13 +183,13 @@ export default function RegexLabPage() {
                     {r ? (
                       <span className={clsx("inline-flex items-center gap-1 text-xs font-semibold", r.matched ? "text-good" : "text-muted")}>
                         {r.matched ? <CheckCircle2 size={13} aria-hidden /> : <XCircle size={13} aria-hidden />}
-                        {r.matched ? `casou (${r.matches.length})` : "não casou"}
+                        {r.matched ? `matched (${r.matches.length})` : "no match"}
                       </span>
                     ) : (
                       <span className="text-xs text-subtle">—</span>
                     )}
                     {r && <span className="text-[11px] text-subtle tabular-nums">{r.duration_ms} ms</span>}
-                    <button type="button" aria-label={`Remover amostra ${i + 1}`} onClick={() => setSamples(samples.filter((_, j) => j !== i))} className="ml-auto rounded p-1 text-subtle hover:bg-surface-2 hover:text-text">
+                    <button type="button" aria-label={`Remove sample ${i + 1}`} onClick={() => setSamples(samples.filter((_, j) => j !== i))} className="ml-auto rounded p-1 text-subtle hover:bg-surface-2 hover:text-text">
                       <Trash2 size={13} aria-hidden />
                     </button>
                   </div>
@@ -233,10 +233,10 @@ export default function RegexLabPage() {
 
         <div className="flex flex-col gap-5">
           <Card className="p-5">
-            <h2 className="mb-3 text-[15px] font-semibold text-strong">Otimização</h2>
+            <h2 className="mb-3 text-[15px] font-semibold text-strong">Optimisation</h2>
             {result && result.tips.length === 0 && (
               <p className="flex items-center gap-2 text-[13px] text-muted">
-                <CheckCircle2 size={14} className="text-good" aria-hidden /> Nenhum problema conhecido.
+                <CheckCircle2 size={14} className="text-good" aria-hidden /> No known problem.
               </p>
             )}
             <ul className="space-y-2">
@@ -256,17 +256,17 @@ export default function RegexLabPage() {
           </Card>
           <Card className="p-5">
             <div className="mb-2 flex items-center justify-between">
-              <h2 className="text-[15px] font-semibold text-strong">Na regra Sigma</h2>
+              <h2 className="text-[15px] font-semibold text-strong">In the Sigma rule</h2>
               {result?.sigma && (
                 <button type="button" onClick={copy} className="inline-flex items-center gap-1 rounded-md px-2 py-1 text-xs text-muted hover:bg-surface-2 hover:text-text">
-                  {copied ? <Check size={13} aria-hidden /> : <Copy size={13} aria-hidden />} {copied ? "Copiado" : "Copiar"}
+                  {copied ? <Check size={13} aria-hidden /> : <Copy size={13} aria-hidden />} {copied ? "Copied" : "Copy"}
                 </button>
               )}
             </div>
             <pre className="overflow-auto whitespace-pre-wrap break-all rounded-[10px] border border-line bg-code p-3 font-mono text-[12px] text-code-text">
               {result?.sigma ?? "—"}
             </pre>
-            <p className="mt-2 text-xs text-subtle">Troque Field pelo campo (ex.: CommandLine). Aspas simples no YAML: a barra invertida vale literal.</p>
+            <p className="mt-2 text-xs text-subtle">Replace Field with the field name (e.g. CommandLine). Single quotes in YAML keep the backslash literal.</p>
           </Card>
         </div>
       </div>

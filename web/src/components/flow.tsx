@@ -3,29 +3,29 @@ import { AlertTriangle, CheckCircle2, ChevronRight, CircleDashed, Clock, XCircle
 import type { GateCheck, StageId, StageState } from "../types";
 
 export const STAGES: { id: StageId; label: string; hint: string }[] = [
-  { id: "write", label: "Escrever", hint: "YAML lido sem erro" },
-  { id: "validate", label: "Validar", hint: "schema, lint e conversão para a linguagem final" },
-  { id: "test", label: "Testar", hint: "casos positivos, negativos e de borda" },
-  { id: "replay", label: "Replay", hint: "logs de datasets/ com as contagens esperadas" },
-  { id: "analyze", label: "Analisar", hint: "falsos positivos, exclusões, ATT&CK e qualidade dos casos" },
-  { id: "gate", label: "Quality gate", hint: "todas as verificações bloqueantes passam" },
-  { id: "deploy", label: "Deploy", hint: "merge do PR; o CI gera o dist/. Envio direto ao SIEM ainda não existe." },
+  { id: "write", label: "Write", hint: "YAML parses without errors" },
+  { id: "validate", label: "Validate", hint: "schema, lint and conversion to the final query language" },
+  { id: "test", label: "Test", hint: "positive, negative and edge cases" },
+  { id: "replay", label: "Replay", hint: "datasets/ logs with the expected match counts" },
+  { id: "analyze", label: "Analyze", hint: "false positives, exclusions, ATT&CK and test data quality" },
+  { id: "gate", label: "Quality gate", hint: "every blocking check passes" },
+  { id: "deploy", label: "Deploy", hint: "validated by the real CI, then merged. Vitrix does not push to SIEMs yet." },
 ];
 
 export const QUESTIONS: Record<number, string> = {
-  1: "A regra está sintaticamente correta?",
-  2: "A lógica de detecção funciona?",
-  3: "Existem falsos positivos conhecidos?",
-  4: "A regra detecta os comportamentos esperados?",
-  5: "A regra está pronta para ser publicada?",
+  1: "Is the rule syntactically correct?",
+  2: "Does the detection logic work?",
+  3: "Are there known false positives?",
+  4: "Does the rule detect the expected behaviour?",
+  5: "Is the rule ready to be published?",
 };
 
 export const STAGE_META: Record<StageState, { label: string; cls: string; ring: string; Icon: typeof CheckCircle2 }> = {
   ok: { label: "ok", cls: "text-good", ring: "bg-good-soft", Icon: CheckCircle2 },
-  warn: { label: "com recomendações", cls: "text-warn", ring: "bg-warn-soft", Icon: AlertTriangle },
-  fail: { label: "bloqueado", cls: "text-bad", ring: "bg-bad-soft", Icon: XCircle },
-  skip: { label: "não se aplica", cls: "text-subtle", ring: "bg-surface-2", Icon: CircleDashed },
-  pending: { label: "aguardando merge", cls: "text-muted", ring: "bg-surface-2", Icon: Clock },
+  warn: { label: "has recommendations", cls: "text-warn", ring: "bg-warn-soft", Icon: AlertTriangle },
+  fail: { label: "blocked", cls: "text-bad", ring: "bg-bad-soft", Icon: XCircle },
+  skip: { label: "not applicable", cls: "text-subtle", ring: "bg-surface-2", Icon: CircleDashed },
+  pending: { label: "waiting for CI and merge", cls: "text-muted", ring: "bg-surface-2", Icon: Clock },
 };
 
 export function StageIcon({ state, size = 14 }: { state: StageState; size?: number }) {
@@ -33,10 +33,10 @@ export function StageIcon({ state, size = 14 }: { state: StageState; size?: numb
   return <Icon size={size} className={clsx("shrink-0", cls)} aria-label={STAGE_META[state].label} />;
 }
 
-/** A trilha Escrever → … → Deploy. Cada etapa tem ícone + texto, nunca só cor. */
+/** The Write → … → Deploy track. Every stage has icon + text, never colour alone. */
 export function FlowStepper({ stages, compact = false }: { stages: Record<StageId, StageState>; compact?: boolean }) {
   return (
-    <ol className={clsx("flex flex-wrap items-center", compact ? "gap-1" : "gap-1.5")} aria-label="Fluxo da regra">
+    <ol className={clsx("flex flex-wrap items-center", compact ? "gap-1" : "gap-1.5")} aria-label="Rule lifecycle">
       {STAGES.map((s, i) => {
         const state = stages[s.id];
         const { ring, cls, Icon, label } = STAGE_META[state];
@@ -57,7 +57,7 @@ export function FlowStepper({ stages, compact = false }: { stages: Record<StageI
   );
 }
 
-/** Verificações do gate agrupadas por etapa. */
+/** Gate checks grouped by stage. */
 export function CheckList({ checks }: { checks: GateCheck[] }) {
   return (
     <div className="space-y-3">
@@ -76,7 +76,7 @@ export function CheckList({ checks }: { checks: GateCheck[] }) {
                     </span>
                     <span className="min-w-0">
                       <span className="text-text">{c.label}</span>
-                      {!c.blocking && c.passed === false && <span className="ml-1.5 text-xs text-subtle">(recomendação)</span>}
+                      {!c.blocking && c.passed === false && <span className="ml-1.5 text-xs text-subtle">(recommendation)</span>}
                       {c.detail && <span className="block text-xs text-subtle [overflow-wrap:anywhere]">{c.detail}</span>}
                     </span>
                   </li>
@@ -89,21 +89,20 @@ export function CheckList({ checks }: { checks: GateCheck[] }) {
   );
 }
 
-const KIND_META: Record<string, { label: string; cls: string }> = {
-  positive: { label: "positivo", cls: "bg-surface-2 text-text" },
-  negative: { label: "negativo", cls: "bg-surface-2 text-text" },
-  false_positive: { label: "falso positivo", cls: "bg-surface-2 text-text" },
-  edge: { label: "borda", cls: "bg-surface-2 text-text" },
+const KIND_META: Record<string, string> = {
+  positive: "positive",
+  negative: "negative",
+  false_positive: "false positive",
+  edge: "edge",
 };
 
 export function KindTag({ kind }: { kind: string }) {
-  const meta = KIND_META[kind] ?? { label: kind, cls: "bg-surface-2 text-text" };
-  return <span className={clsx("rounded px-1.5 py-0.5 font-mono text-[10.5px] uppercase tracking-wide", meta.cls)}>{meta.label}</span>;
+  return <span className="rounded bg-surface-2 px-1.5 py-0.5 font-mono text-[10.5px] uppercase tracking-wide text-text">{KIND_META[kind] ?? kind}</span>;
 }
 
 export const KIND_LABEL: Record<string, string> = {
-  positive: "Positivos",
-  negative: "Negativos",
-  false_positive: "Falsos positivos",
-  edge: "Borda",
+  positive: "Positive",
+  negative: "Negative",
+  false_positive: "False positive",
+  edge: "Edge",
 };

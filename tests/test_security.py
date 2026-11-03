@@ -20,7 +20,7 @@ def test_hosts_locais_passam(host):
 
 @pytest.mark.parametrize("host", ["evil.example", "evil.example:8000", "127.0.0.1.evil.example", "", "192.168.0.10:8000"])
 def test_dns_rebinding_e_barrado_ate_em_leitura(host):
-    assert request_problem("GET", "/api/config", {"host": host}, LOCAL, []) == (403, "host não permitido")
+    assert request_problem("GET", "/api/config", {"host": host}, LOCAL, []) == (403, "host not allowed")
 
 
 @pytest.mark.parametrize("ctype", ["text/plain", "application/x-www-form-urlencoded", "multipart/form-data", ""])
@@ -78,7 +78,7 @@ def test_cabecalhos_de_seguranca(client):
 def test_token_so_vai_para_a_api_do_github():
     send = _urllib_transport("segredo")
     for url in ("file:///etc/passwd", "http://api.github.com/repos/x", "https://evil.example/repos/x", "https://api.github.com.evil.example/x"):
-        with pytest.raises(GitHubError, match="recusada"):
+        with pytest.raises(GitHubError, match="refused"):
             send("GET", url, None)
 
 

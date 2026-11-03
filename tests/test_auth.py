@@ -1,0 +1,454 @@
+"""Accounts, workspace roles, invites, GitHub sign-in and the session guard."""
+
+from __future__ import annotations
+
+import re
+import sqlite3
+import urllib.parse
+
+import pytest
+from test_engine import CASES_OK, RULE_OK, make_project
+from test_github import REPO, SHA, FakeGitHub
+
+from vitrix import auth, auth_api, service
+from vitrix.auth import AuthError, AuthStore, GitHubOAuth, check_password_policy, hash_password, verify_password
+from vitrix.config import AuthConfig, ConfigError, load_config
+from vitrix.github import GitHubClient
+
+fastapi = pytest.importorskip("fastapi")
+pytest.importorskip("httpx")
+from fastapi.testclient import TestClient  # noqa: E402
+
+from vitrix.api import create_app  # noqa: E402
+
+PW = "correct horse battery"
+AUTH_ON = "auth:\n  enabled: true\n"
+
+
+def make_client(tmp_path, extra: str = AUTH_ON, monkeypatch=None, oauth=None):
+    if oauth is not None and monkeypatch is not None:
+        monkeypatch.setattr(auth_api, "github_oauth_from_env", lambda: oauth)
+    return TestClient(create_app(make_project(tmp_path, extra_cfg=extra)), base_url="http://127.0.0.1:8000")
+
+
+def register(client, email="owner@example.com", name="Olivia Owner", password=PW, invite=None):
+    return client.post("/api/auth/register", json={"email": email, "name": name, "password": password, "invite": invite})
+
+
+def login(client, email, password=PW):
+    return client.post("/api/auth/login", json={"email": email, "password": password})
+
+
+def second_client(tmp_path, first: TestClient) -> TestClient:
+    """A browser of its own (separate cookie jar) talking to the same server."""
+    return TestClient(first.app, base_url="http://127.0.0.1:8000")
+
+
+def invite_token(client, email, role="editor") -> str:
+    link = client.post("/api/workspace/invites", json={"email": email, "role": role}).json()["link"]
+    return urllib.parse.parse_qs(urllib.parse.urlparse(link).query)["invite"][0]
+
+
+# --------------------------------------------------------------------------- passwords
+
+
+def test_password_hashing_is_salted_scrypt_and_verifies():
+    a, b = hash_password(PW), hash_password(PW)
+    assert a != b and a.startswith("scrypt$") and PW not in a
+    assert verify_password(PW, a) and not verify_password("wrong password!", a)
+    assert not verify_password(PW, None) and not verify_password(PW, "garbage")
+
+
+@pytest.mark.parametrize("bad", ["short", "aaaaaaaaaaaaaaaa", "x" * 300])
+def test_password_policy(bad):
+    with pytest.raises(AuthError):
+        check_password_policy(bad)
+
+
+# --------------------------------------------------------------------------- registration policy
+
+
+def test_first_account_is_the_owner_and_gets_a_session(tmp_path):
+    c = make_client(tmp_path)
+    assert c.get("/api/auth/config").json()["bootstrap"] is True
+    r = register(c)
+    assert r.status_code == 201 and r.json()["user"]["role"] == "owner" and "vitrix_session" in c.cookies
+    assert c.get("/api/auth/me").json()["authenticated"] is True
+    assert c.get("/api/auth/config").json()["bootstrap"] is False
+
+
+def test_registration_is_closed_after_the_first_account(tmp_path):
+    c = make_client(tmp_path)
+    register(c)
+    other = second_client(tmp_path, c)
+    r = register(other, "stranger@example.com", "Stranger")
+    assert r.status_code == 403 and "invitation" in r.json()["detail"]
+    assert "vitrix_session" not in other.cookies
+
+
+def test_open_signup_gives_the_configured_role(tmp_path):
+    c = make_client(tmp_path, "auth:\n  enabled: true\n  allow_signup: true\n  signup_role: editor\n")
+    register(c)
+    other = second_client(tmp_path, c)
+    assert register(other, "new@example.com", "New Person").json()["user"]["role"] == "editor"
+
+
+def test_duplicate_and_invalid_registrations(tmp_path):
+    c = make_client(tmp_path, "auth:\n  enabled: true\n  allow_signup: true\n")
+    register(c)
+    other = second_client(tmp_path, c)
+    assert register(other, "OWNER@example.com", "Dup").status_code == 409  # emails are case-insensitive
+    assert register(other, "not-an-email", "X").status_code == 422
+    assert register(other, "ok@example.com", "X", password="short").status_code == 422
+    assert register(other, "ok2@example.com", "  ").status_code == 422
+
+
+@pytest.mark.parametrize("bad", ["auth: 1\n", "auth:\n  nope: true\n", "auth:\n  enabled: maybe\n", "auth:\n  session_days: 0\n", "auth:\n  signup_role: admin\n"])
+def test_invalid_auth_config(tmp_path, bad):
+    with pytest.raises(ConfigError):
+        load_config(make_project(tmp_path, extra_cfg=bad))
+
+
+# --------------------------------------------------------------------------- login, sessions, throttling
+
+
+def test_login_logout_and_session_revocation(tmp_path):
+    c = make_client(tmp_path)
+    register(c)
+    c.post("/api/auth/logout", json={})
+    assert c.get("/api/rules").status_code == 401
+    assert login(c, "owner@example.com").status_code == 200 and c.get("/api/rules").status_code == 200
+    stolen = c.cookies.get("vitrix_session")
+    c.post("/api/auth/logout", json={})
+    thief = second_client(tmp_path, c)
+    thief.cookies.set("vitrix_session", stolen)
+    assert thief.get("/api/rules").status_code == 401  # logout revoked the server-side session
+
+
+def test_login_errors_are_generic_and_do_not_reveal_accounts(tmp_path):
+    c = make_client(tmp_path)
+    register(c)
+    other = second_client(tmp_path, c)
+    wrong = login(other, "owner@example.com", "wrong password!!")
+    unknown = login(other, "nobody@example.com", "wrong password!!")
+    assert wrong.status_code == unknown.status_code == 401 and wrong.json() == unknown.json()
+
+
+def test_brute_force_lockout_by_email_and_ip():
+    clock = [1000.0]
+    store = AuthStore(":memory:", AuthConfig(enabled=True), clock=lambda: clock[0])
+    store.create_user("a@example.com", "A", PW, "owner")
+    for _ in range(auth.MAX_FAILURES):
+        with pytest.raises(AuthError, match="Wrong email"):
+            store.verify_login("a@example.com", "nope nope nope", "1.2.3.4")
+    with pytest.raises(AuthError) as locked:
+        store.verify_login("a@example.com", PW, "1.2.3.4")  # even the right password is refused while locked
+    assert locked.value.status == 429
+    assert store.verify_login("a@example.com", PW, "5.6.7.8")  # another address is not locked
+    clock[0] += auth.LOCKOUT_S + 1
+    assert store.verify_login("a@example.com", PW, "1.2.3.4")
+
+
+def test_session_expiry():
+    clock = [1000.0]
+    store = AuthStore(":memory:", AuthConfig(enabled=True, session_days=1), clock=lambda: clock[0])
+    uid = store.create_user("a@example.com", "A", PW, "owner")
+    token = store.create_session(uid)
+    assert store.identify(token) is not None
+    clock[0] += 86400 + 1
+    assert store.identify(token) is None
+
+
+def test_cookie_flags_and_no_raw_token_in_the_database(tmp_path, monkeypatch):
+    c = make_client(tmp_path)
+    r = register(c)
+    cookie = r.headers["set-cookie"].lower()
+    assert "httponly" in cookie and "samesite=lax" in cookie and "secure" not in cookie
+    token = c.cookies.get("vitrix_session")
+    rows = sqlite3.connect(tmp_path / ".vitrix" / "vitrix.db").execute("SELECT token_hash FROM sessions").fetchall()
+    assert rows and all(token != h for (h,) in rows) and re.fullmatch(r"[0-9a-f]{64}", rows[0][0])
+    monkeypatch.setenv("VITRIX_COOKIE_SECURE", "1")
+    assert "secure" in login(c, "owner@example.com").headers["set-cookie"].lower()
+
+
+def test_each_login_gets_a_new_token(tmp_path):
+    c = make_client(tmp_path)
+    register(c)
+    first = c.cookies.get("vitrix_session")
+    login(c, "owner@example.com")
+    assert c.cookies.get("vitrix_session") != first
+
+
+def test_password_change_revokes_the_other_sessions(tmp_path):
+    c = make_client(tmp_path)
+    register(c)
+    other = second_client(tmp_path, c)
+    login(other, "owner@example.com")
+    assert c.post("/api/auth/password", json={"current": "wrong password!!", "new": "another long password"}).status_code == 403
+    assert c.post("/api/auth/password", json={"current": PW, "new": "another long password"}).status_code == 200
+    assert c.get("/api/rules").status_code == 200 and other.get("/api/rules").status_code == 401
+    assert login(c, "owner@example.com", PW).status_code == 401 and login(c, "owner@example.com", "another long password").status_code == 200
+
+
+# --------------------------------------------------------------------------- the guard
+
+
+def test_everything_except_the_public_routes_needs_a_session(tmp_path):
+    c = make_client(tmp_path)
+    for path in ("/api/rules", "/api/config", "/api/quality", "/api/report", "/api/workspace", "/api/github"):
+        assert c.get(path).status_code == 401, path
+    assert c.get("/api/health").status_code == 200
+    assert c.get("/api/auth/config").json()["enabled"] is True
+    me = c.get("/api/auth/me")
+    assert me.json()["authenticated"] is False and me.headers["cache-control"] == "no-store"
+
+
+def test_auth_off_keeps_the_local_mode_unchanged(tmp_path):
+    c = make_client(tmp_path, extra="")
+    assert c.get("/api/rules").status_code == 200
+    assert c.get("/api/auth/config").json() == {"enabled": False}
+    assert c.get("/api/auth/me").json()["authenticated"] is True
+    assert c.post("/api/auth/login", json={"email": "a@b.co", "password": "x"}).status_code in (404, 405)
+
+
+def test_login_still_obeys_the_csrf_guard(tmp_path):
+    c = make_client(tmp_path)
+    body = '{"email": "a@example.com", "password": "x"}'
+    assert c.post("/api/auth/login", content=body, headers={"Content-Type": "text/plain"}).status_code == 415
+    assert c.post("/api/auth/login", content=body, headers={"Content-Type": "application/json", "Origin": "https://evil.example"}).status_code == 403
+
+
+# --------------------------------------------------------------------------- roles
+
+
+def join(c, tmp_path, email, role):
+    token = invite_token(c, email, role)
+    browser = second_client(tmp_path, c)
+    assert register(browser, email, email.split("@")[0], invite=token).status_code == 201
+    return browser
+
+
+def test_role_matrix(tmp_path):
+    owner = make_client(tmp_path)
+    register(owner)
+    viewer, editor, admin = (join(owner, tmp_path, f"{r}@example.com", r) for r in ("viewer", "editor", "admin"))
+    body = {"rule": RULE_OK, "cases": CASES_OK}
+    # reading: everyone; computing/publishing rules: editor+; config, members, audit: admin+
+    assert viewer.get("/api/rules").status_code == editor.get("/api/rules").status_code == 200
+    assert viewer.post("/api/validate", json=body).status_code == 403
+    assert editor.post("/api/validate", json=body).status_code == 200
+    assert viewer.post("/api/regex", json={"pattern": "a"}).status_code == 403
+    assert editor.post("/api/ci/config", json={"text": "targets: [splunk]"}).status_code == 403
+    assert admin.post("/api/ci/config", json={"text": "targets: [splunk]"}).status_code != 403
+    for who, expected in ((viewer, 403), (editor, 403), (admin, 200), (owner, 200)):
+        assert who.get("/api/workspace/audit").status_code == expected
+    assert "members" not in viewer.get("/api/workspace").json() and "members" in admin.get("/api/workspace").json()
+    assert editor.post("/api/workspace/invites", json={"email": "x@example.com", "role": "viewer"}).status_code == 403
+
+
+def test_unclassified_writes_default_to_admin():
+    assert auth_api.required_role("POST", "/api/something-new") == "admin"
+    assert auth_api.required_role("DELETE", "/api/rules/x") == "admin"
+    assert auth_api.required_role("GET", "/api/rules") == "viewer"
+
+
+def test_owner_rules_and_the_last_owner(tmp_path):
+    owner = make_client(tmp_path)
+    register(owner)
+    admin = join(owner, tmp_path, "admin@example.com", "admin")
+    members = {m["email"]: m["id"] for m in owner.get("/api/workspace").json()["members"]}
+    assert admin.patch(f"/api/workspace/members/{members['admin@example.com']}", json={"role": "owner"}).status_code == 403  # admins cannot mint owners
+    assert admin.patch(f"/api/workspace/members/{members['owner@example.com']}", json={"role": "viewer"}).status_code == 403
+    assert admin.delete(f"/api/workspace/members/{members['owner@example.com']}").status_code == 409
+    assert owner.patch(f"/api/workspace/members/{members['owner@example.com']}", json={"role": "admin"}).status_code == 409  # last owner
+    assert owner.delete(f"/api/workspace/members/{members['owner@example.com']}").status_code == 409
+    assert owner.patch(f"/api/workspace/members/{members['admin@example.com']}", json={"role": "owner"}).status_code == 200
+    assert owner.patch(f"/api/workspace/members/{members['owner@example.com']}", json={"role": "editor"}).status_code == 200  # a second owner exists now
+
+
+def test_changing_a_role_or_removing_a_member_ends_their_sessions(tmp_path):
+    owner = make_client(tmp_path)
+    register(owner)
+    editor = join(owner, tmp_path, "editor@example.com", "editor")
+    uid = next(m["id"] for m in owner.get("/api/workspace").json()["members"] if m["email"] == "editor@example.com")
+    owner.patch(f"/api/workspace/members/{uid}", json={"role": "viewer"})
+    assert editor.get("/api/rules").status_code == 401
+    login(editor, "editor@example.com")
+    assert editor.post("/api/validate", json={"rule": RULE_OK}).status_code == 403
+    assert owner.delete(f"/api/workspace/members/{uid}").status_code == 200
+    assert login(editor, "editor@example.com").status_code == 401
+
+
+# --------------------------------------------------------------------------- invites
+
+
+def test_invites_are_bound_to_an_email_single_use_and_revocable(tmp_path):
+    owner = make_client(tmp_path)
+    register(owner)
+    token = invite_token(owner, "ana@example.com", "editor")
+    stranger = second_client(tmp_path, owner)
+    assert register(stranger, "evil@example.com", "Evil", invite=token).status_code == 403  # wrong email
+    assert register(stranger, "ana@example.com", "Ana", invite=token).json()["user"]["role"] == "editor"
+    assert register(second_client(tmp_path, owner), "ana2@example.com", "Ana", invite="not-a-token").status_code == 403
+    again = invite_token(owner, "bob@example.com", "viewer")
+    invites = owner.get("/api/workspace").json()["invites"]
+    assert [i["email"] for i in invites] == ["bob@example.com"]
+    assert owner.delete(f"/api/workspace/invites/{invites[0]['id']}").status_code == 200
+    assert register(second_client(tmp_path, owner), "bob@example.com", "Bob", invite=again).status_code == 403  # revoked
+    assert "ana@example.com" not in {i["email"] for i in owner.get("/api/workspace").json()["invites"]}  # used
+
+
+def test_invites_expire_and_are_stored_hashed(tmp_path):
+    clock = [1000.0]
+    store = AuthStore(":memory:", AuthConfig(enabled=True), clock=lambda: clock[0])
+    owner = auth.Identity(store.create_user("o@example.com", "O", PW, "owner"), "o@example.com", "O", "owner", None, None)
+    token = store.create_invite(owner, "x@example.com", "editor")
+    assert store.find_invite(token) is not None
+    assert token not in str(store._q("SELECT * FROM invites")[0].keys()) and store._q("SELECT token_hash FROM invites")[0][0] != token
+    clock[0] += auth.INVITE_DAYS * 86400 + 1
+    assert store.find_invite(token) is None
+
+
+def test_inviting_an_existing_member_or_with_a_higher_role_is_refused(tmp_path):
+    owner = make_client(tmp_path)
+    register(owner)
+    admin = join(owner, tmp_path, "admin@example.com", "admin")
+    assert owner.post("/api/workspace/invites", json={"email": "admin@example.com", "role": "viewer"}).status_code == 409
+    assert admin.post("/api/workspace/invites", json={"email": "new@example.com", "role": "owner"}).status_code == 403
+    assert owner.post("/api/workspace/invites", json={"email": "new@example.com", "role": "emperor"}).status_code == 403
+
+
+# --------------------------------------------------------------------------- GitHub sign-in
+
+
+def fake_github(user_id=42, login="octocat", emails=None, token_ok=True):
+    emails = [{"email": "Octo@Example.com", "primary": True, "verified": True}] if emails is None else emails
+
+    def http(method, url, headers, body):
+        if url == "https://github.com/login/oauth/access_token":
+            return 200, ({"access_token": "gho_secret"} if token_ok else {"error": "bad_verification_code"})
+        if url == "https://api.github.com/user":
+            return 200, {"id": user_id, "login": login, "name": "Octo Cat", "avatar_url": "https://avatars.example/x.png"}
+        if url == "https://api.github.com/user/emails":
+            return 200, emails
+        raise AssertionError(url)
+
+    return GitHubOAuth("client-id", "client-secret", http)
+
+
+def github_flow(client, state=None, code="abc"):
+    start = client.get("/api/auth/github/start", follow_redirects=False)
+    assert start.status_code == 302 and start.headers["location"].startswith("https://github.com/login/oauth/authorize?")
+    sent = urllib.parse.parse_qs(urllib.parse.urlparse(start.headers["location"]).query)
+    assert sent["client_id"] == ["client-id"] and sent["scope"] == ["read:user user:email"] and sent["redirect_uri"][0].endswith("/api/auth/github/callback")
+    return client.get(f"/api/auth/github/callback?code={code}&state={state or sent['state'][0]}", follow_redirects=False)
+
+
+def test_github_button_only_when_configured(tmp_path, monkeypatch):
+    monkeypatch.delenv("VITRIX_GITHUB_CLIENT_ID", raising=False)
+    monkeypatch.delenv("VITRIX_GITHUB_CLIENT_SECRET", raising=False)
+    c = make_client(tmp_path)
+    assert c.get("/api/auth/config").json()["github"] is False
+    assert c.get("/api/auth/github/start", follow_redirects=False).status_code == 404
+
+
+def test_github_first_account_becomes_the_owner(tmp_path, monkeypatch):
+    c = make_client(tmp_path, monkeypatch=monkeypatch, oauth=fake_github())
+    assert c.get("/api/auth/config").json()["github"] is True
+    r = github_flow(c)
+    assert r.status_code == 302 and r.headers["location"] == "/" and "vitrix_session" in c.cookies
+    me = c.get("/api/auth/me").json()["user"]
+    assert me["role"] == "owner" and me["email"] == "octo@example.com" and me["github_login"] == "octocat" and me["name"] == "Octo Cat"
+    row = sqlite3.connect(tmp_path / ".vitrix" / "vitrix.db").execute("SELECT password_hash FROM users").fetchone()
+    assert row[0] is None  # no password: GitHub-only account
+    assert login(second_client(tmp_path, c), "octo@example.com", "anything at all").status_code == 401
+
+
+def test_github_state_mismatch_is_rejected(tmp_path, monkeypatch):
+    c = make_client(tmp_path, monkeypatch=monkeypatch, oauth=fake_github())
+    r = github_flow(c, state="forged-state")
+    assert r.status_code == 302 and "auth_error" in r.headers["location"] and "vitrix_session" not in c.cookies
+    no_cookie = second_client(tmp_path, c).get("/api/auth/github/callback?code=abc&state=anything", follow_redirects=False)
+    assert "auth_error" in no_cookie.headers["location"]
+
+
+def test_github_bad_code_creates_nothing(tmp_path, monkeypatch):
+    c = make_client(tmp_path, monkeypatch=monkeypatch, oauth=fake_github(token_ok=False))
+    assert "auth_error" in github_flow(c).headers["location"]
+    assert c.get("/api/auth/config").json()["bootstrap"] is True
+
+
+def test_github_links_an_existing_account_only_through_a_verified_email(tmp_path, monkeypatch):
+    c = make_client(tmp_path)
+    register(c, "octo@example.com", "Octo")  # an existing local owner account
+    cfg = str(tmp_path / "vitrix.yml")
+    monkeypatch.setattr(auth_api, "github_oauth_from_env", lambda: fake_github(emails=[{"email": "octo@example.com", "primary": True, "verified": False}]))
+    attacker = TestClient(create_app(cfg), base_url="http://127.0.0.1:8000")
+    assert "auth_error" in github_flow(attacker).headers["location"] and "vitrix_session" not in attacker.cookies  # unverified: no takeover
+    monkeypatch.setattr(auth_api, "github_oauth_from_env", lambda: fake_github())
+    owner = TestClient(create_app(cfg), base_url="http://127.0.0.1:8000")
+    assert github_flow(owner).headers["location"] == "/"
+    me = owner.get("/api/auth/me").json()["user"]
+    assert me["role"] == "owner" and me["github_login"] == "octocat"  # linked to the existing account, not a new one
+    assert len(owner.get("/api/workspace").json()["members"]) == 1
+
+
+def test_github_sign_up_follows_the_invite_policy(tmp_path, monkeypatch):
+    owner = make_client(tmp_path, monkeypatch=monkeypatch, oauth=fake_github(user_id=1, login="boss", emails=[{"email": "boss@example.com", "primary": True, "verified": True}]))
+    github_flow(owner)  # first account: owner
+    monkeypatch.setattr(auth_api, "github_oauth_from_env", lambda: fake_github(user_id=2, login="newbie", emails=[{"email": "newbie@example.com", "primary": True, "verified": True}]))
+    newbie = TestClient(create_app(str(tmp_path / "vitrix.yml")), base_url="http://127.0.0.1:8000")
+    assert "invitation" in urllib.parse.unquote_plus(github_flow(newbie).headers["location"])  # closed
+    token = invite_token(owner, "newbie@example.com", "editor")
+    start = newbie.get(f"/api/auth/github/start?invite={urllib.parse.quote(token)}", follow_redirects=False)
+    state = urllib.parse.parse_qs(urllib.parse.urlparse(start.headers["location"]).query)["state"][0]
+    assert newbie.get(f"/api/auth/github/callback?code=abc&state={state}", follow_redirects=False).headers["location"] == "/"
+    assert newbie.get("/api/auth/me").json()["user"]["role"] == "editor"
+
+
+def test_github_without_any_verified_email_is_refused(tmp_path, monkeypatch):
+    c = make_client(tmp_path, monkeypatch=monkeypatch, oauth=fake_github(emails=[{"email": "x@example.com", "primary": True, "verified": False}]))
+    assert "verified" in urllib.parse.unquote_plus(github_flow(c).headers["location"])
+
+
+def test_oauth_client_only_talks_to_github():
+    from vitrix.auth import _http
+
+    for url in ("http://github.com/login", "https://evil.example/", "https://github.com.evil.example/x", "file:///etc/passwd"):
+        with pytest.raises(AuthError):
+            _http("GET", url, {}, None)
+
+
+# --------------------------------------------------------------------------- audit and attribution
+
+
+def test_audit_trail_records_who_did_what(tmp_path):
+    owner = make_client(tmp_path)
+    register(owner)
+    token = invite_token(owner, "ana@example.com", "editor")
+    login(second_client(tmp_path, owner), "owner@example.com", "wrong password!!")
+    actions = [(a["action"], a["actor"]) for a in owner.get("/api/workspace/audit").json()]
+    assert ("invite.created", "Olivia Owner") in actions and ("account.register", "Olivia Owner") in actions
+    assert any(a == "login.failed" for a, _ in actions)
+    assert token not in str(owner.get("/api/workspace/audit").json())  # secrets never reach the log
+
+
+def test_commits_sent_to_ci_credit_the_person(tmp_path, monkeypatch):
+    fake = FakeGitHub()
+    monkeypatch.setattr(service, "GitHubClient", lambda gh: GitHubClient(gh, transport=fake))
+    monkeypatch.setenv("VITRIX_GITHUB_TOKEN", "test-secret")
+    c = make_client(tmp_path, extra=AUTH_ON + f"github:\n  repo: {REPO}\n  base: main\n")
+    register(c)
+    r = c.post("/api/ci/rules", json={"path": "windows/new.yml", "rule": RULE_OK, "cases": CASES_OK})
+    assert r.status_code == 201
+    message = fake.body_of("/git/commits")["message"]
+    assert "Submitted-by: Olivia Owner (owner@example.com) via Vitrix" in message and "Co-authored-by" not in message  # local email is unverified
+    assert any(a["action"] == "rule.ci_submitted" and SHA[:7] in a["detail"] for a in c.get("/api/workspace/audit").json())
+
+
+def test_attribution_never_injects_header_lines():
+    evil = "Eve" + chr(10) + "Co-authored-by: Boss <boss@x.io>"
+    ident = auth.Identity(1, "a@example.com", evil, "editor", "eve", None, 99)
+    lines = auth.attribution(ident).splitlines()
+    assert len(lines) == 2 and lines[0].startswith("Submitted-by: ") and lines[1].endswith("<99+eve@users.noreply.github.com>")
+    assert "<boss@x.io>" not in chr(10).join(lines)

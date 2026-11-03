@@ -1,30 +1,30 @@
 cases:
-  - name: Positivo · powershell -enc
+  - name: Positive · powershell -enc
     expect: match
     event:
       Image: 'C:\Windows\System32\WindowsPowerShell\v1.0\powershell.exe'
       CommandLine: 'powershell.exe -enc JABzAD0ATgBlAHcA'
       ParentImage: 'C:\Windows\explorer.exe'
 
-  - name: Positivo · -EncodedCommand em maiúsculas
+  - name: Positive · -EncodedCommand in upper case
     expect: match
     event:
       Image: 'C:\Windows\System32\WindowsPowerShell\v1.0\POWERSHELL.EXE'
       CommandLine: 'POWERSHELL.EXE -EncodedCommand JABzAD0ATgBlAHcA'
 
-  - name: Negativo · powershell -File backup.ps1
+  - name: Negative · powershell -File backup.ps1
     expect: no_match
     event:
       Image: 'C:\Windows\System32\WindowsPowerShell\v1.0\powershell.exe'
       CommandLine: 'powershell.exe -File C:\scripts\backup.ps1'
 
-  - name: Negativo · outro executável com o mesmo argumento
+  - name: Negative · another binary with the same argument
     expect: no_match
     event:
       Image: 'C:\Windows\notepad.exe'
       CommandLine: 'notepad.exe -enc'
 
-  - name: Falso positivo · script codificado do agente SCCM
+  - name: False positive · encoded script from the SCCM agent
     kind: false_positive
     expect: no_match
     event:
@@ -32,7 +32,7 @@ cases:
       CommandLine: 'powershell.exe -NoLogo -enc JABjAG0AcwA='
       ParentImage: 'C:\Windows\CCM\CcmExec.exe'
 
-  - name: Borda · evento sem CommandLine
+  - name: Edge · event without CommandLine
     kind: edge
     expect: no_match
     event:

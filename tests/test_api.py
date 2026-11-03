@@ -92,7 +92,7 @@ def test_validate_aponta_erro_de_lint(client):
 def test_validate_yaml_invalido(client):
     body = client.post("/api/validate", json={"rule": "title: [sem fechar"}).json()
     assert body["state"] == "fail"
-    assert "YAML inválido" in body["lint"][0]["message"]
+    assert "invalid YAML" in body["lint"][0]["message"]
     assert body["conversions"] == {}
 
 
@@ -119,14 +119,12 @@ def test_stats_derivadas_do_repositorio(client):
     assert len(s["mitre"]["uncovered"]) == 13
     assert s["tests"] == {"total": 2, "passed": 2, "rules_without_cases": 0, "rules_all_passing": 1}
     assert s["pipeline"] == {"parse": {"ok": 1, "failed": 0}, "validation": {"ok": 1, "warn": 0, "fail": 0}, "conversion": {"ok": 1, "failed": 0}}
-    assert s["mitre"]["tactics"][0] == {"slug": "execution", "id": "TA0002", "name": "Execução", "count": 1}
+    assert s["mitre"]["tactics"][0] == {"slug": "execution", "id": "TA0002", "name": "Execution", "count": 1}
     assert s["lint"] == {"errors": 0, "warnings": 0}
 
 
-def test_repositorio_de_exemplo_pela_api():
-    from pathlib import Path
-
-    app = create_app(str(Path(__file__).resolve().parents[1] / "vitrix.yml"))
+def test_repositorio_de_exemplo_pela_api(user_repo):
+    app = create_app(str(user_repo))
     c = TestClient(app)
     rules = c.get("/api/rules").json()
     assert {r["id"] for r in rules} == {"windows/powershell_encoded.yml", "windows/schtasks_system.yml"}

@@ -3,7 +3,7 @@ import { HighlightStyle, syntaxHighlighting } from "@codemirror/language";
 import { EditorView } from "@codemirror/view";
 import { tags as t } from "@lezer/highlight";
 
-// Tema escuro "vidro" do CodeMirror; cores do canvas de design.
+// Dark "glass" theme of CodeMirror; colours from the design canvas.
 const editorTheme = EditorView.theme(
   {
     "&": { fontSize: "13px", height: "100%", color: "#dce3f5", backgroundColor: "transparent" },
@@ -31,7 +31,7 @@ const editorHighlight = HighlightStyle.define([
   { tag: t.invalid, color: "#f87171" },
 ]);
 
-/** Extensões do editor de YAML (criar uma vez por componente, com useMemo). */
+/** YAML editor extensions (create once per component, with useMemo). */
 export function yamlExtensions() {
   return [yaml(), editorTheme, syntaxHighlighting(editorHighlight), EditorView.lineWrapping];
 }

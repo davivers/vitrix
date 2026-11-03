@@ -1,19 +1,26 @@
-import { useMutation, useQuery } from "@tanstack/react-query";
+import { useQuery } from "@tanstack/react-query";
 import CodeMirror from "@uiw/react-codemirror";
-import { AlertTriangle, CheckCircle2, ExternalLink, GitPullRequest, Loader2, RotateCcw, XCircle } from "lucide-react";
+import { AlertTriangle, CheckCircle2, Loader2, RotateCcw, Rocket, XCircle } from "lucide-react";
 import { useEffect, useMemo, useState } from "react";
 import { api } from "../api";
 import { yamlExtensions } from "../components/code";
-import { Section, safeHref } from "../components/dash";
-import { Card, ErrorBox, PageHeader, TargetSwatch } from "../components/ui";
+import { Section } from "../components/dash";
+import { PublishDialog } from "../components/PublishDialog";
+import { Card, ErrorBox, PageHeader, TargetSwatch, btnPrimary } from "../components/ui";
 import type { ConfigCheck, ConfigView } from "../types";
+
+function fmt(v: unknown): string {
+  if (typeof v === "boolean") return v ? "yes" : "no";
+  if (Array.isArray(v)) return v.length ? v.join(", ") : "—";
+  return String(v);
+}
 
 function Effective({ cfg }: { cfg: Omit<ConfigView, "path" | "text"> }) {
   const row = "grid grid-cols-[9rem_1fr] gap-3 py-2 text-[13px]";
   return (
     <dl className="divide-y divide-line">
       <div className={row}>
-        <dt className="text-subtle">SIEMs ativos</dt>
+        <dt className="text-subtle">Active SIEMs</dt>
         <dd className="flex flex-wrap gap-1.5">
           {cfg.targets.map((t) => (
             <span key={t} className="inline-flex items-center gap-1.5 rounded-md bg-surface-2 px-2 py-0.5 font-mono text-xs text-text">
@@ -23,14 +30,14 @@ function Effective({ cfg }: { cfg: Omit<ConfigView, "path" | "text"> }) {
         </dd>
       </div>
       <div className={row}>
-        <dt className="text-subtle">Linguagem padrão</dt>
-        <dd className="font-mono text-text">{cfg.default_target ?? "— (todos os ativos)"}</dd>
+        <dt className="text-subtle">Default language</dt>
+        <dd className="font-mono text-text">{cfg.default_target ?? "— (every active target)"}</dd>
       </div>
       <div className={row}>
-        <dt className="text-subtle">Rotas</dt>
+        <dt className="text-subtle">Routes</dt>
         <dd className="text-text">
           {cfg.routes.length === 0 ? (
-            <span className="text-muted">nenhuma</span>
+            <span className="text-muted">none</span>
           ) : (
             <ul className="space-y-0.5 font-mono text-xs">
               {cfg.routes.map((r) => (
@@ -43,23 +50,27 @@ function Effective({ cfg }: { cfg: Omit<ConfigView, "path" | "text"> }) {
         </dd>
       </div>
       <div className={row}>
-        <dt className="text-subtle">Pastas</dt>
+        <dt className="text-subtle">Folders</dt>
         <dd className="font-mono text-xs text-text">
-          regras {cfg.rules_dir}/ · casos {cfg.cases_dir}/ · saída {cfg.output_dir}/
+          rules {cfg.rules_dir}/ · cases {cfg.cases_dir}/ · datasets {cfg.datasets_dir ?? "—"}/ · output {cfg.output_dir}/
         </dd>
       </div>
       <div className={row}>
-        <dt className="text-subtle">Exige casos</dt>
-        <dd className="text-text">{cfg.require_cases ? "sim: ao menos um match e um no_match por regra" : "não"}</dd>
+        <dt className="text-subtle">Requires cases</dt>
+        <dd className="text-text">{cfg.require_cases ? "yes: at least one match and one no_match per rule" : "no"}</dd>
       </div>
       <div className={row}>
-        <dt className="text-subtle">Pipelines extras</dt>
-        <dd className="font-mono text-xs text-text">{cfg.extra_pipelines.length ? cfg.extra_pipelines.join(", ") : <span className="font-sans text-muted">nenhum</span>}</dd>
+        <dt className="text-subtle">Extra pipelines</dt>
+        <dd className="font-mono text-xs text-text">{cfg.extra_pipelines.length ? cfg.extra_pipelines.join(", ") : <span className="font-sans text-muted">none</span>}</dd>
       </div>
       <div className={row}>
         <dt className="text-subtle">GitHub</dt>
         <dd className="font-mono text-xs text-text">
-          {cfg.github ? `${cfg.github.repo} @ ${cfg.github.base}${cfg.github.path ? ` (${cfg.github.path}/)` : ""}` : <span className="font-sans text-muted">não configurado</span>}
+          {cfg.github ? (
+            `${cfg.github.repo} @ ${cfg.github.base}${cfg.github.path ? ` (${cfg.github.path}/)` : ""}${cfg.github.workflow ? ` · CI: ${cfg.github.workflow}` : ""}`
+          ) : (
+            <span className="font-sans text-muted">not configured</span>
+          )}
         </dd>
       </div>
     </dl>
@@ -78,11 +89,11 @@ function CheckResult({ check, pending, dirty }: { check: ConfigCheck | null; pen
         ) : (
           <XCircle size={15} className="text-bad" aria-hidden />
         )}
-        <span className="text-strong">{pending ? "Validando…" : check.ok ? (dirty ? "Configuração válida" : "Configuração atual válida") : "Configuração inválida"}</span>
+        <span className="text-strong">{pending ? "Validating…" : check.ok ? (dirty ? "Valid configuration" : "Current configuration is valid") : "Invalid configuration"}</span>
       </p>
       {check.errors.map((e) => (
         <p key={e} className="flex gap-2 text-[13px]">
-          <span className="shrink-0 font-medium text-bad">Erro</span>
+          <span className="shrink-0 font-medium text-bad">Error</span>
           <span className="text-text [overflow-wrap:anywhere]">{e}</span>
         </p>
       ))}
@@ -98,13 +109,11 @@ function CheckResult({ check, pending, dirty }: { check: ConfigCheck | null; pen
 
 export default function SettingsPage() {
   const config = useQuery({ queryKey: ["config"], queryFn: api.config });
-  const github = useQuery({ queryKey: ["github"], queryFn: api.github });
   const health = useQuery({ queryKey: ["health"], queryFn: () => fetch("/api/health").then((r) => r.json() as Promise<{ version: string }>) });
   const [text, setText] = useState<string | null>(null);
-  const [title, setTitle] = useState("");
   const [check, setCheck] = useState<ConfigCheck | null>(null);
   const [pending, setPending] = useState(false);
-  const pr = useMutation({ mutationFn: api.configPullRequest });
+  const [publishOpen, setPublishOpen] = useState(false);
   const extensions = useMemo(yamlExtensions, []);
 
   const original = config.data?.text ?? "";
@@ -132,40 +141,50 @@ export default function SettingsPage() {
     };
   }, [current, config.data]);
 
-  const canPr = dirty && !pending && check?.ok && github.data?.configured && github.data.token && !pr.isPending;
+  const localReady: boolean | null = pending || !check ? null : check.ok;
 
   return (
     <div className="mx-auto max-w-7xl px-4 py-8 sm:px-8">
       <PageHeader
-        title="Configurações"
-        subtitle="O vitrix.yml do repositório. Nada é gravado em disco: a alteração vai por pull request e passa pelo CI como qualquer regra."
+        title="Settings"
+        subtitle="The repository's vitrix.yml. Nothing is written to disk: a change goes through the real CI first and then a pull request, like any rule."
       />
       {config.error && <ErrorBox message={(config.error as Error).message} />}
 
       {config.data && (
         <div className="grid gap-5 xl:grid-cols-[1fr_1.15fr]">
           <div className="flex flex-col gap-5">
-            <Section title="Configuração efetiva" aside={dirty ? "com as suas alterações" : (config.data.path ?? "padrões (sem vitrix.yml)")}>
+            <Section title="Effective configuration" aside={dirty ? "with your changes" : (config.data.path ?? "defaults (no vitrix.yml)")}>
               <Effective cfg={check?.config ?? config.data} />
             </Section>
-            <Section title="Sobre">
+            <Section title="Quality gate criteria" aside="quality_gate">
+              <dl className="space-y-1.5 text-[12.5px]">
+                {Object.entries((check?.config ?? config.data).quality_gate).map(([k, v]) => (
+                  <div key={k} className="flex justify-between gap-3">
+                    <dt className="font-mono text-muted">{k}</dt>
+                    <dd className="text-right font-mono text-text">{fmt(v)}</dd>
+                  </div>
+                ))}
+              </dl>
+            </Section>
+            <Section title="About">
               <dl className="grid grid-cols-[9rem_1fr] gap-y-1.5 text-[13px]">
-                <dt className="text-subtle">Versão</dt>
+                <dt className="text-subtle">Version</dt>
                 <dd className="font-mono text-text">{health.data?.version ?? "—"}</dd>
-                <dt className="text-subtle">Servidor</dt>
-                <dd className="text-text">local, sem autenticação (só localhost)</dd>
-                <dt className="text-subtle">Escrita</dt>
-                <dd className="text-text">somente por pull request no GitHub</dd>
+                <dt className="text-subtle">Server</dt>
+                <dd className="text-text">local, no authentication (localhost only)</dd>
+                <dt className="text-subtle">Writes</dt>
+                <dd className="text-text">only through GitHub: CI-validated branch, then pull request</dd>
               </dl>
             </Section>
           </div>
 
-          <Card className="flex h-[680px] flex-col overflow-hidden">
+          <Card className="flex h-[720px] flex-col overflow-hidden">
             <div className="flex items-center justify-between gap-3 border-b border-line px-4 py-3">
               <h2 className="font-mono text-[13px] font-semibold text-strong">{config.data.path ?? "vitrix.yml"}</h2>
               {dirty && (
                 <button type="button" onClick={() => setText(null)} className="inline-flex items-center gap-1.5 rounded-md px-2 py-1 text-xs text-muted hover:bg-surface-2 hover:text-text">
-                  <RotateCcw size={13} aria-hidden /> Descartar alterações
+                  <RotateCcw size={13} aria-hidden /> Discard changes
                 </button>
               )}
             </div>
@@ -174,45 +193,21 @@ export default function SettingsPage() {
             </div>
             <div className="space-y-3 border-t border-line p-4">
               <CheckResult check={check} pending={pending} dirty={dirty} />
-              {github.data && (!github.data.configured || !github.data.token) && (
-                <p className="text-xs text-subtle">Para abrir o PR, configure o GitHub em Conexões.</p>
-              )}
-              {pr.error && <ErrorBox message={(pr.error as Error).message} />}
-              {pr.data ? (
-                <a href={safeHref(pr.data.url)} target="_blank" rel="noreferrer" className="inline-flex items-center gap-2 text-sm font-medium text-good hover:underline">
-                  <CheckCircle2 size={15} aria-hidden /> Pull request #{pr.data.number} aberto <ExternalLink size={13} aria-hidden />
-                </a>
-              ) : (
-                <form
-                  className="flex flex-wrap gap-2"
-                  onSubmit={(e) => {
-                    e.preventDefault();
-                    if (canPr) pr.mutate({ text: current, title: title.trim() || null });
-                  }}
-                >
-                  <label className="min-w-[14rem] flex-1">
-                    <span className="sr-only">Título do PR</span>
-                    <input
-                      value={title}
-                      onChange={(e) => setTitle(e.target.value)}
-                      maxLength={200}
-                      placeholder="chore: atualiza vitrix.yml"
-                      className="w-full rounded-[10px] border border-line bg-surface px-3 py-2 text-sm text-text placeholder:text-subtle focus:border-accent/50"
-                    />
-                  </label>
-                  <button
-                    type="submit"
-                    disabled={!canPr}
-                    className="inline-flex items-center gap-2 rounded-[10px] bg-brand px-4 py-2 text-[13.5px] font-semibold text-strong hover:brightness-110 disabled:cursor-not-allowed disabled:opacity-50"
-                  >
-                    {pr.isPending ? <Loader2 size={16} className="animate-spin" aria-hidden /> : <GitPullRequest size={16} aria-hidden />}
-                    {pr.isPending ? "Abrindo…" : "Abrir pull request"}
-                  </button>
-                </form>
-              )}
+              <button type="button" disabled={!dirty} onClick={() => setPublishOpen(true)} className={btnPrimary}>
+                <Rocket size={16} aria-hidden /> Publish change
+              </button>
+              {!dirty && <p className="text-xs text-subtle">Edit the file to publish a change.</p>}
             </div>
           </Card>
         </div>
+      )}
+      {publishOpen && (
+        <PublishDialog
+          mode={{ kind: "config", text: current }}
+          localReady={localReady}
+          localDetail={check && !check.ok ? check.errors.join("; ") : undefined}
+          onClose={() => setPublishOpen(false)}
+        />
       )}
     </div>
   );

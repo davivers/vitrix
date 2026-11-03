@@ -1,21 +1,21 @@
-"""Replay de logs: roda todas as regras contra um conjunto de eventos, localmente.
+"""Log replay: run every rule against a set of events, locally.
 
-Serve para três coisas:
+It serves three purposes:
 
-- **simulação de ameaças**: um dataset com eventos de um ataque (PowerShell codificado,
-  dump de credenciais, persistência...) mostra quais regras pegam o quê;
-- **falsos positivos**: um dataset de atividade normal do ambiente não deveria disparar nada;
-- **regressão**: cada dataset pode ter um arquivo de expectativas com quantos eventos cada
-  regra deve pegar. Se uma alteração muda esse número, o replay acusa.
+- **threat simulation**: a dataset with the events of an attack (encoded PowerShell,
+  credential dumping, persistence...) shows which rules catch what;
+- **false positives**: a dataset of normal activity in the environment should fire nothing;
+- **regression**: each dataset may have an expectations file with how many events each rule
+  must match. If a change moves that number, replay reports it.
 
-Datasets ficam em `datasets/` (opção `datasets_dir` do vitrix.yml), um por arquivo:
-JSON (lista de eventos ou `{"events": [...]}`), JSON Lines (`.jsonl`, um evento por linha)
-ou YAML (lista ou `events:`). As expectativas ficam ao lado, em `<nome>.expect.yml`:
+Datasets live in `datasets/` (`datasets_dir` in vitrix.yml), one per file: JSON (a list of
+events or `{"events": [...]}`), JSON Lines (`.jsonl`, one event per line) or YAML (a list or
+`events:`). Expectations sit next to them, in `<name>.expect.yml`:
 
     expect:
-      windows/powershell_encoded.yml: 2          # exatamente 2 eventos
-      windows/schtasks_system.yml: {min: 1}       # ao menos 1
-    others: 0                                     # demais regras: 0 (padrão: sem limite)
+      windows/powershell_encoded.yml: 2          # exactly 2 events
+      windows/schtasks_system.yml: {min: 1}       # at least 1
+    others: 0                                     # every other rule: 0 (default: no limit)
 """
 
 from __future__ import annotations
@@ -34,15 +34,15 @@ from .loader import RuleFile
 DATASET_SUFFIXES = {".json", ".jsonl", ".ndjson", ".yml", ".yaml"}
 EXPECT_SUFFIX = ".expect.yml"
 MAX_EVENTS = 100_000
-MAX_SAMPLE = 20  # índices de eventos que casaram, por regra
+MAX_SAMPLE = 20  # indexes of matching events, per rule
 
 
 class ReplayError(Exception):
-    """Dataset ou arquivo de expectativas inválido."""
+    """Invalid dataset or expectations file."""
 
 
 def load_events(text: str, name: str = "dataset") -> list[dict]:
-    """Lê eventos de JSON, JSON Lines ou YAML. Cada evento é um mapa de campos."""
+    """Read events from JSON, JSON Lines or YAML. Each event is a mapping of fields."""
     text = text.strip()
     if not text:
         return []
@@ -57,28 +57,28 @@ def load_events(text: str, name: str = "dataset") -> list[dict]:
             try:
                 data = yaml.safe_load(text)
             except yaml.YAMLError as exc:
-                raise ReplayError(f"{name}: não é JSON, JSON Lines nem YAML válido ({exc})") from exc
+                raise ReplayError(f"{name}: not valid JSON, JSON Lines or YAML ({exc})") from exc
     if isinstance(data, dict):
         data = data.get("events", [data])
     if not isinstance(data, list):
-        raise ReplayError(f"{name}: esperado uma lista de eventos")
+        raise ReplayError(f"{name}: expected a list of events")
     if len(data) > MAX_EVENTS:
-        raise ReplayError(f"{name}: {len(data)} eventos; o limite é {MAX_EVENTS}")
+        raise ReplayError(f"{name}: {len(data)} events; the limit is {MAX_EVENTS}")
     bad = next((i for i, e in enumerate(data, 1) if not isinstance(e, dict)), None)
     if bad:
-        raise ReplayError(f"{name}: o evento {bad} não é um mapa de campos")
+        raise ReplayError(f"{name}: event {bad} is not a mapping of fields")
     return data  # type: ignore[return-value]
 
 
 @dataclass
 class RuleReplay:
-    rule: str  # caminho dentro de rules/
+    rule: str  # path inside rules/
     title: str
     level: str | None
     matches: int = 0
-    sample: list[int] = field(default_factory=list)  # índices (base 1) dos eventos que casaram
+    sample: list[int] = field(default_factory=list)  # 1-based indexes of the matching events
     duration_ms: float = 0.0
-    error: str | None = None  # regra fora do subconjunto do avaliador local
+    error: str | None = None  # rule outside the local evaluator's subset
 
     def as_dict(self) -> dict:
         return {"rule": self.rule, "title": self.title, "level": self.level, "matches": self.matches,
@@ -86,7 +86,7 @@ class RuleReplay:
 
 
 def replay(rules: list[tuple[str, RuleFile]], events: list[dict]) -> dict:
-    """Roda cada regra (id, arquivo) contra todos os eventos. Mede o tempo de cada uma."""
+    """Run each rule (id, file) against every event, timing each one."""
     out: list[RuleReplay] = []
     started = time.perf_counter()
     for rid, rf in rules:
@@ -114,7 +114,7 @@ def replay(rules: list[tuple[str, RuleFile]], events: list[dict]) -> dict:
     }
 
 
-# --------------------------------------------------------------------------- datasets e expectativas
+# --------------------------------------------------------------------------- datasets and expectations
 
 
 def dataset_files(cfg: Config) -> list[Path]:
@@ -126,12 +126,12 @@ def dataset_files(cfg: Config) -> list[Path]:
 
 def dataset_name(cfg: Config, path: Path) -> str:
     if cfg.datasets_dir is None:
-        raise ReplayError("datasets_dir não configurado")
+        raise ReplayError("datasets_dir is not configured")
     return path.resolve().relative_to(cfg.datasets_dir.resolve()).as_posix()
 
 
 def resolve_dataset(cfg: Config, name: str) -> Path | None:
-    """Só aceita arquivos de dataset dentro de datasets_dir."""
+    """Only dataset files inside datasets_dir are accepted."""
     if cfg.datasets_dir is None:
         return None
     base = cfg.datasets_dir.resolve()
@@ -146,16 +146,16 @@ def expect_path(path: Path) -> Path:
 
 
 def load_expectations(path: Path) -> tuple[dict[str, dict], int | None]:
-    """(regra -> {min, max}, limite para as demais regras). Sem arquivo: ({}, None)."""
+    """(rule -> {min, max}, limit for every other rule). No file: ({}, None)."""
     epath = expect_path(path)
     if not epath.is_file():
         return {}, None
     try:
         data = yaml.safe_load(epath.read_text(encoding="utf-8")) or {}
     except yaml.YAMLError as exc:
-        raise ReplayError(f"{epath.name}: YAML inválido ({exc})") from exc
+        raise ReplayError(f"{epath.name}: invalid YAML ({exc})") from exc
     if not isinstance(data, dict) or not isinstance(data.get("expect", {}), dict):
-        raise ReplayError(f"{epath.name}: use 'expect: {{regra: quantidade}}'")
+        raise ReplayError(f"{epath.name}: use 'expect: {{rule: count}}'")
     rules: dict[str, dict] = {}
     for rule, spec in (data.get("expect") or {}).items():
         if isinstance(spec, int) and not isinstance(spec, bool):
@@ -163,21 +163,21 @@ def load_expectations(path: Path) -> tuple[dict[str, dict], int | None]:
         elif isinstance(spec, dict) and set(spec) <= {"min", "max"} and all(isinstance(v, int) for v in spec.values()):
             rules[str(rule)] = {"min": spec.get("min", 0), "max": spec.get("max")}
         else:
-            raise ReplayError(f"{epath.name}: expectativa de {rule} deve ser um número ou {{min, max}}")
+            raise ReplayError(f"{epath.name}: the expectation for {rule} must be a number or {{min, max}}")
     others = data.get("others")
     if others is not None and (not isinstance(others, int) or isinstance(others, bool)):
-        raise ReplayError(f"{epath.name}: 'others' deve ser um número")
+        raise ReplayError(f"{epath.name}: 'others' must be a number")
     return rules, others
 
 
 def check_expectations(result: dict, rules: dict[str, dict], others: int | None) -> list[dict]:
-    """Compara as contagens do replay com as expectativas. Só devolve as regras verificadas."""
+    """Compare replay counts with the expectations. Returns only the checked rules."""
     checks: list[dict] = []
     got = {r["rule"]: r["matches"] for r in result["rules"]}
     for rule, spec in sorted(rules.items()):
         n = got.get(rule)
         if n is None:
-            checks.append({"rule": rule, "expected": spec, "got": None, "passed": False, "message": "regra não encontrada"})
+            checks.append({"rule": rule, "expected": spec, "got": None, "passed": False, "message": "rule not found"})
             continue
         ok = n >= spec["min"] and (spec["max"] is None or n <= spec["max"])
         checks.append({"rule": rule, "expected": spec, "got": n, "passed": ok, "message": None if ok else _describe(spec, n)})
@@ -191,9 +191,9 @@ def check_expectations(result: dict, rules: dict[str, dict], others: int | None)
 
 def _describe(spec: dict, n: int) -> str:
     if spec["max"] is not None and spec["min"] == spec["max"]:
-        want = f"exatamente {spec['min']}"
+        want = f"exactly {spec['min']}"
     elif spec["max"] is None:
-        want = f"ao menos {spec['min']}"
+        want = f"at least {spec['min']}"
     else:
-        want = f"entre {spec['min']} e {spec['max']}"
-    return f"esperado {want} evento(s), obtido {n}"
+        want = f"between {spec['min']} and {spec['max']}"
+    return f"expected {want} event(s), got {n}"

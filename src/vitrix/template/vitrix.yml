@@ -1,0 +1,68 @@
+schema_version: 1
+
+# Where the Sigma rules, the test cases, the replay datasets and the compiled output live.
+rules_dir: rules
+cases_dir: cases
+datasets_dir: datasets
+output_dir: dist
+
+# Active SIEMs. `vitrix targets` lists the available ones (built-in and plugins).
+targets:
+  - splunk
+  - kql
+  - elastic-eql
+
+# Final query language of each rule, from the most specific to the most general:
+#   1. `vitrix: {target: kql}` inside the rule itself (string or list)
+#   2. the first route below whose `match` matches the path inside rules/
+#   3. `default_target`
+#   4. otherwise the rule is converted to every active target
+default_target: splunk
+routes: []
+#  - match: "azure/*"
+#    target: kql
+
+# pySigma pipelines with the field mapping of YOUR environment.
+# Applied before each SIEM's default mapping.
+# extra_pipelines:
+#   - pipelines/my-environment.yml
+
+# Every rule needs a cases file with at least one positive and one negative case.
+require_cases: true
+
+# What a rule needs to be publishable (defaults shown).
+quality_gate:
+  min_positive: 1
+  min_negative: 1
+  false_positive_levels: [high, critical]   # these levels require a kind: false_positive case
+  require_filter_test: true                 # a rule with filter_* needs a case proving the exclusion
+  require_mitre: true
+  allow_warnings: true                      # false: any lint warning blocks
+  blocked_status: [deprecated, unsupported]
+  require_replay: false                     # true: the rule needs an expectation in some dataset
+  review_days: 180                          # recommend reviewing rules unchanged for longer (0 = off)
+  min_score: 80                             # health score (0-100) a rule needs to be approved (0 = no threshold)
+
+# GitHub: the repository that holds THESE detections (the one you push this folder to).
+# Vitrix validates every change in its real CI (GitHub Actions) and only then opens the
+# pull request; it also reads CI, PR and time-to-merge data for the dashboards.
+# The token comes from the environment: VITRIX_GITHUB_TOKEN (or GITHUB_TOKEN), with
+# Contents and Pull requests (read/write) and Actions (read). Never put the token here.
+# Uncomment and set your repository:
+# github:
+#   repo: your-org/your-detections
+#   base: main
+#   workflow: vitrix   # the workflow in .github/workflows/vitrix.yml
+
+# Accounts: several people in one workspace (one workspace = this repository).
+# Off by default (single local user). The first account to register becomes the owner;
+# after that only invited people can join (or anyone, with allow_signup).
+# GitHub sign-in needs a GitHub OAuth app: set VITRIX_GITHUB_CLIENT_ID and
+# VITRIX_GITHUB_CLIENT_SECRET (callback: <public url>/api/auth/github/callback).
+# auth:
+#   enabled: true
+#   allow_signup: false
+#   signup_role: viewer      # viewer or editor, for self-registered people
+#   session_days: 14
+#   github_login: true
+#   workspace_name: Detection workspace

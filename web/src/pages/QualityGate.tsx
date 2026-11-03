@@ -4,24 +4,26 @@ import { CheckCircle2, ChevronDown, ShieldCheck, XCircle } from "lucide-react";
 import { useState } from "react";
 import { Link } from "react-router-dom";
 import { api } from "../api";
-import { Section, StatTile, pct } from "../components/dash";
+import { HealthMeter, Section, StatTile, pct } from "../components/dash";
 import { CheckList, FlowStepper, QUESTIONS, STAGES, STAGE_META } from "../components/flow";
 import { Card, ErrorBox, PageHeader } from "../components/ui";
 import type { QualityReport, QualityRule, StageState } from "../types";
 
 const GATE_LABELS: Record<string, string> = {
-  min_positive: "Casos positivos mínimos",
-  min_negative: "Casos negativos mínimos",
-  false_positive_levels: "Exigem caso de falso positivo",
-  require_filter_test: "Exclusão precisa de teste",
-  require_mitre: "Técnica ATT&CK obrigatória",
-  allow_warnings: "Avisos de lint permitidos",
-  blocked_status: "Status que bloqueiam",
-  require_replay: "Replay obrigatório",
+  min_positive: "Minimum positive cases",
+  min_negative: "Minimum negative cases",
+  false_positive_levels: "Levels requiring a false-positive case",
+  require_filter_test: "Exclusions must be tested",
+  require_mitre: "ATT&CK technique required",
+  allow_warnings: "Lint warnings allowed",
+  blocked_status: "Blocking statuses",
+  require_replay: "Replay expectation required",
+  review_days: "Review window (days)",
+  min_score: "Minimum health score to approve",
 };
 
 function fmt(v: unknown): string {
-  if (typeof v === "boolean") return v ? "sim" : "não";
+  if (typeof v === "boolean") return v ? "yes" : "no";
   if (Array.isArray(v)) return v.length ? v.join(", ") : "—";
   return String(v);
 }
@@ -43,16 +45,16 @@ export function FlowFunnel({ q }: { q: QualityReport }) {
               </span>
               <span className="mt-0.5 flex items-center gap-1 text-xs text-muted">
                 {s.id === "deploy" ? (
-                  "prontas, aguardando merge"
+                  "ready, awaiting CI and merge"
                 ) : failed ? (
                   <>
-                    <XCircle size={12} className="text-bad" aria-hidden /> {failed} bloqueadas
+                    <XCircle size={12} className="text-bad" aria-hidden /> {failed} blocked
                   </>
                 ) : (s.counts.skip ?? 0) === q.summary.total ? (
-                  "não se aplica"
+                  "not applicable"
                 ) : (
                   <>
-                    <CheckCircle2 size={12} className="text-good" aria-hidden /> sem bloqueio
+                    <CheckCircle2 size={12} className="text-good" aria-hidden /> no blockers
                   </>
                 )}
               </span>
@@ -71,12 +73,13 @@ function RuleRow({ r }: { r: QualityRule }) {
       <button type="button" onClick={() => setOpen(!open)} aria-expanded={open} className="flex w-full flex-wrap items-center gap-3 px-4 py-3 text-left hover:bg-surface">
         <span className={clsx("inline-flex shrink-0 items-center gap-1 rounded-full px-2 py-0.5 text-xs font-semibold", r.ready ? "bg-good-soft text-good" : "bg-bad-soft text-bad")}>
           {r.ready ? <CheckCircle2 size={12} aria-hidden /> : <XCircle size={12} aria-hidden />}
-          {r.ready ? "Pronta" : "Bloqueada"}
+          {r.ready ? "Ready" : "Blocked"}
         </span>
         <span className="min-w-[14rem] flex-1">
           <span className="block truncate text-[13.5px] font-semibold text-strong">{r.title || r.id}</span>
           <span className="block font-mono text-[11.5px] text-subtle">{r.id}</span>
         </span>
+        <HealthMeter score={r.score} />
         <FlowStepper stages={r.stages} compact />
         <ChevronDown size={16} className={clsx("text-subtle transition-transform", open && "rotate-180")} aria-hidden />
       </button>
@@ -84,7 +87,7 @@ function RuleRow({ r }: { r: QualityRule }) {
         <div className="grid gap-5 px-4 pb-4 md:grid-cols-[1fr_16rem]">
           <CheckList checks={r.checks} />
           <div className="space-y-2">
-            <h3 className="text-[11px] font-semibold uppercase tracking-wider text-subtle">As cinco perguntas</h3>
+            <h3 className="text-[11px] font-semibold uppercase tracking-wider text-subtle">The five questions</h3>
             <ul className="space-y-1.5 text-[12.5px]">
               {Object.entries(QUESTIONS).map(([id, text]) => {
                 const state = r.answers[id] as StageState;
@@ -98,7 +101,7 @@ function RuleRow({ r }: { r: QualityRule }) {
               })}
             </ul>
             <Link to={`/editor/${r.id}`} className="inline-block pt-1 text-xs font-medium text-accent hover:underline">
-              Abrir no Editor
+              Open in the Editor
             </Link>
           </div>
         </div>
@@ -116,19 +119,25 @@ export default function QualityGatePage() {
     <div className="mx-auto max-w-7xl px-4 py-8 sm:px-8">
       <PageHeader
         title="Quality gate"
-        subtitle="Escrever → Validar → Testar → Replay → Analisar → Quality gate → Deploy. Uma regra só é publicável quando todas as verificações bloqueantes passam."
+        subtitle="Write → Validate → Test → Replay → Analyze → Quality gate → Deploy. A rule is publishable only when every blocking check passes and the real CI validates the change."
       />
       {error && <ErrorBox message={(error as Error).message} />}
-      {isLoading && <p className="text-sm text-muted">Rodando o fluxo em todas as regras…</p>}
+      {isLoading && <p className="text-sm text-muted">Running the lifecycle on every rule…</p>}
       {q && (
         <>
-          <div className="mb-5 grid gap-4 sm:grid-cols-3">
-            <StatTile label="Prontas para publicar" value={`${q.summary.ready}/${q.summary.total}`} sub={`${pct(q.summary.ready, q.summary.total)}% do acervo`} status={q.summary.blocked ? "warn" : "ok"} />
-            <StatTile label="Bloqueadas" value={q.summary.blocked} sub={q.summary.blocked ? "veja os bloqueios abaixo" : "nenhuma"} status={q.summary.blocked ? "fail" : "ok"} />
+          <div className="mb-5 grid gap-4 sm:grid-cols-2 xl:grid-cols-4">
+            <StatTile label="Ready to publish" value={`${q.summary.ready}/${q.summary.total}`} sub={`${pct(q.summary.ready, q.summary.total)}% of the rule set`} status={q.summary.blocked ? "warn" : "ok"} />
+            <StatTile label="Blocked" value={q.summary.blocked} sub={q.summary.blocked ? "see the blockers below" : "none"} status={q.summary.blocked ? "fail" : "ok"} />
             <StatTile
-              label="Datasets de replay"
+              label="Average health"
+              value={q.summary.health === null ? "—" : `${q.summary.health}/100`}
+              sub={q.summary.stale ? `${q.summary.stale} rule(s) due for review` : "no review overdue"}
+              status={q.summary.health === null ? "none" : q.summary.health >= 90 ? "ok" : q.summary.health >= 70 ? "warn" : "fail"}
+            />
+            <StatTile
+              label="Replay datasets"
               value={q.datasets.length}
-              sub={q.datasets.length ? `${q.datasets.filter((d) => d.passed).length} sem regressão` : "nenhum em datasets/"}
+              sub={q.datasets.length ? `${q.datasets.filter((d) => d.passed).length} without regression` : "none in datasets/"}
               status={q.datasets.some((d) => !d.passed) ? "fail" : q.datasets.length ? "ok" : "none"}
             />
           </div>
@@ -138,13 +147,13 @@ export default function QualityGatePage() {
           <div className="grid gap-5 xl:grid-cols-[1fr_20rem]">
             <Card className="overflow-hidden">
               <div className="flex flex-wrap items-center justify-between gap-3 border-b border-line px-4 py-3">
-                <h2 className="text-[15px] font-semibold text-strong">Regras</h2>
-                <div className="flex gap-1 rounded-[10px] border border-line bg-surface p-1" role="group" aria-label="Filtrar">
+                <h2 className="text-[15px] font-semibold text-strong">Rules</h2>
+                <div className="flex gap-1 rounded-[10px] border border-line bg-surface p-1" role="group" aria-label="Filter">
                   {(
                     [
-                      ["all", "Todas"],
-                      ["blocked", "Bloqueadas"],
-                      ["ready", "Prontas"],
+                      ["all", "All"],
+                      ["blocked", "Blocked"],
+                      ["ready", "Ready"],
                     ] as const
                   ).map(([k, label]) => (
                     <button
@@ -163,12 +172,12 @@ export default function QualityGatePage() {
                 {rules.map((r) => (
                   <RuleRow key={r.id} r={r} />
                 ))}
-                {rules.length === 0 && <li className="px-4 py-8 text-center text-sm text-muted">Nenhuma regra neste filtro.</li>}
+                {rules.length === 0 && <li className="px-4 py-8 text-center text-sm text-muted">No rule in this filter.</li>}
               </ul>
             </Card>
 
             <div className="flex flex-col gap-5">
-              <Section title="Perguntas respondidas">
+              <Section title="Questions answered">
                 <ul className="space-y-2.5 text-[13px]">
                   {q.questions.map((x) => (
                     <li key={x.id}>
@@ -177,17 +186,17 @@ export default function QualityGatePage() {
                       </span>
                       <span className="mt-0.5 flex gap-3 text-xs text-muted">
                         <span className="flex items-center gap-1">
-                          <CheckCircle2 size={12} className="text-good" aria-hidden /> {(x.counts.ok ?? 0) + (x.counts.warn ?? 0)} sim
+                          <CheckCircle2 size={12} className="text-good" aria-hidden /> {(x.counts.ok ?? 0) + (x.counts.warn ?? 0)} yes
                         </span>
                         <span className="flex items-center gap-1">
-                          <XCircle size={12} className="text-bad" aria-hidden /> {x.counts.fail ?? 0} não
+                          <XCircle size={12} className="text-bad" aria-hidden /> {x.counts.fail ?? 0} no
                         </span>
                       </span>
                     </li>
                   ))}
                 </ul>
               </Section>
-              <Section title="Critérios" aside={<ShieldCheck size={15} className="text-subtle" aria-hidden />}>
+              <Section title="Criteria" aside={<ShieldCheck size={15} className="text-subtle" aria-hidden />}>
                 <dl className="space-y-1.5 text-[12.5px]">
                   {Object.entries(q.gate).map(([k, v]) => (
                     <div key={k} className="flex justify-between gap-3">
@@ -197,11 +206,11 @@ export default function QualityGatePage() {
                   ))}
                 </dl>
                 <p className="mt-3 text-xs text-subtle">
-                  Ajuste em <span className="font-mono">quality_gate</span> no vitrix.yml (tela{" "}
+                  Tune <span className="font-mono">quality_gate</span> in vitrix.yml (see{" "}
                   <Link to="/settings" className="text-accent hover:underline">
-                    Configurações
+                    Settings
                   </Link>
-                  ). No CI: <span className="font-mono">vitrix check --gate</span>.
+                  ). In CI: <span className="font-mono">vitrix check --gate</span>.
                 </p>
               </Section>
             </div>

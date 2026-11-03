@@ -184,7 +184,7 @@ def test_nao_suportado_levanta_erro_em_vez_de_passar_em_silencio():
 
 
 RULE_OK = """\
-title: Regra de teste
+title: Test rule
 id: aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa
 status: test
 description: d
@@ -197,7 +197,7 @@ detection:
     Image|endswith: '\\\\tool.exe'
     CommandLine|contains: '--bad'
   condition: selection
-falsepositives: [nenhum]
+falsepositives: [none]
 level: medium
 """
 
@@ -244,7 +244,7 @@ def test_lint_pega_erros_de_schema_e_de_condicao(tmp_path, capsys):
 
 
 def test_lint_avisos_so_falham_com_strict(tmp_path):
-    sem_fp = RULE_OK.replace("falsepositives: [nenhum]\n", "")
+    sem_fp = RULE_OK.replace("falsepositives: [none]\n", "")
     cfg = make_project(tmp_path, rule_text=sem_fp)
     assert run(cfg, "lint") == 0
     assert run(cfg, "lint", "--strict") == 1
@@ -261,13 +261,13 @@ def test_caso_que_falha_derruba_o_comando(tmp_path, capsys):
     cfg = make_project(tmp_path, cases_text=wrong)
     assert run(cfg, "test") == 1
     out = capsys.readouterr().out
-    assert "✗ neg" in out and "esperado: no_match · obtido: match" in out
+    assert "✗ neg" in out and "expected: no_match · got: match" in out
 
 
 def test_regra_sem_casos_falha_quando_exigido(tmp_path, capsys):
     cfg = make_project(tmp_path, cases_text=None)
     assert run(cfg, "test") == 1
-    assert "sem casos de teste" in capsys.readouterr().out
+    assert "no test cases" in capsys.readouterr().out
 
 
 def test_exige_positivo_e_negativo(tmp_path, capsys):
@@ -308,11 +308,11 @@ def test_pipeline_extra_renomeia_campos(tmp_path, capsys):
     assert "linha_de_comando" in out and "CommandLine" not in out
 
 
-# --------------------------------------------------------------------------- repositório de exemplo
+# --------------------------------------------------------------------------- the repository `vitrix init` creates
 
 
-def test_exemplos_do_repositorio_passam(capsys):
-    cfg = str(REPO / "vitrix.yml")
+def test_exemplos_do_repositorio_passam(user_repo):
+    cfg = str(user_repo)
     assert run(cfg, "lint", "--strict") == 0
     assert run(cfg, "test") == 0
     assert run(cfg, "convert", "--stdout") == 0

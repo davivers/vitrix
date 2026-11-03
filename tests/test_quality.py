@@ -32,7 +32,7 @@ def messages(doc: dict) -> list[str]:
 def test_regex_invalida_e_erro_e_regex_cara_e_aviso():
     doc = doc_of(RULE_OK)
     doc["detection"]["selection"]["CommandLine|re"] = "(abc"
-    assert any("regex inválida" in m for m in messages(doc))
+    assert any("invalid regex" in m for m in messages(doc))
     doc["detection"]["selection"]["CommandLine|re"] = "(a+)+$"
     assert any("backtracking" in m for m in messages(doc))
 
@@ -41,7 +41,7 @@ def test_modificador_desconhecido_sugere_o_certo():
     doc = doc_of(RULE_OK)
     doc["detection"]["selection"]["CommandLine|contians"] = "x"
     msgs = messages(doc)
-    assert any("modificador desconhecido 'contians'" in m and "contains" in m for m in msgs)
+    assert any("unknown modifier 'contians'" in m and "contains" in m for m in msgs)
 
 
 def test_campo_com_erro_de_digitacao_e_tipos():
@@ -50,9 +50,9 @@ def test_campo_com_erro_de_digitacao_e_tipos():
     doc["references"] = "http://x"
     doc["date"] = "01/11/2026"
     msgs = messages(doc)
-    assert any("quis dizer 'falsepositives'" in m for m in msgs)
-    assert any("'references' deve ser uma lista" in m for m in msgs)
-    assert any("AAAA-MM-DD" in m for m in msgs)
+    assert any("did you mean 'falsepositives'" in m for m in msgs)
+    assert any("'references' must be a list" in m for m in msgs)
+    assert any("YYYY-MM-DD" in m for m in msgs)
 
 
 def test_campo_customizado_nao_gera_ruido():
@@ -64,7 +64,7 @@ def test_campo_customizado_nao_gera_ruido():
 def test_regra_muito_complexa_gera_aviso():
     doc = doc_of(RULE_OK)
     doc["detection"]["selection"]["CommandLine|contains"] = [f"v{i}" for i in range(60)]
-    assert any("regra complexa" in m for m in messages(doc))
+    assert any("complex rule" in m for m in messages(doc))
 
 
 # --------------------------------------------------------------------------- 04 · MITRE
@@ -74,8 +74,8 @@ def test_mitre_tatica_desconhecida_e_tecnica_sem_tatica():
     doc = doc_of(RULE_OK)
     doc["tags"] = ["attack.t1059.001", "attack.executoin"]
     msgs = messages(doc)
-    assert any("tática ATT&CK desconhecida" in m and "attack.execution" in m for m in msgs)
-    assert any("sem a tática correspondente" in m for m in msgs)
+    assert any("unknown ATT&CK tactic" in m and "attack.execution" in m for m in msgs)
+    assert any("without its tactic" in m for m in msgs)
     doc["tags"] = ["attack.execution", "attack.t1059.001", "attack.g0016", "attack.s0002"]
     assert not any("MITRE" in m or "ATT&CK" in m for m in messages(doc))
 
@@ -125,17 +125,17 @@ def test_kind_incoerente_com_expect_e_erro():
     text = "cases:\n  - {name: x, kind: false_positive, expect: match, event: {A: 1}}\n  - {name: y, kind: zzz, expect: match, event: {A: 1}}\n"
     cases, problems = parse_cases(text, "c.yml", "r.yml")
     assert cases == []
-    assert any("exige expect: no_match" in p.message for p in problems)
-    assert any("'kind' deve ser" in p.message for p in problems)
+    assert any("requires expect: no_match" in p.message for p in problems)
+    assert any("'kind' must be one of" in p.message for p in problems)
 
 
 def test_qualidade_dos_dados_de_teste(tmp_path):
     cfg = load_config(make_project(tmp_path))
     text = "cases:\n  - {name: a, expect: no_match, event: {Outro: 1}}\n  - {name: b, expect: no_match, event: {Outro: 1}}\n"
     cases, problems = parse_cases(text, "c.yml", "r.yml")
-    assert any("idêntico ao do caso 1" in p.message for p in problems)
+    assert any("same event as case 1" in p.message for p in problems)
     _, problems = run_cases(cfg, "r.yml", [doc_of(RULE_OK)], cases, problems)
-    assert any("não tem nenhum campo usado pela regra" in p.message for p in problems)
+    assert any("has none of the fields the rule uses" in p.message for p in problems)
 
 
 def test_caso_de_borda_campo_nulo_e_maiusculas():
@@ -182,7 +182,7 @@ def test_regressao_quando_a_contagem_muda(tmp_path):
     write_dataset(tmp_path, [EVIL, GOOD], "expect:\n  r.yml: 2\n")
     res = flow.run_dataset(cfg, "sim.jsonl")
     assert res["passed"] is False
-    assert "exatamente 2" in res["checks"][0]["message"]
+    assert "exactly 2" in res["checks"][0]["message"]
     assert run(make_project(tmp_path), "replay") == 1
 
 
@@ -206,7 +206,7 @@ def test_gate_bloqueia_regra_high_sem_caso_de_falso_positivo(tmp_path):
     cfg = load_config(make_project(tmp_path, rule_text=RULE_OK.replace("level: medium", "level: high")))
     rule = flow.quality_report(cfg)["rules"][0]
     assert rule["ready"] is False
-    assert any("falso positivo" in b for b in rule["blockers"])
+    assert any("False-positive" in b for b in rule["blockers"])
     assert rule["stages"]["analyze"] == "fail" and rule["stages"]["deploy"] == "skip"
     assert rule["answers"][3] == "fail" and rule["answers"][5] == "fail"
 
@@ -218,22 +218,23 @@ def test_gate_aprova_regra_medium_com_casos(tmp_path):
     assert rule["ready"] is True, rule["blockers"]
     assert rule["stages"]["gate"] == "ok" and rule["stages"]["deploy"] == "pending"
     assert rule["stages"]["replay"] == "skip"  # sem dataset: não se aplica
-    assert q["summary"] == {"total": 1, "ready": 1, "blocked": 0}
+    assert {k: q["summary"][k] for k in ("total", "ready", "blocked", "stale")} == {"total": 1, "ready": 1, "blocked": 0, "stale": 0}
+    assert 70 <= q["summary"]["health"] <= 100 and rule["score"] == q["summary"]["health"]
 
 
 def test_gate_exige_teste_da_exclusao(tmp_path):
     cfg = load_config(make_project(tmp_path, rule_text=RULE_FILTER))
     rule = flow.quality_report(cfg)["rules"][0]
-    assert "Exclusão (filter) testada por um caso" in rule["blockers"]
+    assert "Exclusion (filter) proven by a test case" in rule["blockers"]
 
 
 def test_gate_configuravel(tmp_path):
     extra = "quality_gate:\n  allow_warnings: false\n  require_replay: true\n  min_positive: 2\n"
-    cfg = load_config(make_project(tmp_path, rule_text=RULE_OK.replace("falsepositives: [nenhum]\n", ""), extra_cfg=extra))
+    cfg = load_config(make_project(tmp_path, rule_text=RULE_OK.replace("falsepositives: [none]\n", ""), extra_cfg=extra))
     blockers = flow.quality_report(cfg)["rules"][0]["blockers"]
-    assert "Sem avisos de lint" in blockers
-    assert "Expectativa em algum dataset de replay" in blockers
-    assert "Ao menos 2 caso positivo" in blockers
+    assert "No lint warnings" in blockers
+    assert "Expectation in a replay dataset" in blockers
+    assert "At least 2 positive case(s)" in blockers
 
 
 @pytest.mark.parametrize("bad", ["quality_gate: 1\n", "quality_gate:\n  nao_existe: 1\n", "quality_gate:\n  min_positive: -1\n",
@@ -264,13 +265,11 @@ def test_relatorio_markdown_e_json(tmp_path, capsys):
     assert data["tests"]["by_kind"]["positive"] == {"total": 1, "passed": 1}
 
 
-def test_repositorio_de_exemplo_passa_no_gate_e_no_replay():
-    from pathlib import Path
-
-    cfg = str(Path(__file__).resolve().parents[1] / "vitrix.yml")
+def test_repositorio_de_exemplo_passa_no_gate_e_no_replay(user_repo):
+    cfg = str(user_repo)
     assert run(cfg, "gate") == 0
     assert run(cfg, "replay") == 0
-
+    assert run(cfg, "check", "--strict", "--gate") == 0
 
 # --------------------------------------------------------------------------- API
 
@@ -300,7 +299,7 @@ def test_api_do_fluxo(client):
     assert client.get("/api/datasets").json()[0]["name"] == "sim.jsonl"
     assert client.get("/api/datasets/sim.jsonl/replay").json()["passed"] is True
     assert client.get("/api/datasets/..%2Fvitrix.yml/replay").status_code == 404
-    assert "# Relatório Vitrix" in client.get("/api/report?format=md").text
+    assert "# Vitrix report" in client.get("/api/report?format=md").text
 
 
 def test_api_replay_colado_e_validate_com_gate(client):
@@ -313,3 +312,48 @@ def test_api_replay_colado_e_validate_com_gate(client):
     assert v["quality"]["ready"] is True
     assert v["quality"]["datasets"][0]["matches"] == 1
     assert v["tests"]["results"][0]["kind"] == "positive"
+
+
+# --------------------------------------------------------------------------- approval by minimum score
+
+
+def test_rule_without_blockers_but_below_min_score_is_not_approved(tmp_path):
+    # Warnings and missing edge/false-positive cases are only recommendations: no blocker, but a lower score.
+    weak = RULE_OK.replace("falsepositives: [none]\n", "").replace("description: d\n", "")
+    cfg = load_config(make_project(tmp_path, rule_text=weak, extra_cfg="quality_gate:\n  min_score: 95\n"))
+    rule = flow.quality_report(cfg)["rules"][0]
+    assert rule["score"] < 95 and rule["min_score"] == 95
+    check = next(c for c in rule["checks"] if c["id"] == "min_score")
+    assert check["passed"] is False and check["blocking"] is True
+    assert rule["ready"] is False and "Health score at least 95" in rule["blockers"]
+    assert rule["score"] == flow.quality_report(load_config(make_project(tmp_path, rule_text=weak, extra_cfg="quality_gate:\n  min_score: 0\n")))["rules"][0]["score"]
+
+
+def test_rule_reaching_the_min_score_is_approved(tmp_path):
+    cfg = load_config(make_project(tmp_path, extra_cfg="quality_gate:\n  min_score: 80\n"))
+    rule = flow.quality_report(cfg)["rules"][0]
+    assert rule["score"] >= 80 and rule["ready"] is True
+    assert next(c for c in rule["checks"] if c["id"] == "min_score")["passed"] is True
+
+
+def test_min_score_zero_turns_the_threshold_off(tmp_path):
+    cfg = load_config(make_project(tmp_path, extra_cfg="quality_gate:\n  min_score: 0\n"))
+    assert not any(c["id"] == "min_score" for c in flow.quality_report(cfg)["rules"][0]["checks"])
+
+
+@pytest.mark.parametrize("bad", ["min_score: 101", "min_score: -1", "min_score: high"])
+def test_invalid_min_score_is_a_config_error(tmp_path, bad):
+    with pytest.raises(ConfigError):
+        load_config(make_project(tmp_path, extra_cfg=f"quality_gate:\n  {bad}\n"))
+
+
+def test_editor_validation_reports_approval(tmp_path):
+    pytest.importorskip("fastapi")
+    pytest.importorskip("httpx")
+    from fastapi.testclient import TestClient
+
+    from vitrix.api import create_app
+
+    client = TestClient(create_app(make_project(tmp_path, extra_cfg="quality_gate:\n  min_score: 99\n")), base_url="http://127.0.0.1:8000")
+    q = client.post("/api/validate", json={"rule": RULE_OK, "cases": CASES_OK}).json()["quality"]
+    assert q["min_score"] == 99 and q["score"] < 99 and q["ready"] is False

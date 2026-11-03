@@ -1,18 +1,18 @@
-"""Avaliador local de regras Sigma (subconjunto).
+"""Local evaluator for Sigma rules (a subset).
 
-Roda a lógica de detecção de uma regra contra um evento (um dict) sem precisar de SIEM.
-Os eventos usam os nomes de campo da própria regra Sigma (Image, CommandLine, ...),
-antes de qualquer mapeamento de campos por SIEM.
+Runs a rule's detection logic against an event (a dict) without a SIEM. Events use the
+field names of the Sigma rule itself (Image, CommandLine, ...), before any per-SIEM field
+mapping.
 
-Suportado
-- seleções em mapa, lista de mapas (OU) e lista de palavras-chave
+Supported
+- map selections, lists of maps (OR) and keyword lists
 - modificadores: contains, startswith, endswith, all, re (+ i, m, s), cased, exists
-- curingas * e ? nos valores (escape com \\* e \\?)
-- condições com and / or / not, parênteses, "1 of x*", "all of x*", "1 of them", "all of them"
+- wildcards * and ? in values (escape with \\* and \\?)
+- conditions with and / or / not, parentheses, "1 of x*", "all of x*", "1 of them", "all of them"
 
-Não suportado (levanta UnsupportedError, nunca passa em silêncio)
-- modificadores como windash, base64, cidr, lt/gt, fieldref
-- condições de agregação (count, near) e regras de correlação
+Not supported (raises UnsupportedError, never passes silently)
+- modifiers such as windash, base64, cidr, lt/gt, fieldref
+- aggregation conditions (count, near) and correlation rules
 """
 
 from __future__ import annotations
@@ -23,7 +23,7 @@ from typing import Any
 
 
 class UnsupportedError(Exception):
-    """A regra usa algo que o avaliador local ainda não sabe executar."""
+    """The rule uses something the local evaluator cannot run yet."""
 
 
 SUPPORTED_MODIFIERS = {"contains", "startswith", "endswith", "all", "re", "i", "m", "s", "cased", "exists"}
@@ -44,7 +44,7 @@ def _get(event: dict, field: str) -> tuple[bool, Any]:
 
 
 def _to_regex(value: str) -> str:
-    """Converte um valor Sigma (com curingas) em regex. Só \\* e \\? são escapes."""
+    """Turn a Sigma value (with wildcards) into a regex. Only \\* and \\? are escapes."""
     out: list[str] = []
     i = 0
     while i < len(value):
@@ -93,7 +93,7 @@ def _match_field(event: dict, spec: str, expected: Any) -> bool:
     mods = set(mods_list)
     unknown = mods - SUPPORTED_MODIFIERS
     if unknown:
-        raise UnsupportedError(f"modificador não suportado: {', '.join(sorted(unknown))} (campo {field})")
+        raise UnsupportedError(f"unsupported modifier: {', '.join(sorted(unknown))} (field {field})")
 
     present, actual = _get(event, field)
     if "exists" in mods:
@@ -120,10 +120,10 @@ def _eval_selection(selection: Any, event: dict) -> bool:
         if selection and all(isinstance(x, dict) for x in selection):
             return any(_eval_selection(x, event) for x in selection)
         return any(_keyword(event, str(x)) for x in selection)
-    raise UnsupportedError(f"formato de seleção não suportado: {type(selection).__name__}")
+    raise UnsupportedError(f"unsupported selection format: {type(selection).__name__}")
 
 
-# --------------------------------------------------------------------------- condição
+# --------------------------------------------------------------------------- condition
 
 
 def tokenize(condition: str) -> list[str]:
@@ -131,7 +131,7 @@ def tokenize(condition: str) -> list[str]:
 
 
 def condition_refs(condition: str) -> tuple[set[str], set[str]]:
-    """Nomes de seleção e padrões ('x*', 'them') citados em uma condição."""
+    """Selection names and patterns ('x*', 'them') referenced by a condition."""
     tokens = tokenize(condition)
     names: set[str] = set()
     patterns: set[str] = set()
@@ -152,7 +152,7 @@ def condition_refs(condition: str) -> tuple[set[str], set[str]]:
 class _Parser:
     def __init__(self, condition: str, results: dict[str, bool]):
         if "|" in condition:
-            raise UnsupportedError("condições de agregação (count, near) não são suportadas")
+            raise UnsupportedError("aggregation conditions (count, near) are not supported")
         self.tokens = tokenize(condition)
         self.results = results
         self.pos = 0
@@ -160,7 +160,7 @@ class _Parser:
     def parse(self) -> bool:
         value = self._or()
         if self.pos != len(self.tokens):
-            raise UnsupportedError(f"condição inválida perto de {self.tokens[self.pos]!r}")
+            raise UnsupportedError(f"invalid condition near {self.tokens[self.pos]!r}")
         return value
 
     def _peek(self) -> str | None:
@@ -168,7 +168,7 @@ class _Parser:
 
     def _next(self) -> str:
         if self.pos >= len(self.tokens):
-            raise UnsupportedError("condição terminou inesperadamente")
+            raise UnsupportedError("condition ended unexpectedly")
         tok = self.tokens[self.pos]
         self.pos += 1
         return tok
@@ -200,7 +200,7 @@ class _Parser:
         if tok == "(":
             value = self._or()
             if self._next() != ")":
-                raise UnsupportedError("parêntese não fechado na condição")
+                raise UnsupportedError("unclosed parenthesis in the condition")
             return value
         low = tok.lower()
         if low in ("1", "all") and self._peek() == "of":
@@ -216,7 +216,7 @@ class _Parser:
             vals = [self.results[n] for n in names]
             return all(vals) if low == "all" else any(vals)
         if tok not in self.results:
-            raise UnsupportedError(f"a condição cita '{tok}', que não existe em detection")
+            raise UnsupportedError(f"the condition references '{tok}', which does not exist in detection")
         return self.results[tok]
 
 
@@ -229,9 +229,9 @@ def _selections(doc: dict) -> dict[str, Any]:
 
 
 def check_supported(doc: dict) -> None:
-    """Levanta UnsupportedError se a regra usa algo fora do subconjunto suportado."""
+    """Raise UnsupportedError if the rule uses anything outside the supported subset."""
     if "correlation" in doc:
-        raise UnsupportedError("regras de correlação não são suportadas")
+        raise UnsupportedError("correlation rules are not supported")
 
     def walk(sel: Any) -> None:
         if isinstance(sel, dict):
@@ -239,7 +239,7 @@ def check_supported(doc: dict) -> None:
                 mods = set(str(spec).split("|")[1:])
                 unknown = mods - SUPPORTED_MODIFIERS
                 if unknown:
-                    raise UnsupportedError(f"modificador não suportado: {', '.join(sorted(unknown))}")
+                    raise UnsupportedError(f"unsupported modifier: {', '.join(sorted(unknown))}")
         elif isinstance(sel, list):
             for item in sel:
                 walk(item)
@@ -249,12 +249,12 @@ def check_supported(doc: dict) -> None:
     cond = (doc.get("detection") or {}).get("condition")
     for c in cond if isinstance(cond, list) else [cond]:
         if isinstance(c, str) and "|" in c:
-            raise UnsupportedError("condições de agregação (count, near) não são suportadas")
+            raise UnsupportedError("aggregation conditions (count, near) are not supported")
 
 
 def exclusion_selections(doc: dict) -> set[str]:
-    """Seleções de exclusão: as que aparecem negadas na condição (`not filter`, `not 1 of filter*`)
-    e, por convenção do Sigma, as que começam com `filter`."""
+    """Exclusion selections: those negated in the condition (`not filter`, `not 1 of filter*`)
+    and, by Sigma convention, those whose name starts with `filter`."""
     names = set(_selections(doc))
     found = {n for n in names if n.lower().startswith("filter")}
     cond = (doc.get("detection") or {}).get("condition")
@@ -273,12 +273,12 @@ def exclusion_selections(doc: dict) -> set[str]:
 
 
 def evaluate(doc: dict, event: dict, force_false: set[str] | None = None) -> bool:
-    """True se o evento dispara a regra. `force_false` desliga seleções (usado para provar exclusões)."""
+    """True if the event fires the rule. `force_false` turns selections off (used to prove exclusions)."""
     check_supported(doc)
     detection = doc.get("detection") or {}
     condition = detection.get("condition")
     if condition is None:
-        raise UnsupportedError("a regra não tem condition")
+        raise UnsupportedError("the rule has no condition")
     results = {name: (False if force_false and name in force_false else _eval_selection(sel, event)) for name, sel in _selections(doc).items()}
     conditions = condition if isinstance(condition, list) else [condition]
     return any(_Parser(str(c), results).parse() for c in conditions)

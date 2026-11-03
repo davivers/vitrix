@@ -14,10 +14,12 @@ import {
   ShieldCheck,
   SquarePen,
   Undo2,
+  Users,
   type LucideIcon,
 } from "lucide-react";
 import { NavLink, Navigate, Route, Routes } from "react-router-dom";
 import { Logo, LogoMark } from "./components/Logo";
+import { UserMenu } from "./components/UserMenu";
 import ConnectionsPage from "./pages/Connections";
 import CoveragePage from "./pages/Coverage";
 import DashboardPage from "./pages/Dashboard";
@@ -29,6 +31,7 @@ import ReplayPage from "./pages/Replay";
 import ReportsPage from "./pages/Reports";
 import RulesPage from "./pages/Rules";
 import SettingsPage from "./pages/Settings";
+import TeamPage from "./pages/Team";
 import TestSuitesPage from "./pages/TestSuites";
 
 interface NavItem {
@@ -40,22 +43,22 @@ interface NavItem {
 // Agrupado pelo fluxo: escrever → validar/testar/replay/analisar → gate → acompanhar.
 const NAV: { title: string; items: NavItem[] }[] = [
   {
-    title: "Visão",
+    title: "Overview",
     items: [
-      { to: "/dashboard", label: "Operacional", Icon: Activity },
-      { to: "/executive", label: "Executivo", Icon: Gauge },
+      { to: "/dashboard", label: "Operational", Icon: Activity },
+      { to: "/executive", label: "Executive", Icon: Gauge },
     ],
   },
   {
-    title: "Detecções",
+    title: "Detections",
     items: [
-      { to: "/rules", label: "Regras", Icon: Library },
+      { to: "/rules", label: "Rules", Icon: Library },
       { to: "/editor", label: "Editor", Icon: SquarePen },
       { to: "/regex", label: "Regex Workbench", Icon: Regex },
     ],
   },
   {
-    title: "Validação",
+    title: "Validation",
     items: [
       { to: "/tests", label: "Test Suites", Icon: FlaskConical },
       { to: "/replay", label: "Log Replay", Icon: Undo2 },
@@ -65,15 +68,16 @@ const NAV: { title: string; items: NavItem[] }[] = [
     ],
   },
   {
-    title: "Sistema",
+    title: "System",
     items: [
-      { to: "/connections", label: "Conexões", Icon: Plug },
-      { to: "/settings", label: "Configurações", Icon: Settings },
+      { to: "/team", label: "Team", Icon: Users },
+      { to: "/connections", label: "Connections", Icon: Plug },
+      { to: "/settings", label: "Settings", Icon: Settings },
     ],
   },
 ];
 
-/** Barra lateral: com rótulos a partir de lg, só ícones abaixo disso (rótulo vira title/aria-label). */
+/** Sidebar: labels from lg up, icons only below (the label stays as title/screen-reader text). */
 function Sidebar() {
   const health = useQuery({ queryKey: ["health"], queryFn: () => fetch("/api/health").then((r) => r.json() as Promise<{ version: string }>) });
   return (
@@ -86,7 +90,7 @@ function Sidebar() {
           <Logo />
         </span>
       </div>
-      <nav className="flex flex-1 flex-col gap-4 overflow-y-auto" aria-label="Principal">
+      <nav className="flex flex-1 flex-col gap-4 overflow-y-auto" aria-label="Main">
         {NAV.map((group) => (
           <div key={group.title} className="flex flex-col gap-1">
             <span className="hidden px-3 pb-0.5 text-[10.5px] font-semibold uppercase tracking-wider text-subtle lg:block">{group.title}</span>
@@ -109,7 +113,8 @@ function Sidebar() {
           </div>
         ))}
       </nav>
-      <p className="hidden px-2 text-xs text-subtle lg:block">{health.data ? `v${health.data.version} · local` : "local"}</p>
+      <UserMenu />
+      <p className="mt-2 hidden px-2 text-[11px] text-subtle lg:block">{health.data ? `Vitrix v${health.data.version}` : "Vitrix"}</p>
     </aside>
   );
 }
@@ -134,6 +139,7 @@ export default function App() {
           <Route path="/reports" element={<ReportsPage />} />
           <Route path="/connections" element={<ConnectionsPage />} />
           <Route path="/settings" element={<SettingsPage />} />
+          <Route path="/team" element={<TeamPage />} />
           <Route path="*" element={<Navigate to="/dashboard" replace />} />
         </Routes>
       </main>

@@ -1,11 +1,11 @@
-"""Linguagem final de cada regra: para qual(is) alvo(s) ela é convertida.
+"""Final query language of each rule: which target(s) it is converted to.
 
-Ordem de decisão, da mais específica para a mais geral:
+Decision order, from the most specific to the most general:
 
-1. `vitrix.target` dentro da própria regra (string ou lista);
-2. a primeira entrada de `routes` do vitrix.yml cujo `match` casa com o caminho da regra;
-3. `default_target` do vitrix.yml;
-4. todos os `targets` ativos do vitrix.yml.
+1. `vitrix.target` inside the rule itself (string or list);
+2. the first `routes` entry in vitrix.yml whose `match` matches the rule path;
+3. `default_target` in vitrix.yml;
+4. every active `targets` entry in vitrix.yml.
 """
 
 from __future__ import annotations
@@ -32,7 +32,7 @@ def first_detection(docs: list) -> object:
 
 
 def declared(doc: object) -> list[str] | None:
-    """Alvos escolhidos na regra, ou None se ela não escolheu (ou se o campo é inválido)."""
+    """Targets chosen in the rule, or None if it chose none (or the field is invalid)."""
     if not isinstance(doc, dict):
         return None
     block = doc.get(KEY)
@@ -47,20 +47,20 @@ def declared(doc: object) -> list[str] | None:
 
 
 def problems(doc: object) -> list[str]:
-    """Mensagens de erro de formato do bloco `vitrix` da regra (usadas pelo lint)."""
+    """Format errors of the rule's `vitrix` block (used by the lint)."""
     if not isinstance(doc, dict) or KEY not in doc:
         return []
     block = doc[KEY]
     if not isinstance(block, dict):
-        return [f"'{KEY}' deve ser um mapa (ex.: {KEY}: {{target: splunk}})"]
-    out = [f"chave desconhecida em '{KEY}': {k}" for k in block if k not in RULE_KEYS]
+        return [f"'{KEY}' must be a mapping (e.g. {KEY}: {{target: splunk}})"]
+    out = [f"unknown key in '{KEY}': {k}" for k in block if k not in RULE_KEYS]
     if "target" in block and declared(doc) is None:
-        out.append(f"'{KEY}.target' deve ser um nome de alvo ou uma lista não vazia de nomes")
+        out.append(f"'{KEY}.target' must be a target name or a non-empty list of names")
     return out
 
 
 def resolve(cfg: Config, rule_rel: str | None, doc: object, override: list[str] | None = None) -> Resolved:
-    """Decide os alvos de uma regra. `rule_rel` é o caminho dentro de rules/ (None: regra ainda não salva)."""
+    """Decide the targets of a rule. `rule_rel` is the path inside rules/ (None: unsaved rule)."""
     if override:
         return Resolved(list(override), "override")
     chosen = declared(doc)
@@ -76,7 +76,7 @@ def resolve(cfg: Config, rule_rel: str | None, doc: object, override: list[str] 
 
 
 def config_target_names(cfg: Config) -> set[str]:
-    """Todos os nomes de alvo citados no vitrix.yml (para validar contra os disponíveis)."""
+    """Every target name used in vitrix.yml (to validate against the available ones)."""
     names = set(cfg.targets)
     if cfg.default_target:
         names.add(cfg.default_target)
@@ -86,7 +86,7 @@ def config_target_names(cfg: Config) -> set[str]:
 
 
 def rules_rel(cfg: Config, path: Path) -> str:
-    """Caminho do arquivo dentro de rules/ (usado nas rotas e nas URLs)."""
+    """File path inside rules/ (used by routes and URLs)."""
     try:
         return path.resolve().relative_to(cfg.rules_dir.resolve()).as_posix()
     except ValueError:
@@ -94,5 +94,5 @@ def rules_rel(cfg: Config, path: Path) -> str:
 
 
 def plan(cfg: Config, files: list[RuleFile], override: list[str] | None = None) -> dict[str, Resolved]:
-    """Alvos de cada arquivo de regra, indexados por `RuleFile.rel`."""
+    """Targets of each rule file, keyed by `RuleFile.rel`."""
     return {rf.rel: resolve(cfg, rules_rel(cfg, rf.path), first_detection(rf.docs), override) for rf in files}

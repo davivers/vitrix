@@ -101,17 +101,17 @@ def test_alvo_desconhecido_na_regra_reprova_o_lint_e_a_conversao(tmp_path, capsy
     cfg = make_project(tmp_path, with_target(RULE_OK, "qradar"))
     assert run(cfg, "check") == 1
     out = capsys.readouterr().out
-    assert "alvo desconhecido 'qradar'" in out
+    assert "unknown target 'qradar'" in out
     assert not (tmp_path / "dist" / "qradar").exists()
 
 
 def test_bloco_vitrix_mal_formado_e_erro_de_lint(tmp_path, capsys):
     cfg = make_project(tmp_path, RULE_OK + "vitrix: sim\n")
     assert run(cfg, "lint") == 1
-    assert "deve ser um mapa" in capsys.readouterr().out
+    assert "must be a mapping" in capsys.readouterr().out
     cfg = make_project(tmp_path, RULE_OK + "vitrix:\n  alvo: kql\n")
     run(cfg, "lint")
-    assert "chave desconhecida em 'vitrix': alvo" in capsys.readouterr().out
+    assert "unknown key in 'vitrix': alvo" in capsys.readouterr().out
 
 
 def test_alvo_desconhecido_no_vitrix_yml_e_erro_de_uso(tmp_path, capsys):

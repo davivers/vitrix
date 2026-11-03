@@ -1,30 +1,30 @@
 cases:
-  - name: Positivo · /create /ru SYSTEM
+  - name: Positive · /create /ru SYSTEM
     expect: match
     event:
       Image: 'C:\Windows\System32\schtasks.exe'
       CommandLine: 'schtasks.exe /create /tn Updater /tr C:\temp\a.exe /sc onlogon /ru SYSTEM'
 
-  - name: Positivo · /create /ru pelo SID S-1-5-18
+  - name: Positive · /create /ru by SID S-1-5-18
     expect: match
     event:
       Image: 'C:\Windows\System32\schtasks.exe'
       CommandLine: 'schtasks.exe /create /tn Updater /tr C:\temp\a.exe /sc onlogon /RU S-1-5-18'
 
-  - name: Negativo · schtasks /query
+  - name: Negative · schtasks /query
     expect: no_match
     event:
       Image: 'C:\Windows\System32\schtasks.exe'
       CommandLine: 'schtasks.exe /query /fo LIST'
 
-  - name: Falso positivo · /create com conta de serviço de backup
+  - name: False positive · /create with a backup service account
     kind: false_positive
     expect: no_match
     event:
       Image: 'C:\Windows\System32\schtasks.exe'
       CommandLine: 'schtasks.exe /create /tn Backup /tr C:\scripts\backup.cmd /sc daily /ru svc_backup'
 
-  - name: Borda · SYSTEM em minúsculas
+  - name: Edge · SYSTEM in lower case
     kind: edge
     expect: match
     event:

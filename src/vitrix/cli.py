@@ -1,6 +1,6 @@
-"""Linha de comando: vitrix lint | convert | test | check | gate | replay | report | targets | serve.
+"""Command line: vitrix init | lint | convert | test | check | gate | replay | report | targets | serve.
 
-Códigos de saída: 0 tudo certo, 1 falhas nas regras, 2 erro de uso ou de configuração.
+Exit codes: 0 all good, 1 rule failures, 2 usage or configuration error.
 """
 
 from __future__ import annotations
@@ -29,14 +29,14 @@ class ConvertResult:
     rule: str
     target: str
     ok: bool
-    output: str  # a query, ou a mensagem de erro
+    output: str  # the query, or the error message
 
 
 class UsageError(Exception):
     pass
 
 
-# --------------------------------------------------------------------------- etapas
+# --------------------------------------------------------------------------- stages
 
 
 def load_files(cfg: Config, paths: list[str]) -> tuple[list[RuleFile], list[Issue]]:
@@ -59,26 +59,26 @@ def run_lint(files: list[RuleFile], load_issues: list[Issue]) -> list[Issue]:
 
 
 def run_convert(cfg: Config, files: list[RuleFile], override: list[str] | None = None) -> tuple[list[ConvertResult], dict[str, Resolved]]:
-    """Converte cada regra para a(s) sua(s) linguagem(ns) final(is). `override` força os alvos (opção -t)."""
+    """Convert each rule to its final language(s). `override` forces the targets (-t)."""
     registry = available_targets()
     unknown = sorted(n for n in (set(override) if override else config_target_names(cfg)) if n not in registry)
     if unknown:
-        raise UsageError(f"alvo desconhecido: {', '.join(unknown)}. Disponíveis: {', '.join(sorted(registry))}")
+        raise UsageError(f"unknown target: {', '.join(unknown)}. Available: {', '.join(sorted(registry))}")
     try:
         extra = load_extra_pipelines(cfg.extra_pipelines)
     except Exception as exc:
-        raise UsageError(f"não foi possível carregar extra_pipelines: {exc}") from exc
+        raise UsageError(f"could not load extra_pipelines: {exc}") from exc
 
     plan = plan_targets(cfg, files, override)
     results: list[ConvertResult] = []
     for rf in files:
         for name in plan[rf.rel].targets:
-            if name not in registry:  # escolha da própria regra; o lint também acusa
-                results.append(ConvertResult(rf.rel, name, False, f"alvo desconhecido: {name}"))
+            if name not in registry:  # chosen by the rule itself; the lint reports it too
+                results.append(ConvertResult(rf.rel, name, False, f"unknown target: {name}"))
                 continue
             try:
                 results.append(ConvertResult(rf.rel, name, True, convert_text(rf.text, registry[name], extra)))
-            except Exception as exc:  # erros do pySigma e de backends de plugins
+            except Exception as exc:  # pySigma and plugin backend errors
                 message = " ".join(str(exc).split()) or type(exc).__name__
                 results.append(ConvertResult(rf.rel, name, False, f"{type(exc).__name__}: {message}"))
     return results, plan
@@ -86,7 +86,7 @@ def run_convert(cfg: Config, files: list[RuleFile], override: list[str] | None =
 
 def write_dist(cfg: Config, files: list[RuleFile], results: list[ConvertResult], plan: dict[str, Resolved]) -> None:
     registry = available_targets()
-    for name in registry:  # limpa tudo: a regra pode ter trocado de linguagem final desde a última execução
+    for name in registry:  # clean everything: a rule may have changed its final language since the last run
         shutil.rmtree(cfg.output_dir / name, ignore_errors=True)
     outputs: dict[str, dict[str, str]] = {}
     for r in results:
@@ -129,7 +129,7 @@ def run_tests(cfg: Config, files: list[RuleFile]) -> tuple[list[CaseResult], lis
     return results, problems
 
 
-# --------------------------------------------------------------------------- saída
+# --------------------------------------------------------------------------- output
 
 
 def _plural(n: int, one: str, many: str) -> str:
@@ -148,7 +148,7 @@ def print_issues(issues: list[Issue]) -> None:
 def lint_summary(files: list[RuleFile], issues: list[Issue]) -> str:
     errors = sum(i.severity == "error" for i in issues)
     warnings = sum(i.severity == "warning" for i in issues)
-    return f"{_plural(len(files), 'regra', 'regras')} · {_plural(errors, 'erro', 'erros')} · {_plural(warnings, 'aviso', 'avisos')}"
+    return f"{_plural(len(files), 'rule', 'rules')} · {_plural(errors, 'error', 'errors')} · {_plural(warnings, 'warning', 'warnings')}"
 
 
 def print_cases(results: list[CaseResult], problems: list[Issue]) -> None:
@@ -160,7 +160,7 @@ def print_cases(results: list[CaseResult], problems: list[Issue]) -> None:
         mark = "✓" if r.passed else "✗"
         print(f"  {mark} {r.name}")
         if not r.passed:
-            detail = r.error or f"esperado: {r.expect} · obtido: {r.got}"
+            detail = r.error or f"expected: {r.expect} · got: {r.got}"
             print(f"      {detail}")
     if problems:
         print_issues(problems)
@@ -168,7 +168,7 @@ def print_cases(results: list[CaseResult], problems: list[Issue]) -> None:
 
 def cases_summary(results: list[CaseResult]) -> str:
     passed = sum(r.passed for r in results)
-    return f"{passed} de {len(results)} casos passaram"
+    return f"{passed} of {len(results)} cases passed"
 
 
 def print_convert_failures(results: list[ConvertResult]) -> None:
@@ -190,29 +190,29 @@ def build_markdown(
     lines = [
         "## Detection-as-Code",
         "",
-        "| Etapa | Resultado |",
+        "| Stage | Result |",
         "|---|---|",
         f"| Lint | {'✅' if not errors else '❌'} {lint_summary(files, lint_issues)} |",
-        f"| Conversão | {'✅' if converted_ok == len(convert_results) else '❌'} {converted_ok} de {len(convert_results)} conversões |",
-        f"| Testes | {'✅' if cases_ok == len(case_results) and not case_problems else '❌'} {cases_summary(case_results)} |",
+        f"| Conversion | {'✅' if converted_ok == len(convert_results) else '❌'} {converted_ok} of {len(convert_results)} conversions |",
+        f"| Tests | {'✅' if cases_ok == len(case_results) and not case_problems else '❌'} {cases_summary(case_results)} |",
     ]
     problems = [*lint_issues, *case_problems]
     failures = [f"- `{r.rule}` → `{r.target}`: {r.output}" for r in convert_results if not r.ok]
     failures += [
-        f"- `{r.rule}` · {r.name}: {r.error or f'esperado {r.expect}, obtido {r.got}'}"
+        f"- `{r.rule}` · {r.name}: {r.error or f'expected {r.expect}, got {r.got}'}"
         for r in case_results
         if not r.passed
     ]
     failures += [f"- `{i.rule}`: {i.message}" for i in problems if i.severity == "error"]
     if failures:
-        lines += ["", "### O que falhou", "", *dict.fromkeys(failures)]
+        lines += ["", "### What failed", "", *dict.fromkeys(failures)]
     warnings = [f"- `{i.rule}`: {i.message}" for i in lint_issues if i.severity == "warning"]
     if warnings:
-        lines += ["", "<details><summary>Avisos</summary>", "", *warnings, "", "</details>"]
+        lines += ["", "<details><summary>Warnings</summary>", "", *warnings, "", "</details>"]
     return "\n".join(lines) + "\n"
 
 
-# --------------------------------------------------------------------------- comandos
+# --------------------------------------------------------------------------- commands
 
 
 def cmd_lint(cfg: Config, args: argparse.Namespace) -> int:
@@ -239,8 +239,8 @@ def cmd_convert(cfg: Config, args: argparse.Namespace) -> int:
         write_dist(cfg, files, results, plan)
     print_convert_failures(results)
     ok = sum(r.ok for r in results)
-    where = "" if args.stdout else f" em {cfg.rel(cfg.output_dir)}/"
-    print(f"{ok} de {len(results)} conversões{where}")
+    where = "" if args.stdout else f" in {cfg.rel(cfg.output_dir)}/"
+    print(f"{ok} of {len(results)} conversions{where}")
     return 0 if ok == len(results) else 1
 
 
@@ -263,13 +263,13 @@ def cmd_check(cfg: Config, args: argparse.Namespace) -> int:
     print_issues(lint_issues)
     print(lint_summary(files, lint_issues))
 
-    print("\n== conversão")
+    print("\n== conversion")
     convert_results, plan = run_convert(cfg, files, args.target)
     write_dist(cfg, files, convert_results, plan)
     print_convert_failures(convert_results)
-    print(f"{sum(r.ok for r in convert_results)} de {len(convert_results)} conversões em {cfg.rel(cfg.output_dir)}/")
+    print(f"{sum(r.ok for r in convert_results)} of {len(convert_results)} conversions in {cfg.rel(cfg.output_dir)}/")
 
-    print("\n== testes")
+    print("\n== tests")
     case_results, case_problems = run_tests(cfg, files)
     print_cases(case_results, case_problems)
     print(cases_summary(case_results))
@@ -295,26 +295,26 @@ _STAGE_MARK = {"ok": "✓", "warn": "!", "fail": "✗", "skip": "·", "pending":
 
 
 def print_gate(cfg: Config) -> int:
-    """Imprime o quality gate regra a regra. 0 se todas estão prontas para publicação."""
+    """Print the quality gate rule by rule. 0 if every rule is ready to publish."""
     from .flow import quality_report
     from .gate import STAGE_LABELS, STAGES
 
     q = quality_report(cfg)
     legend = "  ".join(f"{STAGE_LABELS[s]}" for s in STAGES)
-    print(f"etapas: {legend}")
+    print(f"stages: {legend}")
     for r in q["rules"]:
         marks = " ".join(_STAGE_MARK[r["stages"][s]] for s in STAGES)
-        print(f"{'✓' if r['ready'] else '✗'} {r['id']}  [{marks}]")
+        print(f"{'✓' if r['ready'] else '✗'} {r['id']}  [{marks}]  health {r['score']}/100")
         for c in r["checks"]:
             if c["passed"] is False:
-                kind = "bloqueia" if c["blocking"] else "recomendação"
+                kind = "blocks" if c["blocking"] else "recommendation"
                 detail = f": {c['detail']}" if c["detail"] else ""
                 print(f"    {kind} · {c['label']}{detail}")
     for d in q["datasets"]:
         if d.get("error"):
             print(f"replay {d['dataset']}: {d['error']}")
     s = q["summary"]
-    print(f"{s['ready']} de {s['total']} regras prontas para publicação")
+    print(f"{s['ready']} of {s['total']} rules ready to publish")
     return 0 if s["blocked"] == 0 and not any(d.get("error") for d in q["datasets"]) else 1
 
 
@@ -325,41 +325,42 @@ def cmd_gate(cfg: Config, args: argparse.Namespace) -> int:
 def cmd_replay(cfg: Config, args: argparse.Namespace) -> int:
     from .flow import list_datasets, run_dataset
     from .replay import ReplayError, load_events, replay
+    from .service import rule_id
 
     try:
         if args.file:
-            files, load_issues = load_files(cfg, [])
+            files, _ = load_files(cfg, [])
             path = Path(args.file)
             if not path.is_file():
-                raise UsageError(f"arquivo não encontrado: {path}")
-            from .service import rule_id
-
-            results = [{"dataset": path.name, **replay([(rule_id(cfg, rf.path), rf) for rf in files], load_events(path.read_text(encoding="utf-8"), path.name)), "checks": []}]
+                raise UsageError(f"file not found: {path}")
+            events = load_events(path.read_text(encoding="utf-8"), path.name)
+            results = [{"dataset": path.name, **replay([(rule_id(cfg, rf.path), rf) for rf in files], events), "checks": []}]
         else:
             names = [args.dataset] if args.dataset else [d["name"] for d in list_datasets(cfg)]
             if not names:
-                print(f"nenhum dataset em {cfg.rel(cfg.datasets_dir) if cfg.datasets_dir else 'datasets'}/")
+                print(f"no dataset in {cfg.rel(cfg.datasets_dir) if cfg.datasets_dir else 'datasets'}/")
                 return 0
             results = [run_dataset(cfg, n) for n in names]
     except KeyError as exc:
-        raise UsageError(f"dataset não encontrado: {exc.args[0]}") from None
+        raise UsageError(f"dataset not found: {exc.args[0]}") from None
     except ReplayError as exc:
         raise UsageError(str(exc)) from None
 
     failed = False
     for res in results:
-        print(f"== {res['dataset']}: {res['events']} eventos em {res['duration_ms']} ms")
+        print(f"== {res['dataset']}: {res['events']} events in {res['duration_ms']} ms")
         for r in res["rules"]:
             if r["error"]:
-                print(f"  · {r['rule']}: não avaliada ({r['error']})")
+                print(f"  · {r['rule']}: not evaluated ({r['error']})")
             elif r["matches"]:
-                print(f"  {r['matches']:>5}  {r['rule']}  (eventos {', '.join(map(str, r['sample']))}{'…' if r['matches'] > len(r['sample']) else ''}) · {r['duration_ms']} ms")
+                more = "…" if r["matches"] > len(r["sample"]) else ""
+                print(f"  {r['matches']:>5}  {r['rule']}  (events {', '.join(map(str, r['sample']))}{more}) · {r['duration_ms']} ms")
         for c in res["checks"]:
             if not c["passed"]:
                 failed = True
-                print(f"  ✗ regressão · {c['rule']}: {c['message']}")
+                print(f"  ✗ regression · {c['rule']}: {c['message']}")
         if res["checks"] and all(c["passed"] for c in res["checks"]):
-            print(f"  ✓ {len(res['checks'])} expectativas conferidas")
+            print(f"  ✓ {len(res['checks'])} expectations met")
     return 1 if failed else 0
 
 
@@ -370,14 +371,14 @@ def cmd_report(cfg: Config, args: argparse.Namespace) -> int:
     text = json.dumps(data, ensure_ascii=False, indent=2) if args.format == "json" else report_markdown(data)
     if args.output:
         Path(args.output).write_text(text, encoding="utf-8")
-        print(f"relatório gravado em {args.output}")
+        print(f"report written to {args.output}")
     else:
         print(text)
     return 0 if data["quality"]["summary"]["blocked"] == 0 else 1
 
 
 def _is_unspecified(host: str) -> bool:
-    """True para o endereço "todas as interfaces" (IPv4 ou IPv6)."""
+    """True for the "all interfaces" address (IPv4 or IPv6)."""
     try:
         return ipaddress.ip_address(host).is_unspecified
     except ValueError:
@@ -388,7 +389,7 @@ def cmd_serve(cfg: Config, args: argparse.Namespace) -> int:
     try:
         import uvicorn
     except ImportError as exc:
-        raise UsageError("a API precisa de dependências extras: pip install 'vitrix[api]'") from exc
+        raise UsageError("the API needs extra dependencies: pip install 'vitrix[api]'") from exc
 
     if args.config:
         os.environ["VITRIX_CONFIG"] = str(Path(args.config).resolve())
@@ -396,16 +397,51 @@ def cmd_serve(cfg: Config, args: argparse.Namespace) -> int:
         os.environ["VITRIX_CONFIG"] = str(cfg.root / "vitrix.yml")
     if args.host not in ("127.0.0.1", "localhost", "::1"):
         print(
-            "aviso: a API não tem autenticação. Fora do localhost, qualquer um na rede lê suas regras e pode abrir PRs "
-            "com o seu token. Use só atrás de um proxy com autenticação.",
+            "warning: the API has no authentication. Outside localhost anyone on the network can read your rules and "
+            "push branches with your token. Only use it behind an authenticating proxy.",
             file=sys.stderr,
         )
         if not _is_unspecified(args.host):
             current = os.environ.get("VITRIX_ALLOWED_HOSTS", "")
             os.environ["VITRIX_ALLOWED_HOSTS"] = ",".join(filter(None, [current, args.host]))
         elif not os.environ.get("VITRIX_ALLOWED_HOSTS"):
-            print("aviso: com --host 0.0.0.0, defina VITRIX_ALLOWED_HOSTS com o nome ou IP usado no navegador; os demais recebem 403.", file=sys.stderr)
+            print("warning: with --host 0.0.0.0, set VITRIX_ALLOWED_HOSTS to the name or IP used in the browser; others get 403.",
+                  file=sys.stderr)
     uvicorn.run("vitrix.api:create_app", factory=True, host=args.host, port=args.port, log_level="info")
+    return 0
+
+
+TEMPLATE_DIR = Path(__file__).parent / "template"
+
+
+def _template_files() -> list[tuple[Path, str]]:
+    """(source file, relative destination). A leading `_` in a template name becomes `.`
+    (`_github` → `.github`, `_gitignore` → `.gitignore`) so packaging never drops dotfiles."""
+    out = []
+    for src in sorted(p for p in TEMPLATE_DIR.rglob("*") if p.is_file()):
+        parts = [("." + part[1:] if part.startswith("_") else part) for part in src.relative_to(TEMPLATE_DIR).parts]
+        out.append((src, "/".join(parts)))
+    return out
+
+
+def cmd_init(cfg: Config, args: argparse.Namespace) -> int:
+    """Create a new detections repository: vitrix.yml, example rules, cases, replay logs and the CI workflow."""
+    files = _template_files()
+    if not files:
+        raise UsageError("this installation has no project template")
+    target = Path(args.directory).resolve()
+    clashes = [rel for _, rel in files if (target / rel).exists()]
+    if clashes and not args.force:
+        raise UsageError(f"{target} already has: {', '.join(clashes[:5])}{'…' if len(clashes) > 5 else ''}. Use --force to overwrite or pick an empty folder.")
+    for src, rel in files:
+        dest = target / rel
+        dest.parent.mkdir(parents=True, exist_ok=True)
+        dest.write_bytes(src.read_bytes())
+    print(f"created a Vitrix detections repository in {target} ({len(files)} files)")
+    here = "" if target == Path.cwd() else f"cd {args.directory}\n  "
+    print(f"\nnext steps:\n  {here}vitrix check --strict --gate     # validate the example rules\n  vitrix serve                      # open the web UI\n"
+          "  git init && git add -A && git commit -m \"Initial detections\"\n"
+          "then push it to YOUR repository and set `github.repo` in vitrix.yml (see README.md).")
     return 0
 
 
@@ -413,7 +449,7 @@ def cmd_targets(cfg: Config, args: argparse.Namespace) -> int:
     for name, target in sorted(available_targets().items()):
         marker = "*" if name in cfg.targets else " "
         print(f"{marker} {name:<16} {target.label}")
-    print("\n* = ativo no vitrix.yml")
+    print("\n* = active in vitrix.yml")
     return 0
 
 
@@ -421,63 +457,68 @@ def cmd_targets(cfg: Config, args: argparse.Namespace) -> int:
 
 
 def build_parser() -> argparse.ArgumentParser:
-    parser = argparse.ArgumentParser(prog="vitrix", description="Detection-as-Code: valida, converte e testa regras Sigma.")
+    parser = argparse.ArgumentParser(prog="vitrix", description="Detection-as-Code: validate, convert and test Sigma rules.")
     parser.add_argument("--version", action="version", version=f"vitrix {__version__}")
-    parser.add_argument("-c", "--config", help="caminho do vitrix.yml (padrão: ./vitrix.yml)")
+    parser.add_argument("-c", "--config", help="path to vitrix.yml (default: ./vitrix.yml)")
     sub = parser.add_subparsers(dest="command", required=True)
 
     def paths(p: argparse.ArgumentParser) -> None:
-        p.add_argument("paths", nargs="*", help="arquivos ou pastas de regras (padrão: rules_dir do vitrix.yml)")
+        p.add_argument("paths", nargs="*", help="rule files or folders (default: rules_dir from vitrix.yml)")
 
-    p = sub.add_parser("lint", help="valida schema, condição e metadados")
+    p = sub.add_parser("init", help="create a new detections repository (vitrix.yml, example rules, CI workflow)")
+    p.add_argument("directory", nargs="?", default=".", help="where to create it (default: the current folder)")
+    p.add_argument("--force", action="store_true", help="overwrite files that already exist")
+    p.set_defaults(func=cmd_init)
+
+    p = sub.add_parser("lint", help="validate schema, condition and metadata")
     paths(p)
-    p.add_argument("--strict", action="store_true", help="avisos também fazem o comando falhar")
+    p.add_argument("--strict", action="store_true", help="warnings also fail the command")
     p.set_defaults(func=cmd_lint)
 
-    p = sub.add_parser("convert", help="converte para os SIEMs configurados")
+    p = sub.add_parser("convert", help="convert to the configured SIEMs")
     paths(p)
-    p.add_argument("-t", "--target", action="append", help="alvo (repita para vários; padrão: os do vitrix.yml)")
-    p.add_argument("--all", action="store_true", help="todos os alvos do vitrix.yml (já é o padrão)")
-    p.add_argument("--stdout", action="store_true", help="imprime em vez de gravar em dist/")
+    p.add_argument("-t", "--target", action="append", help="target (repeat for several; default: those in vitrix.yml)")
+    p.add_argument("--all", action="store_true", help="every target in vitrix.yml (already the default)")
+    p.add_argument("--stdout", action="store_true", help="print instead of writing to dist/")
     p.set_defaults(func=cmd_convert)
 
-    p = sub.add_parser("test", help="roda os casos de teste contra o avaliador local")
+    p = sub.add_parser("test", help="run the test cases with the local evaluator")
     paths(p)
     p.set_defaults(func=cmd_test)
 
-    p = sub.add_parser("check", help="lint + convert + test, para usar no CI")
+    p = sub.add_parser("check", help="lint + convert + test, for CI")
     paths(p)
     p.add_argument("-t", "--target", action="append")
     p.add_argument("--strict", action="store_true")
-    p.add_argument("--markdown", metavar="ARQUIVO", help="acrescenta um resumo em Markdown (ex.: $GITHUB_STEP_SUMMARY)")
-    p.add_argument("--gate", action="store_true", help="também aplica o quality gate (replay, falsos positivos, exclusões)")
+    p.add_argument("--markdown", metavar="FILE", help="append a Markdown summary (e.g. $GITHUB_STEP_SUMMARY)")
+    p.add_argument("--gate", action="store_true", help="also apply the quality gate (replay, false positives, exclusions)")
     p.set_defaults(func=cmd_check)
 
-    p = sub.add_parser("gate", help="quality gate: a regra está pronta para ser publicada?")
+    p = sub.add_parser("gate", help="quality gate: is each rule ready to be published?")
     p.set_defaults(func=cmd_gate)
 
-    p = sub.add_parser("replay", help="roda as regras contra logs locais (datasets/) e confere as expectativas")
-    p.add_argument("dataset", nargs="?", help="nome do dataset em datasets/ (padrão: todos)")
-    p.add_argument("-f", "--file", help="um arquivo de eventos fora de datasets/ (JSON, JSONL ou YAML)")
+    p = sub.add_parser("replay", help="run the rules against local logs (datasets/) and check the expectations")
+    p.add_argument("dataset", nargs="?", help="dataset name in datasets/ (default: all)")
+    p.add_argument("-f", "--file", help="an events file outside datasets/ (JSON, JSONL or YAML)")
     p.set_defaults(func=cmd_replay)
 
-    p = sub.add_parser("report", help="relatório de quality gate, testes, cobertura e replay")
+    p = sub.add_parser("report", help="quality gate, tests, coverage and replay report")
     p.add_argument("--format", choices=["md", "json"], default="md")
-    p.add_argument("-o", "--output", help="arquivo de saída (padrão: imprime)")
+    p.add_argument("-o", "--output", help="output file (default: print)")
     p.set_defaults(func=cmd_report)
 
-    p = sub.add_parser("targets", help="lista os alvos de SIEM disponíveis")
+    p = sub.add_parser("targets", help="list the available SIEM targets")
     p.set_defaults(func=cmd_targets)
 
-    p = sub.add_parser("serve", help="sobe a API local para a interface (precisa do extra [api])")
-    p.add_argument("--host", default="127.0.0.1", help="padrão: 127.0.0.1 (a API não tem autenticação)")
+    p = sub.add_parser("serve", help="start the local API and web UI (needs the [api] extra)")
+    p.add_argument("--host", default="127.0.0.1", help="default: 127.0.0.1 (the API has no authentication)")
     p.add_argument("--port", type=int, default=8000)
     p.set_defaults(func=cmd_serve)
     return parser
 
 
 def _utf8_console() -> None:
-    """No Windows o console padrão é cp1252 e não imprime ✓/✗/·: força UTF-8 (sem quebrar se não der)."""
+    """The Windows console defaults to cp1252 and cannot print ✓/✗/·: force UTF-8 (never fail)."""
     for stream in (sys.stdout, sys.stderr):
         try:
             stream.reconfigure(encoding="utf-8", errors="replace")  # type: ignore[union-attr]
@@ -492,7 +533,7 @@ def main(argv: list[str] | None = None) -> int:
         cfg = load_config(args.config)
         return args.func(cfg, args)
     except (ConfigError, UsageError) as exc:
-        print(f"erro: {exc}", file=sys.stderr)
+        print(f"error: {exc}", file=sys.stderr)
         return 2
 
 

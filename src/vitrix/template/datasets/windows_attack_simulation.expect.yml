@@ -1,0 +1,6 @@
+# Expectations for replaying windows_attack_simulation.jsonl (regression test).
+# If a change moves how many events a rule matches, `vitrix replay` and the quality gate report it.
+expect:
+  windows/powershell_encoded.yml: 2   # both encoded PowerShell events of the attack; the SCCM one is excluded
+  windows/schtasks_system.yml: 1      # only the SYSTEM task; the backup one is not
+others: 0                             # no other rule may fire on this dataset

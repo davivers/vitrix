@@ -1,32 +1,32 @@
-# Identidade visual do Vitrix
+# Vitrix visual identity
 
-| Papel | Cor |
+| Role | Colour |
 |---|---|
-| Fundo escuro (vidro) | `#0B1020` |
-| Superfície clara | `#F5F6F8` |
-| Acento principal | `#6D5BF0` |
-| Brilho | `#22D3EE` |
-| Saídas dos SIEMs (logo) | `#2A78D6` `#EB6834` `#1BAF7A` |
+| Dark background (glass) | `#0B1020` |
+| Light surface | `#F5F6F8` |
+| Primary accent | `#6D5BF0` |
+| Glow | `#22D3EE` |
+| SIEM outputs (logo) | `#2A78D6` `#EB6834` `#1BAF7A` |
 
-## Interface (tema escuro "vidro")
+## UI (dark "glass" theme)
 
-Tokens em `web/src/index.css`. Cartões são superfícies translúcidas (`.glass`) sobre o fundo com brilho violeta e ciano.
+Tokens live in `web/src/index.css`. Cards are translucent surfaces (`.glass`) over a background with a violet and cyan glow.
 
-| Token | Valor | Uso |
+| Token | Value | Use |
 |---|---|---|
-| `bg` | `#070B16` | fundo da página |
-| `surface` / `surface-2` / `surface-3` | branco a 4% / 7% / 10% | cartões, chips, hover |
-| `line` | branco a 9% | bordas e divisórias |
-| `strong` / `text` / `muted` / `subtle` | `#FFFFFF` `#E8ECF5` `#A3ADC4` `#8791AB` | títulos, corpo, secundário, rótulos |
-| `brand` | `#6D5BF0` | fundo do botão principal |
-| `accent` | `#8B7CF6` | aba ativa, foco, links (contraste no escuro) |
-| `glow` | `#22D3EE` | cursor do editor, brilho de fundo |
-| `good` / `warn` / `bad` | `#34D399` `#FBBF24` `#F87171` | só status, sempre com ícone e texto |
-| `siem-splunk` / `siem-microsoft` / `siem-elastic` | `#5AA9FF` `#F59A6B` `#34D3A3` | quadradinho ao lado do rótulo SPL/KQL/EQL |
+| `bg` | `#070B16` | page background |
+| `surface` / `surface-2` / `surface-3` | white at 4% / 7% / 10% | cards, chips, hover |
+| `line` | white at 9% | borders and dividers |
+| `strong` / `text` / `muted` / `subtle` | `#FFFFFF` `#E8ECF5` `#A3ADC4` `#8791AB` | titles, body, secondary, labels |
+| `brand` | `#6D5BF0` | primary button background |
+| `accent` | `#8B7CF6` | active tab, focus, links, chart series (contrast on dark) |
+| `glow` | `#22D3EE` | editor cursor, background glow |
+| `good` / `warn` / `bad` | `#34D399` `#FBBF24` `#F87171` | status only, always with icon and text |
+| `siem-splunk` / `siem-microsoft` / `siem-elastic` | `#5AA9FF` `#F59A6B` `#34D3A3` | marker next to the SPL/KQL/EQL label |
 
-As cores de SIEM da interface são versões mais claras das do logo, para contraste sobre o fundo escuro.
+The UI SIEM colours are lighter versions of the logo's, for contrast on the dark background. SIEM colours are markers beside a label, never chart series: charts use a single violet series with the number written.
 
-Violeta e ciano só na marca. Verde, amarelo e vermelho ficam reservados para status.
-Fontes: Inter (interface) e JetBrains Mono (código).
-O texto dos logos usa fonte do sistema; antes de publicar, converta o texto em curvas.
-Tagline: "Escreva uma vez. Detecte em qualquer SIEM."
+Violet and cyan are brand only. Green, yellow and red are reserved for status.
+Fonts: Inter (UI) and JetBrains Mono (code).
+The logo text uses a system font; convert the text to outlines before publishing.
+Tagline: "Write once. Detect on any SIEM."
