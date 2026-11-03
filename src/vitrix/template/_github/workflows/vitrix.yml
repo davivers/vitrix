@@ -22,10 +22,11 @@ jobs:
         with:
           python-version: '3.12'
 
-      # Until Vitrix is on PyPI, install it from its repository. Pin a tag or commit for
-      # reproducible runs, e.g. ...vitrix.git@v0.1.0
+      # Installs from PyPI; falls back to the GitHub repository while a release is not published
+      # yet. Pin for reproducible runs: pip install "vitrix==0.1.0".
       - name: Install Vitrix
-        run: pip install "vitrix @ git+https://github.com/davivers/vitrix.git"
+        run: |
+          pip install vitrix || pip install "vitrix @ git+https://github.com/davivers/vitrix.git"
 
       # Lint, conversion, test cases, replay and the quality gate.
       # The summary shows up in the run's "Summary" tab.

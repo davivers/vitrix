@@ -407,6 +407,8 @@ def cmd_serve(cfg: Config, args: argparse.Namespace) -> int:
         elif not os.environ.get("VITRIX_ALLOWED_HOSTS"):
             print("warning: with --host 0.0.0.0, set VITRIX_ALLOWED_HOSTS to the name or IP used in the browser; others get 403.",
                   file=sys.stderr)
+    shown = "localhost" if _is_unspecified(args.host) else args.host
+    os.environ.setdefault("VITRIX_SERVE_URL", f"http://{'[' + shown + ']' if ':' in shown else shown}:{args.port}")  # for the setup link
     uvicorn.run("vitrix.api:create_app", factory=True, host=args.host, port=args.port, log_level="info")
     return 0
 

@@ -335,3 +335,43 @@ def test_accounts_on_allows_drafts_from_any_client_address(tmp_path):
     register(owner)
     login(owner, "owner@example.com", PW)
     assert owner.post("/api/drafts", json=BODY).status_code == 201
+
+
+# --------------------------------------------------------------------------- source / batch_id (packs import)
+
+
+def test_create_many_atomic_quota_and_batch_filter(tmp_path):
+    s = DraftStore(tmp_path / "d.db")
+    ids = s.create_many([{"rule": f"r{i}", "path": f"p{i}.yml", "source": "sigmahq@r1:rules/x", "batch_id": "b1"} for i in range(3)])
+    assert len(ids) == 3 and [d["batch_id"] for d in s.list("b1")] == ["b1"] * 3
+    assert s.list("nope") == [] and s.get(ids[0])["source"] == "sigmahq@r1:rules/x"
+    s.create(path=None, title=None, rule="plain", cases=None, base_hash=None)
+    assert s.list()[0]["source"] is None
+    over = [{"rule": "r"} for _ in range(MAX_PER_AUTHOR)]
+    with pytest.raises(DraftError) as e:
+        s.create_many(over)
+    assert e.value.status == 409 and len(s.list()) == 4  # nothing stored
+
+
+def test_old_database_is_migrated(tmp_path):
+    import sqlite3
+
+    db = tmp_path / "old.db"
+    con = sqlite3.connect(db)
+    con.executescript("CREATE TABLE drafts (id TEXT PRIMARY KEY, workspace_id INTEGER NOT NULL DEFAULT 1, path TEXT, title TEXT NOT NULL,"
+                      " rule TEXT NOT NULL, cases TEXT, base_hash TEXT, author_id INTEGER, author_email TEXT, author_name TEXT,"
+                      " created_at REAL NOT NULL, updated_at REAL NOT NULL, version INTEGER NOT NULL DEFAULT 1);"
+                      "INSERT INTO drafts (id,title,rule,created_at,updated_at) VALUES ('" + "a" * 32 + "','t','r',1,1);")
+    con.commit()
+    con.close()
+    s = DraftStore(db)
+    assert s.get("a" * 32)["batch_id"] is None
+    assert s.create(path=None, title="n", rule="r", cases=None, base_hash=None, batch_id="b")["batch_id"] == "b"
+
+
+def test_api_exposes_source_and_batch_filter(tmp_path, monkeypatch):
+    c = local_client(tmp_path, monkeypatch)
+    r = c.post("/api/drafts", json=BODY).json()
+    assert r["source"] is None and r["batch_id"] is None
+    assert c.get("/api/drafts?batch=zzz").json()["drafts"] == []
+    assert len(c.get("/api/drafts").json()["drafts"]) == 1

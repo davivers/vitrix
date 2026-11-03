@@ -14,6 +14,8 @@ Detection-as-Code for [Sigma](https://sigmahq.io) rules: validate, test, replay,
 [![Python 3.10-3.14](https://img.shields.io/badge/python-3.10%E2%80%933.14-3776AB.svg)](pyproject.toml)
 [![Status: alpha](https://img.shields.io/badge/status-alpha%200.1.0-orange.svg)](#limits-of-this-version)
 
+<img src="docs/images/demo.gif" alt="Demo: edit a Sigma rule in the Vitrix editor, the Tests tab passes, Replay runs on local logs, and the quality gate shows Approved" width="860">
+
 [Quickstart](#quickstart) · [Features](#features) · [Roles and security](#roles-and-security) · [CLI](#cli-cheat-sheet) · [Reference](#reference) · [Contributing](#contributing)
 
 </div>
@@ -68,7 +70,7 @@ docker compose up
 
 Other commands: `docker run --rm -v "$PWD/detections:/workspace" vitrix check --strict --gate` (also `replay`, `report`). On PowerShell use `${PWD}` instead of `$PWD`. Accounts and drafts live in `detections/.vitrix/`.
 
-**Save locally (drafts) in Docker needs accounts.** Inside a container the server sees the Docker bridge address, not loopback, so with accounts off drafts are refused. Turn accounts on in `detections/vitrix.yml` (`auth:` then `enabled: true`) and restart; the first person to register becomes the owner.
+**First run.** The image turns accounts on (`VITRIX_AUTH=on`) and generates a one-time setup token (`VITRIX_BOOTSTRAP_TOKEN=auto`). Open the setup link printed in `docker compose logs` (or `docker logs <container>`) to create the workspace owner; Save locally (drafts) then works out of the box. The token is new on every start and only matters until the owner exists. Keep the port on `127.0.0.1`: anyone who holds the link can become the owner. Set `VITRIX_BOOTSTRAP_TOKEN` to your own value (16+ characters) to choose it, or `VITRIX_AUTH=off` to disable accounts (not recommended).
 
 </details>
 
@@ -94,6 +96,8 @@ powershell -File scripts\install.ps1
 vitrix init ..\my-detections; cd ..\my-detections
 vitrix serve                         # http://127.0.0.1:8000
 ```
+
+PyPI (soon, not published yet): `pip install vitrix` will work once the first release is out.
 
 Without cloning, install straight from GitHub: `scripts/install.sh "vitrix[api] @ git+https://github.com/davivers/vitrix"` (Windows: `scripts\install.ps1 -Target "vitrix[api] @ git+https://github.com/davivers/vitrix"`).
 `vitrix: command not found` means the virtual environment is not active; activate it in each new terminal.

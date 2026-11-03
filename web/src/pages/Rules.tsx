@@ -1,11 +1,12 @@
 import { useQuery } from "@tanstack/react-query";
-import { CheckCircle2, ChevronDown, Plus, Search, XCircle } from "lucide-react";
+import { CheckCircle2, ChevronDown, Download, GitCompare, Plus, Search, XCircle } from "lucide-react";
 import { useEffect, useMemo, useRef, useState } from "react";
 import { Link, useNavigate, useSearchParams } from "react-router-dom";
-import { api } from "../api";
+import { DEMO, api } from "../api";
+import { DriftBadge, count, driftErrorMessage } from "../components/Drift";
 import { HealthMeter, StatTile, pct, timeAgo } from "../components/dash";
 import { FlowFunnel } from "../components/flow";
-import { Card, ErrorBox, LevelTag, PageHeader, StateBadge, TargetChip, btnPrimary } from "../components/ui";
+import { Card, ErrorBox, LevelTag, PageHeader, StateBadge, TargetChip, btnPrimary, btnSecondary, inputCls } from "../components/ui";
 import type { QualityReport, State } from "../types";
 import { t } from "../i18n";
 
@@ -75,6 +76,13 @@ export default function RulesPage() {
   const [q, setQ] = useState("");
   const [filter, setFilter] = useState<"all" | State>("all");
   const [gateFilter, setGateFilter] = useState<"all" | "blocked" | "ready">("all");
+  // Drift needs a replay of every rule at a Git ref (seconds on big repos), so it only runs when asked.
+  const [driftOn, setDriftOn] = useState(false);
+  const [driftRef, setDriftRef] = useState("");
+  const [driftApplied, setDriftApplied] = useState<string | null>(null);
+  const [driftOnly, setDriftOnly] = useState(false);
+  const drift = useQuery({ queryKey: ["drift", driftApplied, null], queryFn: () => api.drift(driftApplied), enabled: driftOn, retry: false });
+  const driftRows = useMemo(() => new Map((drift.data?.rules ?? []).map((r) => [r.rule, r])), [drift.data]);
   const [params] = useSearchParams();
   const stripRef = useRef<HTMLDivElement>(null);
 
@@ -94,11 +102,12 @@ export default function RulesPage() {
       (r) =>
         (filter === "all" || r.state === filter) &&
         (gateFilter === "all" || (gateFilter === "ready") === Boolean(gate.get(r.id)?.ready)) &&
+        (!driftOn || !driftOnly || driftRows.get(r.id)?.state !== "same" || driftRows.get(r.id)?.modified) &&
         (!needle || [r.title, r.id, r.logsource ?? "", ...r.techniques, ...r.tactics].some((s) => s.toLowerCase().includes(needle))),
     );
     // Gate view: blocked rules first, lowest health first.
     return viewGate ? [...list].sort((a, b) => Number(gate.get(a.id)?.ready ?? true) - Number(gate.get(b.id)?.ready ?? true) || (gate.get(a.id)?.score ?? 100) - (gate.get(b.id)?.score ?? 100)) : list;
-  }, [data, q, filter, gateFilter, gate, viewGate]);
+  }, [data, q, filter, gateFilter, gate, viewGate, driftOn, driftOnly, driftRows]);
 
   return (
     <div className="mx-auto max-w-7xl px-4 py-8 sm:px-8">
@@ -106,9 +115,14 @@ export default function RulesPage() {
         title={viewGate ? t("l_quality_gate") : t("l_rules")}
         subtitle={viewGate ? t("l_which_rules_can_be_published_block") : data ? t("ru_n_rules", { n: data.length }) : t("reading_the_repository")}
         actions={
-          <Link to="/editor" className={btnPrimary}>
-            <Plus size={16} aria-hidden /> {t("new_rule")}
-          </Link>
+          <div className="flex flex-wrap gap-2">
+            <Link to="/packs" className={btnSecondary} {...(DEMO ? { "aria-disabled": true, title: t("demo_disabled"), onClick: (e) => e.preventDefault() } : {})}>
+              <Download size={16} aria-hidden /> {t("pk_import_cta")}
+            </Link>
+            <Link to="/editor" className={btnPrimary}>
+              <Plus size={16} aria-hidden /> {t("new_rule")}
+            </Link>
+          </div>
         }
       />
 
@@ -167,9 +181,47 @@ export default function RulesPage() {
             ))}
           </div>
         )}
+        <div className="flex items-center gap-2">
+          <button type="button" aria-pressed={driftOn} onClick={() => setDriftOn(!driftOn)} className={`inline-flex items-center gap-1.5 rounded-[10px] border border-line px-3 py-2 text-sm ${driftOn ? "bg-accent-soft font-medium text-strong" : "bg-surface text-muted hover:text-text"}`}>
+            <GitCompare size={14} aria-hidden /> {t("dr_column")}
+          </button>
+          {driftOn && (
+            <>
+              <form
+                className="flex gap-1"
+                onSubmit={(e) => {
+                  e.preventDefault();
+                  setDriftApplied(driftRef.trim() || null);
+                }}
+              >
+                <label>
+                  <span className="sr-only">{t("dr_ref")}</span>
+                  <input value={driftRef} onChange={(e) => setDriftRef(e.target.value)} placeholder={t("dr_ref_ph")} className={`${inputCls} w-44`} maxLength={200} spellCheck={false} />
+                </label>
+                <button type="submit" className={btnSecondary}>
+                  {t("dr_compare")}
+                </button>
+              </form>
+              <label className="flex items-center gap-2 text-[13px] text-muted">
+                <input type="checkbox" checked={driftOnly} onChange={(e) => setDriftOnly(e.target.checked)} className="accent-accent" /> {t("dr_only")}
+              </label>
+            </>
+          )}
+        </div>
       </div>
 
       {error && <ErrorBox message={(error as Error).message} />}
+      {driftOn && drift.isFetching && <p className="mb-3 text-sm text-muted">{t("dr_running")}</p>}
+      {driftOn && drift.error && (
+        <div className="mb-3">
+          <ErrorBox message={driftErrorMessage(drift.error)} />
+        </div>
+      )}
+      {driftOn && drift.data && (
+        <p className="mb-3 text-[13px] text-muted">
+          {t("dr_vs")} <span className="font-mono text-text">{drift.data.ref}</span> · {t("dr_summary", { n: drift.data.summary.drifted, m: drift.data.summary.modified })}
+        </p>
+      )}
 
       <Card className="overflow-x-auto">
         <table className="w-full min-w-[900px] text-left text-sm">
@@ -183,19 +235,20 @@ export default function RulesPage() {
               <th className="whitespace-nowrap px-4 py-3 font-medium">{t("gate")}</th>
               <th className="px-4 py-3 font-medium">{t("changed")}</th>
               <th className="px-4 py-3 font-medium">{t("state")}</th>
+              {driftOn && <th className="px-4 py-3 font-medium">{t("dr_column")}</th>}
             </tr>
           </thead>
           <tbody>
             {isLoading && (
               <tr>
-                <td colSpan={8} className="px-4 py-10 text-center text-muted">
+                <td colSpan={9} className="px-4 py-10 text-center text-muted">
                   {t("loading")}
                 </td>
               </tr>
             )}
             {!isLoading && rows.length === 0 && !error && (
               <tr>
-                <td colSpan={8} className="px-4 py-10 text-center text-muted">
+                <td colSpan={9} className="px-4 py-10 text-center text-muted">
                   {data?.length ? t("l_no_rule_matches_this_filter") : t("ru_empty")}
                 </td>
               </tr>
@@ -240,6 +293,23 @@ export default function RulesPage() {
                   <td className="px-4 py-3">
                     <StateBadge state={r.state} />
                   </td>
+                  {driftOn && (
+                    <td className="whitespace-nowrap px-4 py-3">
+                      {(() => {
+                        const d = driftRows.get(r.id);
+                        return d ? (
+                          <span className="flex flex-col gap-1">
+                            <DriftBadge state={d.state} modified={d.modified} />
+                            <span className="text-xs tabular-nums text-muted">
+                              {count(d.before)} → {count(d.after)}
+                            </span>
+                          </span>
+                        ) : (
+                          <span className="text-subtle">—</span>
+                        );
+                      })()}
+                    </td>
+                  )}
                 </tr>
               );
             })}

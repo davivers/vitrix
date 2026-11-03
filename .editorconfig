@@ -1,0 +1,7 @@
+root = true
+
+# LF everywhere: the CI rebuilds the UI on Linux and diffs it against the committed src/vitrix/ui/.
+[*]
+end_of_line = lf
+insert_final_newline = true
+charset = utf-8

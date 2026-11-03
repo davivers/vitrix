@@ -388,7 +388,7 @@ def _change_body(summary: dict, validation: dict, quality: dict, rule_repo_path:
 
 
 def submit_rule(cfg: Config, path: str, rule_text: str, cases_text: str | None, title: str | None = None,
-                client: GitHubClient | None = None, submitted_by: str = "") -> dict:
+                client: GitHubClient | None = None, submitted_by: str = "", trailers: list[str] | None = None) -> dict:
     """Step 1: send the rule (and its cases) to a new branch so the real CI validates it.
 
     Rules blocked by the local quality gate are not sent: CI would fail them the same way.
@@ -420,9 +420,68 @@ def submit_rule(cfg: Config, path: str, rule_text: str, cases_text: str | None, 
     pr_title = ((title or "").strip() or f"{'feat' if is_new else 'tune'}: {'new rule' if is_new else 'update'} {name}")[:200]
     body = _change_body(summary, validation, quality, rule_repo_path, cases_repo_path, is_new)
     client = client or GitHubClient(gh)
-    message = f"{pr_title}\n\n{body}" + (f"\n\n{submitted_by}" if submitted_by else "")
+    message = f"{pr_title}\n\n{body}" + (f"\n\n{submitted_by}" if submitted_by else "") + _trailer_block(trailers)
     pushed = client.push_branch(files, message, branch_slug(rel))
     return {**pushed, "title": pr_title, "files": sorted(files), "is_new": is_new}
+
+
+def _trailer_block(trailers: list[str] | None) -> str:
+    return "\n\n" + "\n".join(trailers) if trailers else ""
+
+
+class DraftsBlocked(ChangeError):
+    """Some drafts fail the local quality gate; `blocked` = [{"id","path","reasons"}] (HTTP 422, nothing pushed)."""
+
+    def __init__(self, blocked: list[dict]):
+        super().__init__(f"{len(blocked)} draft{'s are' if len(blocked) != 1 else ' is'} blocked by the local quality gate")
+        self.blocked = blocked
+
+
+def submit_drafts(cfg: Config, drafts: list[dict], title: str | None = None, client: GitHubClient | None = None,
+                  submitted_by: str = "", trailers: list[str] | None = None) -> dict:
+    """Publish several drafts (dicts with id, path, title, rule, cases) as ONE `vitrix/pack-...` branch.
+
+    Every draft must have a path and pass validation plus the local quality gate, otherwise
+    `DraftsBlocked` is raised before anything is pushed. Same two-step CI-first flow as `submit_rule`.
+    """
+    from .flow import draft_quality
+
+    gh = _require_github(cfg)
+    blocked: list[dict] = []
+    files: dict[str, str] = {}
+    lines: list[str] = []
+    seen: set[str] = set()
+    for d in drafts:
+        reasons: list[str] = []
+        rel = d["path"]
+        cases = d["cases"] if d["cases"] and d["cases"].strip() else None
+        if not rel:
+            reasons.append("the draft has no path; open it in the Editor and set one")
+        elif rel in seen:
+            reasons.append("another draft in this batch has the same path")
+        else:
+            seen.add(rel)
+            validation = validate_text(cfg, d["rule"], cases)
+            quality = draft_quality(cfg, validation, d["rule"], cases is not None, rel)
+            if validation["state"] == "fail" or not quality["ready"]:
+                reasons = quality["blockers"][:5] or ["lint, conversion or test errors"]
+        if reasons:
+            blocked.append({"id": d["id"], "path": rel, "reasons": reasons})
+            continue
+        files[gh.repo_path(cfg.rel(cfg.rules_dir / rel))] = d["rule"]
+        if cases:
+            files[gh.repo_path(cfg.rel(cfg.cases_dir / rel))] = cases
+        lines.append(f"- {d['title'] or rel} (`{rel}`)")
+    if blocked:
+        raise DraftsBlocked(blocked)
+
+    plural = "s" if len(drafts) != 1 else ""
+    pr_title = ((title or "").strip() or f"feat: add {len(drafts)} rule{plural} from drafts")[:200]
+    body = f"{len(drafts)} rule{plural} submitted from Vitrix drafts.\n\n" + "\n".join(lines)
+    message = f"{pr_title}\n\n{body}" + (f"\n\n{submitted_by}" if submitted_by else "") + _trailer_block(trailers)
+    client = client or GitHubClient(gh)
+    pushed = client.push_branch(files, message, "pack-" + datetime.now(timezone.utc).strftime("%Y%m%d"))
+    return {**pushed, "title": pr_title, "files": sorted(files), "is_new": True}
 
 
 def submit_config(cfg: Config, text: str, title: str | None = None, client: GitHubClient | None = None, submitted_by: str = "") -> dict:

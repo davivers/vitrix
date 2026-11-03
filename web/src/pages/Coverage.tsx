@@ -4,13 +4,14 @@ import { AlertTriangle, Download, Grid3x3, Search } from "lucide-react";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { Link, useSearchParams } from "react-router-dom";
 import { api } from "../api";
-import { AttackMatrix, HEAT_CLASS, LEGEND, buildCells, type Cell } from "../components/AttackMatrix";
+import { AttackMatrix, HEAT_CLASS, LEGEND, buildCells, mergeCatalog, type Cell } from "../components/AttackMatrix";
 import { Section, StatTile, pct } from "../components/dash";
 import { TechniqueDrawer } from "../components/TechniqueDrawer";
 import { Card, ErrorBox, PageHeader, btnPrimary, btnSecondary, inputCls } from "../components/ui";
 import { t, tn } from "../i18n";
 
 const GAPS_HINT = t("l_technique_gaps_need_the_att_ck_cat");
+const ATTACK_TM = "https://attack.mitre.org/resources/legal-and-branding/terms-of-use/";
 
 function Skeleton() {
   return (
@@ -35,7 +36,7 @@ export default function CoveragePage() {
   const [params, setParams] = useSearchParams();
   const tactic = params.get("tactic") ?? "";
   const q = params.get("q") ?? "";
-  const showEmpty = params.get("empty") === "1"; // tactics without a technique are hidden by default
+  const gapsOnly = params.get("gaps") === "1";
   const deep = params.get("depth") === "sub";
   const set = (patch: Record<string, string>) => {
     const next = new URLSearchParams(params);
@@ -60,9 +61,13 @@ export default function CoveragePage() {
     return () => window.removeEventListener("keydown", onKey);
   }, []);
 
+  // With the catalogue the matrix is complete (every tactic shown unless "empty=0"); without it, empty tactics are hidden unless "empty=1".
+  const merged = useMemo(() => (data?.catalog ? mergeCatalog(data, data.catalog) : null), [data]);
+  const showEmpty = merged ? params.get("empty") !== "0" : params.get("empty") === "1";
+  const allTactics = merged?.tactics ?? data?.tactics ?? [];
   const tactics = useMemo(
-    () => (data?.tactics ?? []).filter((t) => (!tactic || t.slug === tactic) && (showEmpty || t.techniques.some((x) => x.id !== "—"))),
-    [data, tactic, showEmpty],
+    () => allTactics.filter((x) => (!tactic || x.slug === tactic) && (showEmpty || (merged ? x.rules > 0 : x.techniques.some((y) => y.id !== "—")))),
+    [allTactics, tactic, showEmpty, merged],
   );
 
   const needle = q.trim().toLowerCase();
@@ -86,7 +91,7 @@ export default function CoveragePage() {
     return { mapped: mapped.size, total: mapped.size + data.unmapped.length };
   }, [data]);
 
-  const drawerTactics = sel && data ? data.tactics.filter((t) => t.techniques.some((x) => x.id === sel.id || x.id.startsWith(`${sel.id}.`))).map((t) => t.name) : [];
+  const drawerTactics = sel ? allTactics.filter((x) => x.techniques.some((y) => y.id === sel.id || y.id.startsWith(`${sel.id}.`))).map((x) => x.name) : [];
 
   return (
     <div className="mx-auto max-w-[1600px] px-4 py-8 sm:px-8">
@@ -110,7 +115,7 @@ export default function CoveragePage() {
       {isLoading && <Skeleton />}
       {data && stats && (
         <>
-          <div className="mb-5 grid gap-4 sm:grid-cols-2 xl:grid-cols-4">
+          <div className={clsx("mb-5 grid gap-4 sm:grid-cols-2", merged ? "xl:grid-cols-5" : "xl:grid-cols-4")}>
             <StatTile
               label={t("tactics_covered")}
               value={`${data.covered}/${data.total}`}
@@ -118,6 +123,13 @@ export default function CoveragePage() {
               status={data.covered / data.total >= 0.7 ? "ok" : data.covered / data.total >= 0.4 ? "warn" : "fail"}
             />
             <StatTile label={t("techniques")} value={data.techniques} sub={t("distinct_techniques_and_sub_techniques")} />
+            {merged && (
+              <StatTile
+                label={t("cv_gap_tile")}
+                value={t("cv_x_of_y", { a: merged.covered, b: merged.total })}
+                sub={t("cv_techniques_covered", { p: pct(merged.covered, merged.total) })}
+              />
+            )}
             <StatTile label={t("rules_mapped")} value={t("cv_x_of_y", { a: stats.mapped, b: stats.total })} sub={t("cv_have_tech", { p: pct(stats.mapped, stats.total) })} />
             <div className="relative">
               <StatTile
@@ -166,7 +178,7 @@ export default function CoveragePage() {
                   {t("tactic")}
                   <select value={tactic} onChange={(e) => set({ tactic: e.target.value })} className="rounded-[10px] border border-line bg-surface px-2.5 py-2 text-[13px] text-text">
                     <option value="">{t("all")}</option>
-                    {data.tactics.map((t) => (
+                    {allTactics.map((t) => (
                       <option key={t.slug} value={t.slug}>
                         {t.name}
                       </option>
@@ -174,11 +186,22 @@ export default function CoveragePage() {
                   </select>
                 </label>
                 <label className="flex items-center gap-2 text-[13px] text-muted">
-                  <input type="checkbox" checked={showEmpty} onChange={(e) => set({ empty: e.target.checked ? "1" : "" })} className="accent-accent" /> {t("show_empty_tactics")}
+                  <input type="checkbox" checked={showEmpty} onChange={(e) => set({ empty: merged ? (e.target.checked ? "" : "0") : e.target.checked ? "1" : "" })} className="accent-accent" /> {t("show_empty_tactics")}
                 </label>
-                <button type="button" disabled aria-disabled title={GAPS_HINT} aria-describedby="gaps-hint" className="cursor-not-allowed rounded-[10px] border border-line px-3 py-1.5 text-[13px] text-subtle opacity-60">
-                  {t("gaps")}
-                </button>
+                {merged ? (
+                  <button
+                    type="button"
+                    aria-pressed={gapsOnly}
+                    onClick={() => set({ gaps: gapsOnly ? "" : "1" })}
+                    className={clsx("rounded-[10px] border px-3 py-1.5 text-[13px]", gapsOnly ? "border-accent bg-accent-soft font-medium text-strong" : "border-line text-muted hover:text-text")}
+                  >
+                    {t("gaps")}
+                  </button>
+                ) : (
+                  <button type="button" disabled aria-disabled title={GAPS_HINT} aria-describedby="gaps-hint" className="cursor-not-allowed rounded-[10px] border border-line px-3 py-1.5 text-[13px] text-subtle opacity-60">
+                    {t("gaps")}
+                  </button>
+                )}
                 <div role="group" aria-label={t("depth")} className="flex items-center gap-1 rounded-[10px] border border-line bg-surface p-1">
                   <span className="px-2 text-[13px] text-muted">{t("depth")}</span>
                   {(
@@ -193,9 +216,18 @@ export default function CoveragePage() {
                   ))}
                 </div>
               </div>
-              <p id="gaps-hint" className="mb-3 text-xs text-subtle">
-                {GAPS_HINT}
-              </p>
+              {merged && data.catalog ? (
+                <p className="mb-3 text-xs text-subtle">
+                  {t("cv_catalog_line", { v: data.catalog.version })}{" "}
+                  <a href={ATTACK_TM} target="_blank" rel="noreferrer" className="text-accent hover:underline">
+                    {t("cv_mitre_attrib")}
+                  </a>
+                </p>
+              ) : (
+                <p id="gaps-hint" className="mb-3 text-xs text-subtle">
+                  {GAPS_HINT}
+                </p>
+              )}
 
               <div className="mb-3 flex flex-wrap items-center gap-x-3 gap-y-1 text-xs text-muted" aria-label={t("legend_rules_per_technique")}>
                 <span>{t("rules_per_technique")}</span>
@@ -225,6 +257,7 @@ export default function CoveragePage() {
                   <AttackMatrix
                     tactics={tactics}
                     deep={deep}
+                    gapsOnly={gapsOnly}
                     hits={hits}
                     selected={sel?.key ?? null}
                     onSelect={(cell, el) => {

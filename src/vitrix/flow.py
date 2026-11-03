@@ -13,7 +13,7 @@ from pathlib import Path
 
 import yaml
 
-from . import routing
+from . import attack, routing
 from .backends import available_targets
 from .cases import run_rule_cases
 from .config import Config
@@ -279,6 +279,7 @@ def coverage(cfg: Config) -> dict:
         "techniques": len({t for r in rules for t in r["techniques"]}),
         "covered": sum(t["rules"] > 0 for t in tactics),
         "total": len(tactics),
+        "catalog": attack.catalog(),
     }
 
 

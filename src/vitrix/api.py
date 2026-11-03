@@ -21,6 +21,7 @@ if that CI passed. The API has no authentication, so
     GET  /api/tests                    test suites: every case, by kind
     GET  /api/coverage                 ATT&CK matrix and data sources
     GET  /api/coverage/navigator       ATT&CK Navigator layer (JSON)
+    GET  /api/drift?ref=               rule matches now vs at a Git ref (default: base branch)
     GET  /api/history[/{id}]           Git history: coverage over time, activity, audit trail
     GET  /api/datasets                 replay datasets in datasets/
     GET  /api/datasets/{name}/replay   replay one dataset with its expectations
@@ -45,14 +46,15 @@ import os
 import re
 from pathlib import Path
 
-from fastapi import FastAPI, HTTPException, Request
+from fastapi import FastAPI, HTTPException, Query, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse, JSONResponse, PlainTextResponse, Response
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field
 
-from . import __version__, auth, auth_api, flow, history, regex_lab, service
+from . import __version__, auth, auth_api, flow, history, packs_api, regex_lab, reviews_api, service
 from . import drafts as drafts_mod
+from . import drift as drift_mod
 from . import replay as replay_mod
 from .backends import available_targets
 from .config import load_config
@@ -81,6 +83,7 @@ class SubmitRuleRequest(BaseModel):
     rule: str = Field(min_length=1, max_length=MAX_TEXT, description="Sigma rule YAML")
     cases: str | None = Field(default=None, max_length=MAX_TEXT, description="test cases YAML (optional)")
     title: str | None = Field(default=None, max_length=200, description="pull request title (optional)")
+    draft_id: str | None = Field(default=None, pattern=r"^[0-9a-f]{32}$", description="the draft this rule was loaded from (for Reviewed-by)")
 
 
 class SubmitConfigRequest(BaseModel):
@@ -120,6 +123,11 @@ class DraftRequest(BaseModel):
     title: str | None = Field(default=None, max_length=drafts_mod.MAX_TITLE)
     rule: str = Field(min_length=1, max_length=MAX_TEXT, description="Sigma rule YAML (may be invalid)")
     cases: str | None = Field(default=None, max_length=MAX_TEXT)
+
+
+class SubmitDraftsRequest(BaseModel):
+    draft_ids: list[str] = Field(min_length=1, max_length=50, description="drafts to publish as one branch")
+    title: str | None = Field(default=None, max_length=200)
 
 
 class DraftUpdateRequest(DraftRequest):
@@ -169,7 +177,9 @@ def _github_errors(fn):  # noqa: ANN001, ANN202
     try:
         return fn()
     except service.ChangeError as exc:
-        raise HTTPException(status_code=422, detail=str(exc)) from None
+        err = HTTPException(status_code=422, detail=str(exc))
+        err.blocked = getattr(exc, "blocked", None)  # type: ignore[attr-defined]  # DraftsBlocked carries the per-draft reasons
+        raise err from None
     except GitHubError as exc:
         raise HTTPException(status_code=exc.status, detail=str(exc)) from None
 
@@ -184,6 +194,9 @@ def create_app(config_path: str | None = None) -> FastAPI:
     hosts = allowed_hosts()
     store = auth.AuthStore(cfg.data_dir / "vitrix.db", cfg.auth) if cfg.auth.enabled and cfg.data_dir else None
     oauth = auth_api.github_oauth_from_env() if store is not None and cfg.auth.github_login else None
+    setup_token = auth_api.setup_token_for(cfg) if store is not None else None
+    if setup_token and cfg.auth.bootstrap_token == "auto" and store is not None and store.user_count() == 0:  # nosec B105
+        auth_api.announce_setup_token(setup_token, os.environ.get("VITRIX_PUBLIC_URL") or os.environ.get("VITRIX_SERVE_URL") or "http://localhost:8000")
 
     @app.middleware("http")
     async def _guard(request: Request, call_next):  # noqa: ANN001, ANN202
@@ -202,7 +215,8 @@ def create_app(config_path: str | None = None) -> FastAPI:
             response.headers.setdefault("Cache-Control", "no-store")  # account and workspace data must not be cached
         return response
 
-    auth_api.install(app, cfg, store, oauth)
+    app.state.setup_token = setup_token  # tests and embedders; never returned by any route
+    auth_api.install(app, cfg, store, oauth, setup_token)
 
     @app.exception_handler(service.ServiceError)
     def _service_error(_, exc: service.ServiceError):  # noqa: ANN001
@@ -287,6 +301,17 @@ def create_app(config_path: str | None = None) -> FastAPI:
     def coverage() -> dict:
         return flow.coverage(cfg)
 
+    @app.get("/api/drift")
+    def rule_drift(ref: str | None = None, rule: str | None = Query(default=None, max_length=300)) -> dict:
+        """Matches per rule now vs at a Git ref (default: base branch). Read-only."""
+        try:
+            with regex_budget(30):
+                return drift_mod.drift(cfg, ref.strip() if ref and ref.strip() else None, rule.strip() if rule and rule.strip() else None)
+        except drift_mod.DriftError as exc:
+            raise HTTPException(status_code=exc.status, detail=str(exc)) from None
+        except ReplayError as exc:
+            raise HTTPException(status_code=422, detail=str(exc)) from None
+
     @app.get("/api/coverage/navigator")
     def navigator() -> JSONResponse:
         return JSONResponse(flow.navigator_layer(cfg), headers={"Content-Disposition": 'attachment; filename="vitrix-attack-layer.json"'})
@@ -357,7 +382,11 @@ def create_app(config_path: str | None = None) -> FastAPI:
     @app.post("/api/ci/rules", status_code=201)
     def ci_submit_rule(req: SubmitRuleRequest, request: Request) -> dict:
         who = auth_api.who(request)
-        out = _github_errors(lambda: service.submit_rule(cfg, req.path, req.rule, req.cases, req.title, submitted_by=auth.attribution(who) if who else ""))
+        content = {("rule", req.path.strip().replace("\\", "/").strip("/")): req.rule}  # a bad path fails below
+        if req.draft_id:
+            content[("draft", req.draft_id)] = req.rule
+        trailers = reviews.trailers(content)
+        out = _github_errors(lambda: service.submit_rule(cfg, req.path, req.rule, req.cases, req.title, submitted_by=auth.attribution(who) if who else "", trailers=trailers))
         if store is not None:
             store.log(who, "rule.ci_submitted", f"{req.path} → {out['branch']} @ {out['commit'][:7]}")
         return out
@@ -428,11 +457,11 @@ def create_app(config_path: str | None = None) -> FastAPI:
         return JSONResponse(status_code=exc.status, content={"detail": str(exc)})
 
     @app.get("/api/drafts")
-    def drafts_list(request: Request) -> dict:
+    def drafts_list(request: Request, batch: str | None = None) -> dict:
         reason = drafts_off(request)
         if reason or drafts is None:
             return {"enabled": False, "reason": reason, "drafts": []}
-        return {"enabled": True, "reason": None, "drafts": [draft_json(request, r, full=False) for r in drafts.list()]}
+        return {"enabled": True, "reason": None, "drafts": [draft_json(request, r, full=False) for r in drafts.list(batch)]}
 
     @app.post("/api/drafts", status_code=201)
     def drafts_create(req: DraftRequest, request: Request) -> dict:
@@ -461,6 +490,41 @@ def create_app(config_path: str | None = None) -> FastAPI:
             raise HTTPException(status_code=403, detail="only the author or an admin can delete this draft")
         db.delete(draft_id)
         return Response(status_code=204)
+
+    app.include_router(packs_api.build_router(cfg, drafts=drafts, off=drafts_off, auth_on=store is not None))  # S6, ADR 0004
+    def draft_authors(rows: list[dict], publisher) -> list[str]:  # noqa: ANN001
+        """`Co-authored-by` for each other draft author with a GitHub-linked account (same rule as `auth.attribution`)."""
+        out: dict[int, str] = {}
+        for uid in {r["author_id"] for r in rows if r["author_id"] not in (None, publisher.user_id if publisher else None)}:
+            u = store._user("id", uid) if store is not None else None
+            if u is not None and u["github_id"] and u["github_login"]:
+                ident = auth.Identity(u["id"], u["email"], u["name"], "viewer", u["github_login"], None, u["github_id"])
+                out[uid] = next(line for line in auth.attribution(ident).splitlines() if line.startswith("Co-authored-by"))
+        return [out[k] for k in sorted(out)]
+
+    @app.post("/api/ci/drafts", status_code=201, response_model=None)
+    def ci_submit_drafts(req: SubmitDraftsRequest, request: Request):  # noqa: ANN202
+        """Publish several drafts as one `vitrix/pack-...` branch (all pass the gate, or 422 and nothing is pushed)."""
+        db = drafts_ready(request)
+        ids = list(dict.fromkeys(req.draft_ids))
+        if not all(_DRAFT_ID.match(i) for i in ids):
+            raise HTTPException(status_code=422, detail="draft_ids must be 32-character draft ids")
+        rows = [db.get(i) for i in ids]  # 404 if one is missing
+        who = auth_api.who(request)
+        trailers = draft_authors(rows, who) + reviews.trailers({k: row["rule"] for row in rows for k in (("draft", row["id"]), ("rule", row["path"])) if k[1]})
+        try:
+            out = _github_errors(lambda: service.submit_drafts(cfg, rows, req.title, submitted_by=auth.attribution(who) if who else "", trailers=trailers))
+        except HTTPException as exc:
+            blocked = getattr(exc, "blocked", None)
+            if blocked is None:
+                raise
+            return JSONResponse(status_code=422, content={"detail": exc.detail, "blocked": blocked})
+        if store is not None:
+            store.log(who, "drafts.ci_submitted", f"{len(ids)} drafts → {out['branch']} @ {out['commit'][:7]}")
+        return out
+
+    reviews = reviews_api.Reviews(cfg, store, drafts)
+    app.include_router(reviews.router)
 
     _mount_ui(app)
     return app

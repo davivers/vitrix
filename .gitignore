@@ -18,6 +18,10 @@ htmlcov/
 .ruff_cache/
 vitrix-report.md
 
+# Public demo fixtures: captured in CI (scripts/capture_demo_fixtures.py), never committed
+web/demo/public/fixtures/
+build/demo/
+
 # Local accounts database and other runtime data
 .vitrix/
 

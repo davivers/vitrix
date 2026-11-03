@@ -46,6 +46,7 @@ MIN_PASSWORD = 10
 INVITE_DAYS = 7
 MAX_FAILURES = 5
 LOCKOUT_S = 300
+SETUP_FAIL_DELAY_S = 0.5
 _EMAIL = re.compile(r"^[^@\s]{1,64}@[^@\s]{1,190}\.[^@\s]{2,}$")
 _SCRYPT = (2**14, 8, 1)  # n, r, p
 
@@ -223,6 +224,14 @@ class AuthStore:
         if count >= MAX_FAILURES:
             self._failures.pop(key, None)
         return 0.0
+
+    def check_setup_token(self, expected: str, given: str | None) -> None:
+        """First-account setup token (ADR 0002): constant-time compare. No lockout (behind Docker every client
+        shares one IP, so a lockout would let anyone block owner creation); a fixed delay per failure instead."""
+        if given and hmac.compare_digest(given.encode(), expected.encode()):
+            return
+        time.sleep(SETUP_FAIL_DELAY_S)
+        raise AuthError("This workspace needs the setup token printed when the server started.", 403)
 
     def verify_login(self, email: str, password: str, ip: str = "") -> int:
         """User id if the credentials are right. One generic error for every failure."""

@@ -306,7 +306,16 @@ export interface CoverageTactic {
   id: string;
   name: string;
   rules: number;
-  techniques: { id: string; rules: { id: string; title: string; state: State; level: string | null }[] }[];
+  techniques: { id: string; name?: string; rules: { id: string; title: string; state: State; level: string | null }[] }[];
+}
+
+/** Local MITRE ATT&CK catalogue (S7): tactics matched by TA id, techniques reference tactic ids. */
+export interface AttackCatalog {
+  version: string;
+  source?: string;
+  url?: string;
+  tactics: { id: string; name: string; order: number }[];
+  techniques: { id: string; name: string; tactics: string[]; parent?: string | null }[];
 }
 
 export interface LogsourceCoverage {
@@ -324,6 +333,7 @@ export interface Coverage {
   techniques: number;
   covered: number;
   total: number;
+  catalog?: AttackCatalog | null;
 }
 
 export interface Dataset {
@@ -437,6 +447,8 @@ export interface AuthConfig {
   bootstrap?: boolean; // no account yet: the first one becomes the owner
   registration?: "owner-bootstrap" | "invite-only"; // who may create an account without an invite
   github?: boolean; // GitHub sign-in is configured on the server
+  setup_token_required?: boolean; // no account yet and the server printed a setup link (VITRIX_BOOTSTRAP_TOKEN)
+  enabled_source?: "env" | "config" | "default";
 }
 
 export interface UserInfo {
@@ -559,4 +571,149 @@ export interface DraftBody {
   title: string | null;
   rule: string;
   cases: string | null;
+}
+
+// ── S9 drift ────────────────────────────────────────────────────────────────────────────────────────────
+export type DriftState = "more" | "fewer" | "added" | "removed" | "same";
+
+export interface DriftRuleRow {
+  rule: string;
+  title: string;
+  before: number | null; // null = not at the ref
+  after: number | null; // null = removed
+  delta: number;
+  state: DriftState;
+  error?: string | null;
+}
+
+export interface DriftReport {
+  ref: string;
+  sha: string;
+  summary: { more: number; fewer: number; added: number; removed: number; same: number; modified: number; drifted: number };
+  rules: (DriftRuleRow & { modified: boolean; datasets_changed: number })[];
+  datasets: { dataset: string; events: number; error?: string | null; rules: DriftRuleRow[] }[];
+}
+
+// ── S6 content packs ────────────────────────────────────────────────────────────────────────────────────
+export interface PackSources {
+  enabled: boolean;
+  reason: string | null;
+  sources: { id: string; name: string; url: string; license: string; refs: string[]; cached: { ref: string; size: number; sha256: string; fetched_at: string }[] }[];
+  limits: { max_rules: number; drafts_free: number | null };
+}
+
+export interface PackFilters {
+  product: string | null;
+  category: string | null;
+  service: string | null;
+  statuses: string[];
+  text: string | null;
+}
+
+export interface PackJobBody {
+  mode: "preview" | "import";
+  source: string;
+  ref: string;
+  refresh?: boolean;
+  filters: PackFilters;
+  into: string;
+  paths: string[] | null;
+  include_untested?: boolean;
+  owner?: string | null;
+}
+
+export interface PackItem {
+  path: string;
+  title: string;
+  level: string | null;
+  status: string | null;
+  logsource: string | null;
+  cases: number;
+  state: "ready" | "untested";
+  reason: string | null;
+  exists: boolean;
+  draft_id: string | null;
+}
+
+export type PackJobState = "queued" | "downloading" | "scanning" | "importing" | "done" | "failed";
+
+export interface PackJob {
+  id: string;
+  mode: "preview" | "import";
+  state: PackJobState;
+  progress: { bytes: number; total: number | null; scanned: number; matched: number; imported: number };
+  error: string | null;
+  created_at: string;
+  finished_at: string | null;
+  result: null | { matched: number; items: PackItem[]; skipped: { path: string; reason: string }[] };
+}
+
+export interface BlockedDraft {
+  id: string;
+  path: string | null;
+  reasons: string[];
+}
+
+// ── S8 reviews and comments ─────────────────────────────────────────────────────────────────────────────
+export type ReviewState = "pending" | "approved" | "changes_requested" | "cancelled";
+export interface PersonRef {
+  id: number;
+  email: string;
+  name: string;
+}
+
+export interface Review {
+  id: string;
+  target: { kind: "rule" | "draft"; ref: string; title: string; missing: boolean };
+  requester: PersonRef;
+  reviewer: PersonRef;
+  note: string | null;
+  state: ReviewState;
+  decision_note: string | null;
+  created_at: string;
+  updated_at: string;
+  decided_at: string | null;
+  version: number;
+  stale: boolean;
+  mine_to_review: boolean;
+  mine_requested: boolean;
+  governance: { owner: string | null; review_by: string | null; review_state: string | null } | null;
+}
+
+export interface ReviewComment {
+  id: string;
+  target: { kind: "rule" | "draft"; ref: string };
+  review_id: string | null;
+  author: PersonRef;
+  body: string;
+  deleted: boolean;
+  created_at: string;
+  edited_at: string | null;
+  outdated: boolean;
+  mine: boolean;
+}
+
+export interface ReviewList {
+  enabled: boolean;
+  reason: string | null;
+  reviews: Review[];
+}
+
+export interface CommentList {
+  enabled: boolean;
+  reason: string | null;
+  comments: ReviewComment[];
+}
+
+export interface ReviewCounts {
+  enabled: boolean;
+  to_review: number;
+  requested: number;
+}
+
+export interface Reviewer {
+  id: number;
+  email: string;
+  name: string;
+  role: Role;
 }

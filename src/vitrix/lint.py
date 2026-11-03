@@ -10,7 +10,7 @@ import re
 import uuid
 from dataclasses import dataclass
 
-from . import governance, routing
+from . import attack, governance, routing
 from .evaluator import UnsupportedError, check_supported, condition_refs
 from .loader import RuleFile
 
@@ -200,6 +200,8 @@ def lint_doc(doc: object, rel: str, known_targets: set[str] | None = None) -> li
             m = ATTACK_TAG.match(tag)
             if not m:
                 warn(f"MITRE tag does not follow the pattern: {tag}")
+            elif re.fullmatch(r"t\d{4}(\.\d{3})?", m.group(1)) and not attack.is_known_technique(m.group(1)):
+                warn(f"unknown ATT&CK technique: {tag} (not in ATT&CK Enterprise v{attack.catalog()['version']})")
             elif re.fullmatch(r"[a-z_]+", m.group(1)) and m.group(1) not in ATTACK_TACTICS:
                 hint = difflib.get_close_matches(m.group(1), ATTACK_TACTICS, n=1)
                 warn(f"unknown ATT&CK tactic: {tag}" + (f" (did you mean attack.{hint[0]}?)" if hint else ""))

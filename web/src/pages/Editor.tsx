@@ -4,15 +4,17 @@ import clsx from "clsx";
 import { AlertTriangle, Check, CheckCircle2, Copy, Download, Eye, FolderOpen, Loader2, Rocket, Save, ShieldCheck, XCircle } from "lucide-react";
 import { useCallback, useEffect, useMemo, useState } from "react";
 import { useNavigate, useParams, useSearchParams } from "react-router-dom";
-import { ApiError, api } from "../api";
+import { ApiError, DEMO, api } from "../api";
 import { useIsDark } from "../theme";
 import { can, useMe } from "../components/auth";
 import { yamlExtensions } from "../components/code";
 import { HealthMeter, formatDate, timeAgo } from "../components/dash";
 import { DraftsSheet } from "../components/DraftsSheet";
+import { DriftPanel } from "../components/Drift";
 import { CheckList, FlowStepper, GATE_LABELS, KindTag, fmt } from "../components/flow";
 import { PublishDialog } from "../components/PublishDialog";
 import { ReplayPanel } from "../components/ReplayPanel";
+import { ReviewPanel } from "../components/ReviewPanel";
 import { Card, ErrorBox, PageHeader, StateBadge, TargetSwatch, btnPrimary, btnSecondary } from "../components/ui";
 import type { Draft, DraftQuality, Impact, Validation } from "../types";
 import { locale, t, tn } from "../i18n";
@@ -93,7 +95,7 @@ export default function EditorPage() {
   );
 }
 
-type Panel = "gate" | "replay" | "queries" | "tests" | "impact" | "history";
+type Panel = "gate" | "replay" | "queries" | "tests" | "impact" | "history" | "drift" | "review";
 
 function EditorWorkspace(props: { ruleId: string | null; file: string | null; initialRule: string; initialCases: string; draft: Draft | null }) {
   const { ruleId, file, initialRule, initialCases } = props;
@@ -235,16 +237,18 @@ function EditorWorkspace(props: { ruleId: string | null; file: string | null; in
               aria-disabled={!isEditor || !draftsOn}
               aria-describedby={!isEditor ? "viewer-save" : draftsReason ? "drafts-off" : undefined}
               aria-busy={saveState.busy}
+              title={DEMO ? t("demo_disabled") : undefined}
               className={clsx(btnSecondary, (!isEditor || !draftsOn) && "cursor-not-allowed opacity-50")}
             >
               {saveState.busy ? <Loader2 size={16} className="animate-spin" aria-hidden /> : <Save size={16} aria-hidden />} {t("ed_save_locally")}
             </button>
             <button
               type="button"
-              onClick={() => isEditor && setPublishOpen(true)}
-              aria-disabled={!isEditor}
+              onClick={() => isEditor && !DEMO && setPublishOpen(true)}
+              aria-disabled={!isEditor || DEMO}
+              title={DEMO ? t("demo_disabled") : undefined}
               aria-describedby={!isEditor ? "viewer-publish" : undefined}
-              className={clsx(btnPrimary, !isEditor && "cursor-not-allowed opacity-50 shadow-none hover:brightness-100")}
+              className={clsx(btnPrimary, (!isEditor || DEMO) && "cursor-not-allowed opacity-50 shadow-none hover:brightness-100")}
             >
               <Rocket size={16} aria-hidden /> {t("publish")}
             </button>
@@ -315,7 +319,7 @@ function EditorWorkspace(props: { ruleId: string | null; file: string | null; in
       )}
       {publishOpen && isEditor && (
         <PublishDialog
-          mode={{ kind: "rule", ruleId, rule, cases }}
+          mode={{ kind: "rule", ruleId, rule, cases, draftId: saved?.id ?? props.draft?.id ?? null }}
           localReady={localReady}
           approval={quality ? t("ed_approved_by", { n: quality.score, req: quality.min_score ? t("ed_req_paren", { n: quality.min_score }) : "" }) : undefined}
           localDetail={quality && !quality.ready ? `Blocked: ${quality.blockers.join("; ")}` : result?.state === "fail" ? t("l_the_rule_has_lint_conversion_or_te") : undefined}
@@ -386,6 +390,8 @@ function EditorWorkspace(props: { ruleId: string | null; file: string | null; in
                       ["tests", t("l_tests")],
                       ["impact", t("l_impact")],
                       ...(ruleId ? ([["history", t("l_history")]] as const) : []),
+                      ...(ruleId ? ([["drift", t("dr_tab")]] as const) : []),
+                      ...(DEMO ? [] : ([["review", t("rv_tab")]] as const)),
                     ] as const
                   ).map(([key, label]) => (
                     <button
@@ -412,6 +418,8 @@ function EditorWorkspace(props: { ruleId: string | null; file: string | null; in
                   {panel === "tests" && <TestsPanel result={result} />}
                   {panel === "impact" && <ImpactPanel rule={rule} ruleId={ruleId} />}
                   {panel === "history" && ruleId && <HistoryPanel ruleId={ruleId} />}
+                  {panel === "drift" && ruleId && <DriftPanel ruleId={ruleId} />}
+                  {panel === "review" && <ReviewPanel kind={props.draft ? "draft" : "rule"} target={props.draft ? (saved?.id ?? props.draft.id) : ruleId} ruleText={rule} />}
                 </div>
               </Card>
             </>

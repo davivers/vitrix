@@ -16,6 +16,8 @@ Read-only: uses `git ls-tree` and `git cat-file`, never checks anything out.
 from __future__ import annotations
 
 import re
+import threading
+import time
 from pathlib import Path
 
 import yaml
@@ -30,7 +32,18 @@ _REF = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._/~^@{}-]{0,199}$")
 
 
 class DriftError(Exception):
-    pass
+    """`status` is the HTTP code the API should use: 409 not a Git repository, 422 bad/missing ref."""
+
+    def __init__(self, message: str, status: int = 422):
+        super().__init__(message)
+        self.status = status
+
+
+def _require_repo(cfg: Config) -> None:
+    try:
+        _git(cfg, "rev-parse", "--is-inside-work-tree")
+    except (HistoryError, OSError) as exc:
+        raise DriftError(f"drift needs a Git repository with at least one commit: {exc}", 409) from exc
 
 
 def default_ref(cfg: Config) -> str:
@@ -50,8 +63,12 @@ def rules_at(cfg: Config, ref: str) -> list[RuleFile]:
     if not _REF.match(ref) or ".." in ref:
         raise DriftError(f"invalid Git ref: {ref!r}")
     rules_rel = cfg.rel(cfg.rules_dir)
+    _require_repo(cfg)
     try:
         _git(cfg, "rev-parse", "--verify", "--quiet", f"{ref}^{{commit}}")
+    except (HistoryError, OSError) as exc:
+        raise DriftError(f"Git ref not found: {ref!r}") from exc
+    try:
         names = _git(cfg, "ls-tree", "-r", "--name-only", ref, "--", rules_rel).decode("utf-8", "replace").splitlines()
         names = [n for n in names if Path(n).suffix in RULE_SUFFIXES]
         blobs = _read_blobs(cfg, [f"{ref}:./{n}" for n in names])
@@ -78,8 +95,56 @@ def _state(before: int | None, after: int | None) -> str:
     return "more" if after > before else "fewer" if after < before else "same"
 
 
-def drift(cfg: Config, ref: str | None = None) -> dict:
+CACHE_SECONDS = 60
+_CACHE_MAX = 32
+_cache: dict[tuple, tuple[float, dict]] = {}
+_cache_lock = threading.Lock()
+
+
+def _stat_sig(paths) -> tuple:  # noqa: ANN001
+    sig = []
+    for p in paths:
+        try:
+            st = p.stat()
+            sig.append((str(p), st.st_mtime_ns, st.st_size))
+        except OSError:
+            continue
+    return tuple(sig)
+
+
+def _resolve(cfg: Config, ref: str) -> str:
+    """Full commit sha of `ref` (validated like rules_at)."""
+    if not _REF.match(ref) or ".." in ref:
+        raise DriftError(f"invalid Git ref: {ref!r}")
+    _require_repo(cfg)
+    try:
+        return _git(cfg, "rev-parse", "--verify", "--quiet", f"{ref}^{{commit}}").decode().strip()
+    except (HistoryError, OSError) as exc:
+        raise DriftError(f"Git ref not found: {ref!r}") from exc
+
+
+def drift(cfg: Config, ref: str | None = None, rule: str | None = None, *, clock=time.monotonic) -> dict:  # noqa: ANN001
+    """Cached for 60 s per (commit, working-tree rules, datasets, rule); identical concurrent calls
+    wait for the first one instead of each replaying everything."""
     ref = ref or default_ref(cfg)
+    full = _resolve(cfg, ref)
+    rules_sig = _stat_sig(sorted(p for p in cfg.rules_dir.rglob("*") if p.suffix in RULE_SUFFIXES)) if cfg.rules_dir.is_dir() else ()
+    key = (str(cfg.root), ref, full, rule, rules_sig, _stat_sig(dataset_files(cfg)))
+    with _cache_lock:
+        hit = _cache.get(key)
+        if hit and clock() - hit[0] < CACHE_SECONDS:
+            return hit[1]
+        out = _drift(cfg, ref, rule)
+        now = clock()
+        for k in [k for k, (t, _) in _cache.items() if now - t >= CACHE_SECONDS]:
+            del _cache[k]
+        if len(_cache) >= _CACHE_MAX:
+            _cache.pop(next(iter(_cache)))
+        _cache[key] = (now, out)
+        return out
+
+
+def _drift(cfg: Config, ref: str, rule: str | None) -> dict:
     old = rules_at(cfg, ref)
     try:
         sha = _git(cfg, "rev-parse", "--short", f"{ref}^{{commit}}").decode().strip()
@@ -88,6 +153,9 @@ def drift(cfg: Config, ref: str | None = None) -> dict:
     new, _ = _load_all(cfg) if cfg.rules_dir.is_dir() else ([], {})
     old_ids = [(rule_id(cfg, rf.path), rf) for rf in old]
     new_ids = [(rule_id(cfg, rf.path), rf) for rf in new]
+    if rule:  # only this rule is replayed
+        old_ids = [x for x in old_ids if x[0] == rule]
+        new_ids = [x for x in new_ids if x[0] == rule]
     old_text = {rid: rf.text for rid, rf in old_ids}
     new_text = {rid: rf.text for rid, rf in new_ids}
 

@@ -1,6 +1,6 @@
 import { useMutation, useQuery } from "@tanstack/react-query";
 import clsx from "clsx";
-import { GitBranch, Loader2, LogIn, Mail, UserPlus } from "lucide-react";
+import { GitBranch, KeyRound, Loader2, LogIn, Mail, UserPlus } from "lucide-react";
 import { useMemo, useState, type FormEvent } from "react";
 import { api } from "../api";
 import { Logo } from "../components/Logo";
@@ -15,6 +15,7 @@ function cleanUrl() {
   const url = new URL(window.location.href);
   url.searchParams.delete("invite");
   url.searchParams.delete("auth_error");
+  url.searchParams.delete("setup");
   window.history.replaceState({}, "", url.pathname + (url.search || "") + url.hash);
 }
 
@@ -23,17 +24,26 @@ export default function AuthPage({ onSignedIn }: { onSignedIn: (me: Me) => void 
   const config = useQuery({ queryKey: ["auth-config"], queryFn: api.authConfig });
   const invite = useMemo(() => params().get("invite"), []);
   const oauthError = useMemo(() => params().get("auth_error"), []);
+  // Setup link printed in the server log: /?setup=<token>. Read once, then stripped from the address bar.
+  const setupParam = useMemo(() => {
+    const v = params().get("setup");
+    if (v) cleanUrl();
+    return v;
+  }, []);
+  const [setupTyped, setSetupTyped] = useState("");
   const cfg = config.data;
   const canRegister = Boolean(cfg?.bootstrap || cfg?.registration === "owner-bootstrap" || invite);
   const [tab, setTab] = useState<"signin" | "register">(invite || cfg?.bootstrap ? "register" : "signin");
   const mode = cfg?.bootstrap ? "register" : canRegister ? tab : "signin";
+  const needSetup = Boolean(cfg?.bootstrap && cfg.setup_token_required);
+  const setupToken = setupParam ?? (setupTyped.trim() || null);
 
   const [email, setEmail] = useState("");
   const [name, setName] = useState("");
   const [password, setPassword] = useState("");
 
   const submit = useMutation({
-    mutationFn: () => (mode === "register" ? api.register({ email, name, password, invite }) : api.login(email, password)),
+    mutationFn: () => (mode === "register" ? api.register({ email, name, password, invite, setup_token: needSetup ? setupToken : null }) : api.login(email, password)),
     onSuccess: (me) => {
       cleanUrl();
       onSignedIn(me);
@@ -69,6 +79,16 @@ export default function AuthPage({ onSignedIn }: { onSignedIn: (me: Me) => void 
           </div>
 
           {oauthError && <ErrorBox message={oauthError} />}
+
+          {needSetup && !setupParam && (
+            <div role="note" className="space-y-1 rounded-[10px] border border-line bg-surface p-3 text-[13px] text-muted">
+              <p className="flex items-center gap-1.5 font-medium text-strong">
+                <KeyRound size={14} aria-hidden /> {t("au_setup_title")}
+              </p>
+              <p>{t("au_setup_body")}</p>
+              <code className="block rounded bg-code px-2 py-1 font-mono text-xs text-text">docker compose logs vitrix</code>
+            </div>
+          )}
 
           {canRegister && !cfg?.bootstrap && (
             <div className="grid grid-cols-2 gap-1 rounded-[10px] border border-line bg-surface p-1" role="tablist" aria-label={t("account")}>
@@ -110,6 +130,14 @@ export default function AuthPage({ onSignedIn }: { onSignedIn: (me: Me) => void 
           )}
 
           <form onSubmit={onSubmit} className="space-y-3.5">
+            {needSetup && setupParam && <input type="hidden" name="setup_token" value={setupParam} />}
+            {needSetup && !setupParam && (
+              <label className="block space-y-1.5">
+                <span className="text-[13px] font-medium text-strong">{t("au_setup_token")}</span>
+                <input value={setupTyped} onChange={(e) => setSetupTyped(e.target.value)} className={inputCls} autoComplete="off" spellCheck={false} maxLength={200} required />
+                <span className="block text-xs text-subtle">{t("au_setup_hint")}</span>
+              </label>
+            )}
             {mode === "register" && (
               <label className="block space-y-1.5">
                 <span className="text-[13px] font-medium text-strong">{t("name")}</span>

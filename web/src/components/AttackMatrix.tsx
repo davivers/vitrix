@@ -1,7 +1,7 @@
 import clsx from "clsx";
 import { ChevronDown } from "lucide-react";
 import { useState } from "react";
-import type { CoverageTactic, State } from "../types";
+import type { AttackCatalog, Coverage, CoverageTactic, State } from "../types";
 import { t, tn } from "../i18n";
 
 export interface MatrixRule {
@@ -15,6 +15,7 @@ export interface MatrixRule {
 export interface Cell {
   key: string; // unique per tactic + id
   id: string;
+  name?: string;
   rules: MatrixRule[]; // distinct
   subs: number; // folded sub-techniques (depth "Techniques")
 }
@@ -40,29 +41,30 @@ export const LEGEND = [
 
 export function buildCells(t: CoverageTactic, deep: boolean): Cell[] {
   const techs = t.techniques.filter((x) => x.id !== "—");
-  if (deep) return techs.map((x) => ({ key: `${t.slug}:${x.id}`, id: x.id, rules: x.rules, subs: 0 }));
-  const parents = new Map<string, { rules: Map<string, MatrixRule>; subs: number }>();
+  if (deep) return techs.map((x) => ({ key: `${t.slug}:${x.id}`, id: x.id, name: x.name, rules: x.rules, subs: 0 }));
+  const parents = new Map<string, { name?: string; rules: Map<string, MatrixRule>; subs: number }>();
   for (const x of techs) {
     const pid = x.id.split(".")[0];
-    const p = parents.get(pid) ?? { rules: new Map(), subs: 0 };
+    const p = parents.get(pid) ?? { name: undefined as string | undefined, rules: new Map<string, MatrixRule>(), subs: 0 };
+    if (!x.id.includes(".")) p.name = x.name;
     for (const r of x.rules) p.rules.set(r.id, r);
     if (x.id.includes(".")) p.subs += 1;
     parents.set(pid, p);
   }
-  return [...parents].map(([id, p]) => ({ key: `${t.slug}:${id}`, id, rules: [...p.rules.values()], subs: p.subs }));
+  return [...parents].map(([id, p]) => ({ key: `${t.slug}:${id}`, id, rules: [...p.rules.values()], subs: p.subs, name: p.name }));
 }
 
 function CellButton(props: { cell: Cell; max: number; selected: boolean; dim: boolean; hit: boolean; deep: boolean; onSelect: (c: Cell, el: HTMLButtonElement) => void }) {
   const { cell, max, selected, dim, hit, deep, onSelect } = props;
   const n = cell.rules.length;
   const top = cell.rules.reduce<string | null>((best, r) => (r.level && (best === null || (LEVEL_RANK[r.level] ?? -1) > (LEVEL_RANK[best] ?? -1)) ? r.level : best), null);
-  const label = `${cell.id}, ${tn("n_rules", n)}${cell.subs ? `, ${tn("n_techniques", cell.subs)}` : ""}`;
+  const label = `${cell.id}${cell.name ? ` ${cell.name}` : ""}, ${tn("n_rules", n)}${cell.subs ? `, ${tn("n_techniques", cell.subs)}` : ""}`;
   return (
     <button
       type="button"
       aria-label={label}
       aria-haspopup="dialog"
-      title={`${cell.id} · ${tn("n_rules", n)}${top ? ` · ${t("am_highest", { l: top })}` : ""}`}
+      title={`${cell.id}${cell.name ? ` ${cell.name}` : ""} · ${tn("n_rules", n)}${top ? ` · ${t("am_highest", { l: top })}` : ""}`}
       onClick={(e) => onSelect(cell, e.currentTarget)}
       className={clsx(
         "flex h-9 w-full items-center justify-between gap-2 rounded-lg border px-2.5 text-left",
@@ -87,12 +89,13 @@ export function AttackMatrix(props: {
   deep: boolean;
   hits: Set<string> | null; // cell keys matching the search; null = no search
   selected: string | null;
+  gapsOnly?: boolean; // only techniques without a rule (needs the catalogue to be meaningful)
   onSelect: (cell: Cell, el: HTMLButtonElement) => void;
 }) {
-  const { tactics, deep, hits, selected, onSelect } = props;
+  const { tactics, deep, hits, selected, gapsOnly, onSelect } = props;
   const [open, setOpen] = useState<Record<string, boolean>>({});
   const maxRules = Math.max(1, ...tactics.map((t) => t.rules));
-  const all = tactics.map((t) => ({ t, cells: buildCells(t, deep) }));
+  const all = tactics.map((t) => ({ t, cells: buildCells(t, deep).filter((c) => !gapsOnly || c.rules.length === 0) }));
   const maxCell = Math.max(0, ...all.flatMap((x) => x.cells.map((c) => c.rules.length)));
 
   return (
@@ -132,11 +135,35 @@ export function AttackMatrix(props: {
                   <CellButton cell={c} max={maxCell} selected={selected === c.key} dim={hits !== null && !hits.has(c.key)} hit={hits !== null && hits.has(c.key)} deep={deep} onSelect={onSelect} />
                 </li>
               ))}
-              {cells.length === 0 && <li className="col-span-2 rounded-lg border border-dashed border-line px-2.5 py-3 text-center text-[11.5px] text-subtle">{t("no_coverage")}</li>}
+              {cells.length === 0 && <li className="col-span-2 rounded-lg border border-dashed border-line px-2.5 py-3 text-center text-[11.5px] text-subtle">{gapsOnly ? t("cv_no_gaps") : t("no_coverage")}</li>}
             </ul>
           </li>
         );
       })}
     </ol>
   );
+}
+
+/**
+ * Full matrix from the local catalogue: tactics matched by TA id (a catalogue-only tactic such as TA0112
+ * has no rules), every catalogue technique is a cell, uncovered ones with no rules. A technique counts as covered
+ * when any rule cites it, whichever tactic the rule file filed it under.
+ */
+export function mergeCatalog(data: Coverage, catalog: AttackCatalog): { tactics: CoverageTactic[]; total: number; covered: number } {
+  const byId = new Map(data.tactics.map((x) => [x.id, x]));
+  const rulesOf = new Map<string, MatrixRule[]>();
+  for (const tac of data.tactics) for (const x of tac.techniques) if (x.id !== "—") rulesOf.set(x.id.toUpperCase(), x.rules);
+  const known = new Set(catalog.techniques.map((x) => x.id));
+  const tactics = [...catalog.tactics]
+    .sort((a, b) => a.order - b.order)
+    .map((tac) => {
+      const cov = byId.get(tac.id);
+      const own = catalog.techniques.filter((x) => x.tactics.includes(tac.id)).map((x) => ({ id: x.id, name: x.name, rules: rulesOf.get(x.id) ?? [] }));
+      const extra = (cov?.techniques ?? []).filter((x) => x.id !== "—" && !known.has(x.id.toUpperCase())); // cited by a rule, absent from the catalogue
+      const techniques = [...own, ...extra];
+      const rules = new Set(techniques.flatMap((x) => x.rules.map((r) => r.id)));
+      return { slug: cov?.slug ?? tac.id.toLowerCase(), id: tac.id, name: tac.name, rules: rules.size, techniques };
+    });
+  const covered = catalog.techniques.filter((x) => (rulesOf.get(x.id)?.length ?? 0) > 0).length;
+  return { tactics, total: catalog.techniques.length, covered };
 }

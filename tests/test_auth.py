@@ -227,7 +227,7 @@ def test_everything_except_the_public_routes_needs_a_session(tmp_path):
 def test_auth_off_keeps_the_local_mode_unchanged(tmp_path):
     c = make_client(tmp_path, extra="")
     assert c.get("/api/rules").status_code == 200
-    assert c.get("/api/auth/config").json() == {"enabled": False}
+    assert c.get("/api/auth/config").json() == {"enabled": False, "enabled_source": "default", "setup_token_required": False}
     assert c.get("/api/auth/me").json()["authenticated"] is True
     assert c.post("/api/auth/login", json={"email": "a@b.co", "password": "x"}).status_code in (404, 405)
 
@@ -510,3 +510,193 @@ def test_attribution_never_injects_header_lines():
     lines = auth.attribution(ident).splitlines()
     assert len(lines) == 2 and lines[0].startswith("Submitted-by: ") and lines[1].endswith("<99+eve@users.noreply.github.com>")
     assert "<boss@x.io>" not in chr(10).join(lines)
+
+
+# --------------------------------------------------------------------------- S2: VITRIX_AUTH + setup token (ADR 0002)
+
+
+def _d(tmp_path, name):
+    (tmp_path / name).mkdir()
+    return tmp_path / name
+
+
+def _cfg(tmp_path, extra=""):
+    return load_config(make_project(tmp_path, extra_cfg=extra))
+
+
+def test_env_beats_file_beats_default(tmp_path, monkeypatch, capsys):
+    monkeypatch.delenv("VITRIX_AUTH", raising=False)
+    assert _cfg(_d(tmp_path, "a")).auth.enabled is False
+    assert _cfg(_d(tmp_path, "a2")).auth.enabled_source == "default"
+    assert _cfg(_d(tmp_path, "b"), AUTH_ON).auth.enabled_source == "config"
+    monkeypatch.setenv("VITRIX_AUTH", "ON")
+    c = _cfg(_d(tmp_path, "c"))
+    assert c.auth.enabled is True and c.auth.enabled_source == "env"
+    monkeypatch.setenv("VITRIX_AUTH", "off")
+    d = _cfg(_d(tmp_path, "d"), AUTH_ON)  # operator decision, with a warning
+    assert d.auth.enabled is False and d.auth.enabled_source == "env"
+    assert "overrides auth.enabled" in capsys.readouterr().err
+    monkeypatch.setenv("VITRIX_AUTH", "")  # empty = unset
+    assert _cfg(_d(tmp_path, "e"), AUTH_ON).auth.enabled_source == "config"
+
+
+@pytest.mark.parametrize("bad", ["maybe", "2", "enabled"])
+def test_invalid_vitrix_auth_is_a_config_error(tmp_path, monkeypatch, bad):
+    monkeypatch.setenv("VITRIX_AUTH", bad)
+    with pytest.raises(ConfigError, match="VITRIX_AUTH"):
+        _cfg(tmp_path)
+
+
+def test_vitrix_auth_env_turns_accounts_on_and_reports_the_source(tmp_path, monkeypatch):
+    monkeypatch.setenv("VITRIX_AUTH", "on")
+    c = make_client(tmp_path, extra="")
+    cfg = c.get("/api/auth/config").json()
+    assert cfg["enabled"] is True and cfg["enabled_source"] == "env" and cfg["setup_token_required"] is False
+    assert c.get("/api/rules").status_code == 401
+
+
+def test_short_explicit_bootstrap_token_is_a_config_error(tmp_path, monkeypatch):
+    monkeypatch.setenv("VITRIX_BOOTSTRAP_TOKEN", "short")
+    with pytest.raises(ConfigError, match="VITRIX_BOOTSTRAP_TOKEN"):
+        _cfg(tmp_path, AUTH_ON)
+
+
+EXPLICIT = "an-explicit-setup-token-123"
+
+
+def _first(c, token=None):
+    return c.post("/api/auth/register", json={"email": "o@example.com", "name": "O", "password": PW, "setup_token": token})
+
+
+def test_setup_token_gates_the_first_account(tmp_path, monkeypatch):
+    monkeypatch.setenv("VITRIX_BOOTSTRAP_TOKEN", EXPLICIT)
+    c = make_client(tmp_path)
+    assert c.get("/api/auth/config").json()["setup_token_required"] is True
+    for token in (None, "wrong", EXPLICIT[:-1]):
+        assert _first(c, token).status_code == 403
+    assert c.get("/api/auth/config").json()["bootstrap"] is True  # nothing was created
+    r = _first(c, EXPLICIT)
+    assert r.status_code == 201 and r.json()["user"]["role"] == "owner"
+    # once the owner exists the token is irrelevant: an invitation is all a second person needs
+    assert c.get("/api/auth/config").json()["setup_token_required"] is False
+    token = invite_token(c, "e@example.com")
+    assert register(second_client(tmp_path, c), "e@example.com", "E", invite=token).status_code == 201
+
+
+def test_setup_token_failures_are_delayed_not_locked_out(tmp_path, monkeypatch):
+    """Behind Docker all clients share one IP: bad guesses must never lock the real owner out."""
+    monkeypatch.setenv("VITRIX_BOOTSTRAP_TOKEN", EXPLICIT)
+    monkeypatch.setattr(auth, "SETUP_FAIL_DELAY_S", 0.01)
+    c = make_client(tmp_path)
+    assert [_first(c, f"guess-{i}").status_code for i in range(auth.MAX_FAILURES * 2)] == [403] * (auth.MAX_FAILURES * 2)
+    assert _first(c, EXPLICIT).status_code == 201
+
+
+def test_setup_token_failure_waits_a_fixed_delay(tmp_path, monkeypatch):
+    monkeypatch.setenv("VITRIX_BOOTSTRAP_TOKEN", EXPLICIT)
+    slept = []
+    monkeypatch.setattr(auth.time, "sleep", slept.append)
+    _first(make_client(tmp_path), "nope")
+    assert slept == [auth.SETUP_FAIL_DELAY_S]
+
+
+def test_auto_token_is_generated_per_start_and_announced_on_stderr(tmp_path, monkeypatch, capsys):
+    monkeypatch.setenv("VITRIX_BOOTSTRAP_TOKEN", "auto")
+    monkeypatch.setenv("VITRIX_SERVE_URL", "http://localhost:8123")
+    c = make_client(tmp_path)
+    token = c.app.state.setup_token
+    assert len(token) >= 24 and token != "auto"
+    assert f"http://localhost:8123/?setup={token}" in capsys.readouterr().err
+    assert register(c).status_code == 403
+    assert _first(c, token).status_code == 201
+    assert make_client(_d(tmp_path, "other")).app.state.setup_token != token  # fresh on every start
+
+
+def test_explicit_token_is_never_printed(tmp_path, monkeypatch, capsys):
+    monkeypatch.setenv("VITRIX_BOOTSTRAP_TOKEN", EXPLICIT)
+    make_client(tmp_path)
+    captured = capsys.readouterr()
+    assert EXPLICIT not in captured.err and EXPLICIT not in captured.out
+
+
+def test_no_token_configured_keeps_first_account_wins(tmp_path, monkeypatch):
+    monkeypatch.delenv("VITRIX_BOOTSTRAP_TOKEN", raising=False)
+    c = make_client(tmp_path)
+    assert c.get("/api/auth/config").json()["setup_token_required"] is False
+    assert register(c).status_code == 201
+
+
+def test_token_never_appears_in_responses_or_audit(tmp_path, monkeypatch):
+    monkeypatch.setenv("VITRIX_BOOTSTRAP_TOKEN", EXPLICIT)
+    c = make_client(tmp_path)
+    seen = [c.get("/api/auth/config").text, c.get("/api/auth/me").text, _first(c, "guess-xyz").text]
+    r = _first(c, EXPLICIT)
+    audit = c.get("/api/workspace/audit").text
+    seen += [r.text, str(dict(r.headers)), c.get("/api/auth/config").text, c.get("/api/workspace").text, audit, c.get("/api/config").text]
+    assert not any(EXPLICIT in s for s in seen)
+    assert "guess-xyz" not in audit
+    rows = sqlite3.connect(tmp_path / ".vitrix" / "vitrix.db").execute("SELECT actor, action, detail FROM audit").fetchall()
+    assert not any(EXPLICIT in " ".join(map(str, row)) or "guess-xyz" in " ".join(map(str, row)) for row in rows)
+    assert any(row[1] == "setup.failed" for row in rows)
+
+
+def test_github_cannot_create_the_first_account_while_a_token_is_required(tmp_path, monkeypatch):
+    monkeypatch.setenv("VITRIX_BOOTSTRAP_TOKEN", EXPLICIT)
+    c = make_client(tmp_path, monkeypatch=monkeypatch, oauth=GitHubOAuth("cid", "secret"))
+    r = c.get("/api/auth/github/start", follow_redirects=False)
+    assert r.status_code == 409 and "setup token" in r.json()["detail"]
+    r = c.get("/api/auth/github/callback?code=x&state=y", follow_redirects=False)
+    assert r.status_code == 302 and "auth_error" in r.headers["location"]
+    assert c.get("/api/auth/config").json()["bootstrap"] is True
+
+
+# --------------------------------------------------------------------------- S4/S6/S8/S9: roles of the new routes
+
+ROLE_MATRIX = [
+    ("GET", "/api/drift", "viewer"),
+    ("GET", "/api/packs/sources", "viewer"),
+    ("GET", "/api/packs/jobs/abc", "viewer"),
+    ("POST", "/api/packs/jobs", "editor"),
+    ("POST", "/api/ci/drafts", "editor"),
+    ("GET", "/api/reviews", "viewer"),
+    ("GET", "/api/reviews/counts", "viewer"),
+    ("GET", "/api/reviews/reviewers", "viewer"),
+    ("GET", "/api/reviews/abc", "viewer"),
+    ("POST", "/api/reviews", "editor"),
+    ("POST", "/api/reviews/abc/decision", "editor"),
+    ("POST", "/api/reviews/abc/rerequest", "editor"),
+    ("POST", "/api/reviews/abc/cancel", "editor"),
+    ("GET", "/api/comments", "viewer"),
+    ("POST", "/api/comments", "viewer"),
+    ("PATCH", "/api/comments/abc", "viewer"),
+    ("DELETE", "/api/comments/abc", "viewer"),
+    ("POST", "/api/comments-evil", "admin"),  # the prefix is "/api/comments/", not "/api/comments"
+    ("POST", "/api/packs/other", "admin"),  # unclassified writes stay admin
+    ("DELETE", "/api/packs/jobs/abc", "admin"),
+    ("PUT", "/api/reviews-x", "admin"),
+]
+
+
+@pytest.mark.parametrize(("method", "path", "role"), ROLE_MATRIX)
+def test_required_role_for_new_routes(method, path, role):
+    assert auth_api.required_role(method, path) == role
+
+
+def test_new_routes_are_allowed_and_denied_by_role_at_the_middleware(tmp_path):
+    """The guard answers 401 (no session), 403 (role too low) or lets the request through (anything else)."""
+    owner = make_client(tmp_path)
+    assert register(owner).status_code == 201
+    people = {}
+    for r in ("viewer", "editor", "admin"):
+        person = second_client(tmp_path, owner)
+        assert register(person, f"{r}@example.com", r.title(), invite=invite_token(owner, f"{r}@example.com", r)).status_code == 201
+        people[r] = person
+    people["owner"] = owner
+    anonymous = second_client(tmp_path, owner)
+    for method, path, need in ROLE_MATRIX:
+        body = {} if method != "GET" else None
+        assert anonymous.request(method, path, json=body).status_code == 401, (method, path)
+        for role, person in people.items():
+            resp = person.request(method, path, json=body)
+            denied = resp.status_code == 403 and resp.json()["detail"].startswith("This needs the")
+            assert denied == (auth.ROLE_LEVEL[role] < auth.ROLE_LEVEL[need]), (method, path, role, resp.status_code)

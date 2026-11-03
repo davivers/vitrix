@@ -20,6 +20,9 @@ COPY --from=build /dist/*.whl /tmp/
 RUN pip install "$(ls /tmp/*.whl)[api]" && rm /tmp/*.whl
 RUN useradd --create-home --uid 1000 vitrix && mkdir /workspace && chown vitrix /workspace
 USER vitrix
+# Accounts are on in the image (ADR 0002): the first screen is "create the owner", and drafts work.
+# `auto` prints a one-time setup link in the container logs; whoever has it creates the owner.
+ENV VITRIX_AUTH=on VITRIX_BOOTSTRAP_TOKEN=auto
 WORKDIR /workspace
 EXPOSE 8000
 HEALTHCHECK --interval=30s --timeout=5s --start-period=10s --retries=3 \

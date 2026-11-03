@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import os
+import sys
 import warnings
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -74,6 +76,30 @@ class AuthConfig:
     session_days: int = 14
     github_login: bool = True  # offer "Continue with GitHub" when VITRIX_GITHUB_CLIENT_ID/SECRET are set
     workspace_name: str = "Detection workspace"
+    enabled_source: str = "default"  # where `enabled` came from: "env" (VITRIX_AUTH) | "config" (vitrix.yml) | "default"
+    bootstrap_token: str | None = None  # VITRIX_BOOTSTRAP_TOKEN: None, "auto" or an explicit value (never serialised)
+
+
+_TRUE, _FALSE = ("on", "1", "true", "yes"), ("off", "0", "false", "no")
+MIN_BOOTSTRAP_TOKEN = 16
+
+
+def _apply_auth_env(auth: AuthConfig, present: dict) -> None:
+    """Environment overrides (ADR 0002): VITRIX_AUTH beats vitrix.yml beats the default; bad values are config errors."""
+    auth.enabled_source = "config" if present and "enabled" in present else "default"
+    raw = os.environ.get("VITRIX_AUTH", "").strip().lower()
+    if raw:
+        if raw not in _TRUE + _FALSE:
+            raise ConfigError("VITRIX_AUTH must be on or off (also 1/0, true/false, yes/no)")
+        value = raw in _TRUE
+        if auth.enabled and not value:
+            print("warning: VITRIX_AUTH=off overrides auth.enabled: true in vitrix.yml; the API has no accounts.", file=sys.stderr)
+        auth.enabled, auth.enabled_source = value, "env"
+    token = os.environ.get("VITRIX_BOOTSTRAP_TOKEN", "").strip()
+    if token:
+        if token != "auto" and len(token) < MIN_BOOTSTRAP_TOKEN:  # nosec B105
+            raise ConfigError(f"VITRIX_BOOTSTRAP_TOKEN must be 'auto' or at least {MIN_BOOTSTRAP_TOKEN} characters")
+        auth.bootstrap_token = token
 
 
 _RETIRED_AUTH_KEYS = ("allow_signup", "signup_role")
@@ -104,6 +130,12 @@ def _parse_auth(data: object) -> AuthConfig:
     return auth
 
 
+def _auth_with_env(data: object) -> AuthConfig:
+    auth = _parse_auth(data)
+    _apply_auth_env(auth, data if isinstance(data, dict) else {})
+    return auth
+
+
 @dataclass
 class Config:
     root: Path
@@ -123,6 +155,7 @@ class Config:
     auth: AuthConfig = field(default_factory=AuthConfig)
     data_dir: Path | None = None  # accounts database etc. (default: <root>/.vitrix)
     drafts_enabled: bool = True  # local drafts in <data_dir>/drafts.db (drafts.enabled)
+    reviews_enabled: bool = True  # comments and review requests in <data_dir>/reviews.db (reviews.enabled; needs accounts)
 
     def rel(self, path: Path) -> str:
         """Path relative to the project root, for messages."""
@@ -212,6 +245,14 @@ def parse_config_text(text: str, root: Path, name: str = "vitrix.yml") -> Config
     if not isinstance(raw_drafts, dict) or not isinstance(raw_drafts.get("enabled", True), bool):
         raise ConfigError("'drafts' must be a mapping (or false) and drafts.enabled must be true or false")
 
+    raw_reviews = data.get("reviews")
+    if raw_reviews is None:
+        raw_reviews = {}
+    elif raw_reviews is False:
+        raw_reviews = {"enabled": False}
+    if not isinstance(raw_reviews, dict) or not isinstance(raw_reviews.get("enabled", True), bool):
+        raise ConfigError("'reviews' must be a mapping (or false) and reviews.enabled must be true or false")
+
     return Config(
         root=root,
         rules_dir=root / data.get("rules_dir", "rules"),
@@ -226,7 +267,8 @@ def parse_config_text(text: str, root: Path, name: str = "vitrix.yml") -> Config
         github_source=github_source,
         datasets_dir=root / data.get("datasets_dir", "datasets"),
         gate=_parse_gate(data.get("quality_gate")),
-        auth=_parse_auth(data.get("auth")),
+        auth=_auth_with_env(data.get("auth")),
         data_dir=root / data.get("data_dir", ".vitrix"),
         drafts_enabled=raw_drafts.get("enabled", True),
+        reviews_enabled=raw_reviews.get("enabled", True),
     )

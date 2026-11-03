@@ -9,6 +9,20 @@ description = "Detection-as-Code: valida, converte e testa regras Sigma sem prec
 readme = "README.md"
 requires-python = ">=3.10,<3.15"
 license = { text = "MIT" }
+keywords = ["sigma", "detection-as-code", "siem", "detection-engineering", "security", "threat-detection"]
+classifiers = [
+  "Development Status :: 3 - Alpha",
+  "Intended Audience :: Information Technology",
+  "License :: OSI Approved :: MIT License",
+  "Operating System :: OS Independent",
+  "Programming Language :: Python :: 3",
+  "Programming Language :: Python :: 3.10",
+  "Programming Language :: Python :: 3.11",
+  "Programming Language :: Python :: 3.12",
+  "Programming Language :: Python :: 3.13",
+  "Programming Language :: Python :: 3.14",
+  "Topic :: Security",
+]
 dependencies = [
   "pysigma>=1.0",
   "pysigma-backend-splunk>=2.0",
@@ -24,6 +38,11 @@ dependencies = [
 api = ["fastapi>=0.110", "uvicorn>=0.29"]
 dev = ["pytest>=8", "pytest-cov>=5", "fastapi>=0.110", "uvicorn>=0.29", "httpx>=0.27", "ruff>=0.6", "bandit>=1.7"]
 
+[project.urls]
+Homepage = "https://github.com/davivers/vitrix"
+Repository = "https://github.com/davivers/vitrix"
+Issues = "https://github.com/davivers/vitrix/issues"
+
 [project.scripts]
 vitrix = "vitrix.cli:main"
 
@@ -38,7 +57,7 @@ vitrix = "vitrix.cli:main"
 where = ["src"]
 
 [tool.setuptools.package-data]
-vitrix = ["ui/*", "ui/assets/*", "template/*", "template/*/*", "template/*/*/*", "template/*/*/*/*"]
+vitrix = ["ui/**", "template/**", "data/**"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]

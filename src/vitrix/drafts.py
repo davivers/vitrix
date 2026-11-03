@@ -38,19 +38,17 @@ CREATE TABLE IF NOT EXISTS drafts (
   author_name TEXT,
   created_at REAL NOT NULL,
   updated_at REAL NOT NULL,
-  version INTEGER NOT NULL DEFAULT 1
+  version INTEGER NOT NULL DEFAULT 1,
+  source TEXT,
+  batch_id TEXT
 );
 CREATE INDEX IF NOT EXISTS drafts_by_updated ON drafts (workspace_id, updated_at DESC);
 """
 
-_LIST = (
-    "SELECT id, path, title, rule, cases, base_hash, author_id, author_email, author_name, created_at, updated_at, version"
-    " FROM drafts WHERE workspace_id=? ORDER BY updated_at DESC, created_at DESC"
-)
-_GET = (
-    "SELECT id, path, title, rule, cases, base_hash, author_id, author_email, author_name, created_at, updated_at, version"
-    " FROM drafts WHERE id=? AND workspace_id=?"
-)
+
+_LIST = "SELECT id, path, title, rule, cases, base_hash, author_id, author_email, author_name, created_at, updated_at, version, source, batch_id FROM drafts WHERE workspace_id=?"
+_ORDER = " ORDER BY updated_at DESC, created_at DESC"
+_GET = "SELECT id, path, title, rule, cases, base_hash, author_id, author_email, author_name, created_at, updated_at, version, source, batch_id FROM drafts WHERE id=? AND workspace_id=?"
 
 
 class DraftError(Exception):
@@ -76,6 +74,13 @@ def resolve_title(title: str | None, rule: str, path: str | None) -> str:
     return (path or DEFAULT_TITLE)[:MAX_TITLE]
 
 
+def content_hash(text: str) -> str:
+    """SHA-256 of rule text with the BOM stripped and CRLF/CR turned into LF, so a file edited on Windows
+    and the same text sent from the browser compare equal (reviews, staleness, trailers)."""
+    text = text.removeprefix("\ufeff").replace("\r\n", "\n").replace("\r", "\n")
+    return hashlib.sha256(text.encode("utf-8")).hexdigest()
+
+
 def rule_hash(rules_dir: Path, path: str | None) -> str | None:
     """SHA-256 of `rules/<path>` (a path already normalised by `service.normalize_rule_path`), or None."""
     if not path:
@@ -84,7 +89,7 @@ def rule_hash(rules_dir: Path, path: str | None) -> str | None:
     target = (root / path).resolve()
     if not target.is_relative_to(root) or not target.is_file():
         return None
-    return hashlib.sha256(target.read_bytes()).hexdigest()
+    return content_hash(target.read_bytes().decode("utf-8", errors="replace"))
 
 
 def iso(ts: float) -> str:
@@ -111,6 +116,10 @@ class DraftStore:
             self._db = sqlite3.connect(str(self.path), check_same_thread=False, isolation_level=None)
             self._db.row_factory = sqlite3.Row
             self._db.executescript(_SCHEMA)
+            have = {r["name"] for r in self._db.execute("PRAGMA table_info(drafts)")}
+            for col in ("source", "batch_id"):  # migration of databases created before packs import
+                if col not in have:
+                    self._db.execute(f"ALTER TABLE drafts ADD COLUMN {col} TEXT")
         return self._db
 
     def _q(self, sql: str, args: tuple = ()) -> list[dict]:
@@ -118,8 +127,10 @@ class DraftStore:
             db = self._conn(create=False)
             return [dict(r) for r in db.execute(sql, args).fetchall()] if db else []
 
-    def list(self) -> list[dict]:
-        return self._q(_LIST, (self.workspace_id,))
+    def list(self, batch_id: str | None = None) -> list[dict]:
+        if batch_id is not None:
+            return self._q(_LIST + " AND batch_id=?" + _ORDER, (self.workspace_id, batch_id))
+        return self._q(_LIST + _ORDER, (self.workspace_id,))
 
     def get(self, draft_id: str) -> dict:
         rows = self._q(_GET, (draft_id, self.workspace_id))
@@ -128,23 +139,39 @@ class DraftStore:
         return rows[0]
 
     def create(self, *, path: str | None, title: str | None, rule: str, cases: str | None, base_hash: str | None,
-               author: dict | None = None) -> dict:
+               author: dict | None = None, source: str | None = None, batch_id: str | None = None) -> dict:
         """`author` is {"id","email","name"} or None (accounts off). Max 100 drafts per author."""
+        item = {"path": path, "title": title, "rule": rule, "cases": cases, "base_hash": base_hash, "source": source, "batch_id": batch_id}
+        return self.get(self.create_many([item], author=author)[0])
+
+    def create_many(self, items: list[dict], *, author: dict | None = None) -> list[str]:
+        """Insert drafts in ONE transaction (pack imports); all or nothing. Each item has `rule` and
+        optionally path/title/cases/base_hash/source/batch_id. The per-author quota counts the whole
+        batch: over it, 409 and nothing is stored. Returns the new ids in order."""
         author_id = author["id"] if author else None
         now = self._now()
-        draft_id = uuid.uuid4().hex
+        ids = [uuid.uuid4().hex for _ in items]
         with self._lock:
             db = self._conn(create=True)
             used = db.execute("SELECT COUNT(*) FROM drafts WHERE workspace_id=? AND author_id IS ?", (self.workspace_id, author_id)).fetchone()[0]
-            if used >= MAX_PER_AUTHOR:
+            if used + len(items) > MAX_PER_AUTHOR:
                 raise DraftError(f"draft limit reached ({MAX_PER_AUTHOR}); delete some first", 409)
-            db.execute(
-                "INSERT INTO drafts (id, workspace_id, path, title, rule, cases, base_hash, author_id, author_email, author_name, created_at, updated_at)"
-                " VALUES (?,?,?,?,?,?,?,?,?,?,?,?)",
-                (draft_id, self.workspace_id, path, resolve_title(title, rule, path), rule, cases, base_hash, author_id,
-                 author["email"] if author else None, author["name"] if author else None, now, now),
-            )
-        return self.get(draft_id)
+            db.execute("BEGIN IMMEDIATE")
+            try:
+                for draft_id, it in zip(ids, items, strict=True):
+                    path = it.get("path")
+                    db.execute(
+                        "INSERT INTO drafts (id, workspace_id, path, title, rule, cases, base_hash, author_id, author_email, author_name,"
+                        " created_at, updated_at, source, batch_id) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+                        (draft_id, self.workspace_id, path, resolve_title(it.get("title"), it["rule"], path), it["rule"], it.get("cases"),
+                         it.get("base_hash"), author_id, author["email"] if author else None, author["name"] if author else None,
+                         now, now, it.get("source"), it.get("batch_id")),
+                    )
+                db.execute("COMMIT")
+            except Exception:
+                db.execute("ROLLBACK")
+                raise
+        return ids
 
     def update(self, draft_id: str, *, path: str | None, title: str | None, rule: str, cases: str | None,
                base_hash: str | None, version: int) -> dict:
@@ -178,6 +205,8 @@ def public(row: dict, *, current_hash: str | None, me_id: int | None, auth_on: b
         "created_at": iso(row["created_at"]),
         "updated_at": iso(row["updated_at"]),
         "version": row["version"],
+        "source": row.get("source"),
+        "batch_id": row.get("batch_id"),
         "stale": bool(row["path"]) and current_hash != row["base_hash"],
         "mine": row["author_id"] in (None, me_id) if auth_on else True,  # authorless drafts are shared
     }

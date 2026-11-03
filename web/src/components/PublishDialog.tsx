@@ -27,7 +27,7 @@ gh auth login                       # once: GitHub CLI login, used as the token
 vitrix connect your-org/your-repo   # links the folder and checks the CI, step by step
 vitrix serve`;
 
-type Mode = { kind: "rule"; ruleId: string | null; rule: string; cases: string } | { kind: "config"; text: string };
+type Mode = { kind: "rule"; ruleId: string | null; rule: string; cases: string; draftId?: string | null } | { kind: "config"; text: string };
 
 interface Props {
   mode: Mode;
@@ -80,7 +80,7 @@ export function PublishDialog({ mode, localReady, localDetail, approval, onClose
   const submit = useMutation({
     mutationFn: () =>
       mode.kind === "rule"
-        ? api.submitRule({ path: path.trim(), rule: mode.rule, cases: mode.cases.trim() ? mode.cases : null, title: title.trim() || null })
+        ? api.submitRule({ path: path.trim(), rule: mode.rule, cases: mode.cases.trim() ? mode.cases : null, title: title.trim() || null, draft_id: mode.draftId ?? null })
         : api.submitConfig({ text: mode.text, title: title.trim() || null }),
   });
   const sub = submit.data;

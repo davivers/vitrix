@@ -19,6 +19,7 @@ from . import auth
 from .auth import AuthError, AuthStore, GitHubOAuth, Identity
 from .config import Config
 
+SETUP_OAUTH_MESSAGE = "The first account must be created with the setup token; register with email and password."
 PUBLIC = {
     "/api/health",
     "/api/auth/config",
@@ -31,7 +32,12 @@ PUBLIC = {
 # POSTs that only COMPUTE and write nothing (disk, GitHub): any signed-in viewer may use them.
 VIEWER_POSTS = {"/api/regex", "/api/validate", "/api/impact", "/api/replay", "/api/replay/draft", "/api/config/validate"}
 # POSTs that write or publish (CI, pull requests, local drafts): editor and above.
-EDITOR_POSTS = {"/api/ci/rules", "/api/pull-requests", "/api/drafts"}
+EDITOR_POSTS = {"/api/ci/rules", "/api/ci/drafts", "/api/pull-requests", "/api/drafts", "/api/packs/jobs", "/api/reviews"}
+# Writes any signed-in viewer may do: comments change no rule (ADR 0005). Author/admin checks live in the routes.
+VIEWER_WRITES = {"/api/comments"}
+VIEWER_WRITE_PREFIXES = ("/api/comments/",)  # PATCH / DELETE one comment
+# Non-GET under these prefixes need editor: review decisions, re-requests, cancels. Reviewer/requester checks are in the route.
+EDITOR_WRITE_PREFIXES = ("/api/drafts/", "/api/reviews/")
 
 
 def required_role(method: str, path: str) -> str:
@@ -42,10 +48,10 @@ def required_role(method: str, path: str) -> str:
         return "viewer"  # logout, password: any signed-in person
     if method in ("GET", "HEAD"):
         return "viewer"
-    if path.startswith("/api/drafts/"):  # PUT/DELETE a draft; author-or-admin is checked in the route
-        return "editor"
-    if path in VIEWER_POSTS:
+    if path in VIEWER_POSTS or path in VIEWER_WRITES or path.startswith(VIEWER_WRITE_PREFIXES):
         return "viewer"
+    if path.startswith(EDITOR_WRITE_PREFIXES):  # PUT/DELETE a draft, review decisions; ownership checked in the route
+        return "editor"
     return "editor" if path in EDITOR_POSTS else "admin"
 
 
@@ -76,6 +82,7 @@ class RegisterRequest(BaseModel):
     name: str = Field(max_length=100)
     password: str = Field(max_length=256)
     invite: str | None = Field(default=None, max_length=100)
+    setup_token: str | None = Field(default=None, max_length=200)
 
 
 class LoginRequest(BaseModel):
@@ -107,6 +114,21 @@ class WorkspaceRequest(BaseModel):
 def github_oauth_from_env() -> GitHubOAuth | None:
     cid, secret = os.environ.get("VITRIX_GITHUB_CLIENT_ID", "").strip(), os.environ.get("VITRIX_GITHUB_CLIENT_SECRET", "").strip()
     return GitHubOAuth(cid, secret) if cid and secret else None
+
+
+def setup_token_for(cfg: Config) -> str | None:
+    """The token the first account must present, or None. `auto` is generated in memory per server start."""
+    mode = cfg.auth.bootstrap_token
+    if not cfg.auth.enabled or not mode:
+        return None
+    return secrets.token_urlsafe(24) if mode == "auto" else mode
+
+
+def announce_setup_token(token: str, base_url: str) -> None:
+    """One line on stderr with the setup link (only for generated tokens; explicit ones are never printed)."""
+    import sys
+
+    print(f"Vitrix setup: open {base_url.rstrip('/')}/?setup={token} to create the workspace owner.", file=sys.stderr, flush=True)
 
 
 def _secure(request: Request) -> bool:
@@ -143,14 +165,20 @@ def _fail(exc: AuthError) -> HTTPException:
 # --------------------------------------------------------------------------- routes
 
 
-def install(app: FastAPI, cfg: Config, store: AuthStore | None, oauth: GitHubOAuth | None) -> None:
-    """Always serves /api/auth/config and /api/auth/me (the UI asks them first); the rest only when enabled."""
+def install(app: FastAPI, cfg: Config, store: AuthStore | None, oauth: GitHubOAuth | None, setup_token: str | None = None) -> None:
+    """Always serves /api/auth/config and /api/auth/me (the UI asks them first); the rest only when enabled.
+
+    `setup_token`: while no account exists, registration needs it (ADR 0002); irrelevant afterwards.
+    """
+
+    def setup_required() -> bool:
+        return bool(setup_token) and store is not None and store.user_count() == 0
 
     @app.get("/api/auth/config")
     def auth_config() -> dict:
         if store is None:
-            return {"enabled": False}
-        return {"enabled": True, "workspace": store.workspace_name, "bootstrap": store.user_count() == 0,
+            return {"enabled": False, "enabled_source": cfg.auth.enabled_source, "setup_token_required": False}  # nosec B105
+        return {"enabled": True, "enabled_source": cfg.auth.enabled_source, "setup_token_required": setup_required(), "workspace": store.workspace_name, "bootstrap": store.user_count() == 0,
                 "registration": "owner-bootstrap" if store.user_count() == 0 else "invite-only", "github": oauth is not None and cfg.auth.github_login}
 
     @app.get("/api/auth/me")
@@ -164,6 +192,12 @@ def install(app: FastAPI, cfg: Config, store: AuthStore | None, oauth: GitHubOAu
 
     @app.post("/api/auth/register", status_code=201)
     def register(req: RegisterRequest, request: Request) -> JSONResponse:
+        if setup_required():
+            try:
+                store.check_setup_token(setup_token, req.setup_token)  # type: ignore[arg-type]
+            except AuthError as exc:
+                store.log("setup-token", "setup.failed", f"ip {_client_ip(request)}")
+                raise _fail(exc) from None
         try:
             ident = auth.register_local(store, req.email, req.name, req.password, req.invite)
         except AuthError as exc:
@@ -210,6 +244,8 @@ def install(app: FastAPI, cfg: Config, store: AuthStore | None, oauth: GitHubOAu
     def github_start(request: Request, invite: str | None = None) -> Response:
         if oauth is None or not cfg.auth.github_login:
             raise HTTPException(status_code=404, detail="GitHub sign-in is not configured.")
+        if setup_required():
+            raise HTTPException(status_code=409, detail=SETUP_OAUTH_MESSAGE)
         state = secrets.token_urlsafe(24)
         response = RedirectResponse(oauth.authorize_url(state, _public_url(request) + "/api/auth/github/callback"), status_code=302)
         # state (+ optional invite token) in an HttpOnly cookie: the callback must present the same state
@@ -231,6 +267,8 @@ def install(app: FastAPI, cfg: Config, store: AuthStore | None, oauth: GitHubOAu
         expected, _, invite = cookie.partition(".")
         if error or not code or not expected or not hmac.compare_digest(expected, state):
             return back("The GitHub sign-in could not be verified. Start again.")  # state mismatch = possible CSRF
+        if setup_required():  # the first account must come with the setup token, which OAuth cannot carry
+            return back(SETUP_OAUTH_MESSAGE)
         try:
             profile = oauth.profile(code, _public_url(request) + "/api/auth/github/callback")
             uid = auth.login_github(store, profile, invite or None)

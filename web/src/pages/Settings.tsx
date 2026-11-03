@@ -112,7 +112,7 @@ function CheckResult({ check, pending, dirty }: { check: ConfigCheck | null; pen
 
 export default function SettingsPage() {
   const config = useQuery({ queryKey: ["config"], queryFn: api.config });
-  const health = useQuery({ queryKey: ["health"], queryFn: () => fetch("/api/health").then((r) => r.json() as Promise<{ version: string }>) });
+  const health = useQuery({ queryKey: ["health"], queryFn: api.health });
   const [text, setText] = useState<string | null>(null);
   const [check, setCheck] = useState<ConfigCheck | null>(null);
   const [pending, setPending] = useState(false);

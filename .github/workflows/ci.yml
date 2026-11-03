@@ -13,8 +13,8 @@ jobs:
   test:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-python@v5
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5
         with:
           python-version: '3.12'
       - run: pip install -e ".[dev]"
@@ -31,12 +31,21 @@ jobs:
       run:
         working-directory: web
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-node@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
         with:
           node-version: 22
           cache: npm
           cache-dependency-path: web/package-lock.json
+      - name: UI sources must use LF line endings
+        working-directory: .
+        run: |
+          bad="$(grep -rlI "$(printf '\r')" web/src web/index.html || true)"
+          if [ -n "$bad" ]; then
+            echo "CR (CRLF) bytes found; they leak into the built src/vitrix/ui. Convert to LF (see .editorconfig / .gitattributes):"
+            echo "$bad"
+            exit 1
+          fi
       - run: npm ci
       - run: npm run build
       - name: Is the committed build in src/vitrix/ui up to date?
@@ -54,8 +63,8 @@ jobs:
   user-journey:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-python@v5
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5
         with:
           python-version: '3.12'
       - name: Install the built package
@@ -86,7 +95,7 @@ jobs:
   docker:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
       - run: docker build -t vitrix:ci .
       - run: docker run --rm vitrix:ci --help
       - name: Init and check inside the container
@@ -101,3 +110,10 @@ jobs:
           for i in $(seq 1 30); do curl -sf http://localhost:8124/api/health && break; sleep 1; done
           curl -sf http://localhost:8124/ | grep -q '<div id="root">'
           docker exec vx python -c "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8000/api/health', timeout=4)"
+      - name: First-run smoke (accounts on, setup token, owner, draft, unauthenticated refused)
+        run: |
+          docker logs vx > "$RUNNER_TEMP/vx.log" 2>&1
+          python3 scripts/docker_smoke.py http://127.0.0.1:8124 "$RUNNER_TEMP/vx.log"
+      - name: Container logs on failure
+        if: failure()
+        run: docker logs vx 2>&1 | sed -E 's/setup=[A-Za-z0-9_-]+/setup=<redacted>/' | tail -50

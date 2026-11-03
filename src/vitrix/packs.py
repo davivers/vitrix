@@ -18,7 +18,14 @@ cases cannot be generated (regex, unsupported modifiers, correlation) is skipped
 
 from __future__ import annotations
 
+import hashlib
 import io
+import json
+import os
+import re
+import stat
+import tempfile
+import time
 import urllib.request
 import zipfile
 from dataclasses import dataclass, field
@@ -27,7 +34,8 @@ from pathlib import Path, PurePosixPath
 import yaml
 
 from .config import Config
-from .evaluator import UnsupportedError, _selections, check_supported, evaluate, exclusion_selections
+from .evaluator import UnsupportedError, _selections, check_supported, evaluate, exclusion_selections, regex_budget
+from .service import ChangeError, normalize_rule_path
 
 SIGMAHQ_URL = "https://github.com/SigmaHQ/sigma/archive/refs/heads/master.zip"
 _ALLOWED_PREFIXES = ("https://github.com/", "https://codeload.github.com/")
@@ -49,38 +57,162 @@ class PackResult:
 
 # --------------------------------------------------------------------------- reading the source
 
+MAX_ENTRIES = 20_000  # archive members
+MAX_RULE_BYTES = 1_000_000  # per .yml, counted while reading (never the declared size)
+MAX_TOTAL_READ = 100 * 1024 * 1024  # all rule text read from one archive
+MAX_RATIO = 100  # uncompressed : compressed per member; above it the member is skipped
+SIGMAHQ_REPO = "https://github.com/SigmaHQ/sigma"
+REF_RE = re.compile(r"^(master|r\d{4}-\d{2}-\d{2})$")
+MASTER_TTL = 24 * 3600
+DOWNLOAD_DEADLINE = 600  # seconds, whole download
+_CHUNK = 1024 * 1024
 
-def _download(url: str) -> bytes:
+
+class _SafeRedirect(urllib.request.HTTPRedirectHandler):
+    def redirect_request(self, req, fp, code, msg, headers, newurl):  # noqa: ANN001, ANN201
+        if not newurl.startswith(_ALLOWED_PREFIXES):
+            raise PackError(f"redirected outside GitHub: {newurl[:80]}")
+        return super().redirect_request(req, fp, code, msg, headers, newurl)
+
+
+def _open_url(url: str):  # noqa: ANN202
+    """Open a GitHub archive URL (the only network access of this module; tests replace it)."""
     if not url.startswith(_ALLOWED_PREFIXES):
         raise PackError("only GitHub archive URLs (https://github.com/...) are accepted")
     req = urllib.request.Request(url, headers={"User-Agent": "vitrix"})
+    return urllib.request.build_opener(_SafeRedirect).open(req, timeout=120)  # nosec B310
+
+
+def _download_file(url: str, dest_dir: Path, progress=None, clock=time.monotonic) -> tuple[Path, str, int]:  # noqa: ANN001
+    """Stream `url` into a UNIQUE temp file in `dest_dir` (never memory). Returns (file, sha256, size);
+    the caller renames or deletes it. Bounded by MAX_DOWNLOAD and a total deadline (the socket
+    timeout alone only limits each read)."""
+    dest_dir.mkdir(parents=True, exist_ok=True)
+    fd, name = tempfile.mkstemp(prefix=".dl-", suffix=".part", dir=dest_dir)
+    tmp = Path(name)
+    digest, size, deadline = hashlib.sha256(), 0, clock() + DOWNLOAD_DEADLINE
     try:
-        # URL checked above (https GitHub only); the redirect target is checked below
-        with urllib.request.urlopen(req, timeout=120) as res:  # nosec B310
+        with os.fdopen(fd, "wb") as fh, _open_url(url) as res:
             if not res.geturl().startswith(_ALLOWED_PREFIXES):
                 raise PackError(f"redirected outside GitHub: {res.geturl()[:80]}")
-            data = res.read(MAX_DOWNLOAD + 1)
+            length = res.headers.get("Content-Length") if getattr(res, "headers", None) else None
+            total = int(length) if length and str(length).isdigit() else None
+            if total and total > MAX_DOWNLOAD:
+                raise PackError("archive larger than 200 MB")
+            while chunk := res.read(_CHUNK):
+                size += len(chunk)
+                if size > MAX_DOWNLOAD:
+                    raise PackError("archive larger than 200 MB")
+                if clock() > deadline:
+                    raise PackError(f"download took longer than {DOWNLOAD_DEADLINE} s")
+                digest.update(chunk)
+                fh.write(chunk)
+                if progress:
+                    progress(size, total)
+        if not zipfile.is_zipfile(tmp):
+            raise PackError("the download is not a zip archive")
     except OSError as exc:
+        tmp.unlink(missing_ok=True)
         raise PackError(f"could not download {url}: {exc}") from exc
-    if len(data) > MAX_DOWNLOAD:
-        raise PackError("archive larger than 200 MB")
-    return data
+    except BaseException:
+        tmp.unlink(missing_ok=True)
+        raise
+    return tmp, digest.hexdigest(), size
 
 
-def _from_zip(data: bytes, folder: str) -> dict[str, str]:
-    """{path inside <folder>/: text} of every .yml in the archive."""
+def archive_url(ref: str) -> str:
+    if not REF_RE.match(ref):
+        raise PackError("ref must be 'master' or a release tag like r2025-01-31")
+    kind = "heads" if ref == "master" else "tags"
+    return f"{SIGMAHQ_REPO}/archive/refs/{kind}/{ref}.zip"
+
+
+def cache_paths(cache_dir: Path, ref: str) -> tuple[Path, Path]:
+    if not REF_RE.match(ref):
+        raise PackError("invalid ref")
+    return cache_dir / f"sigmahq-{ref}.zip", cache_dir / f"sigmahq-{ref}.json"
+
+
+def cache_meta(cache_dir: Path, ref: str) -> dict | None:
+    zip_path, meta_path = cache_paths(cache_dir, ref)
+    try:
+        meta = json.loads(meta_path.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return None
+    return meta if zip_path.is_file() and isinstance(meta, dict) else None
+
+
+def cached_refs(cache_dir: Path) -> list[dict]:
+    out = []
+    for meta_path in sorted(cache_dir.glob("sigmahq-*.json")) if cache_dir.is_dir() else []:
+        ref = meta_path.stem.removeprefix("sigmahq-")
+        meta = REF_RE.match(ref) and cache_meta(cache_dir, ref)
+        if meta:
+            out.append({"ref": ref, "size": meta.get("size"), "sha256": meta.get("sha256"), "fetched_at": meta.get("fetched_at")})
+    return out
+
+
+def fetch_sigmahq(cache_dir: Path, ref: str = "master", refresh: bool = False, progress=None, now=time.time, clock=time.monotonic) -> Path:  # noqa: ANN001
+    """The cached SigmaHQ archive for `ref`, downloading it (streamed to .part, then renamed) when
+    missing, forced (`refresh`) or, for `master`, older than 24 h. `progress(bytes, total|None)`."""
+    url = archive_url(ref)
+    zip_path, meta_path = cache_paths(cache_dir, ref)
+    meta = cache_meta(cache_dir, ref)
+    if meta and not refresh and (ref != "master" or now() - float(meta.get("fetched_at_ts", 0)) < MASTER_TTL):
+        return zip_path
+    cache_dir.mkdir(parents=True, exist_ok=True)
+    part, sha, size = _download_file(url, cache_dir, progress, clock)
+    try:
+        os.replace(part, zip_path)  # atomic: readers see the old archive or the new one
+    finally:
+        part.unlink(missing_ok=True)
+    ts = now()
+    meta_path.write_text(json.dumps({"url": url, "ref": ref, "sha256": sha, "size": size,
+                                     "fetched_at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime(ts)),
+                                     "fetched_at_ts": ts}), encoding="utf-8")
+    return zip_path
+
+
+def _is_symlink(info: zipfile.ZipInfo) -> bool:
+    return stat.S_ISLNK(info.external_attr >> 16)
+
+
+def _from_zip(data: bytes | Path, folder: str) -> dict[str, str]:
+    """{path inside <folder>/: text} of every .yml in the archive. Nothing is extracted: members are
+    read in memory, bounded by what is ACTUALLY read (not the declared size), and names never reach disk."""
     out: dict[str, str] = {}
-    with zipfile.ZipFile(io.BytesIO(data)) as zf:
-        for info in zf.infolist():
-            if info.is_dir() or not info.filename.endswith((".yml", ".yaml")) or info.file_size > 1_000_000:
+    total = 0
+    try:
+        zf = zipfile.ZipFile(io.BytesIO(data) if isinstance(data, bytes) else data)
+    except zipfile.BadZipFile as exc:
+        raise PackError("not a valid zip archive") from exc
+    with zf:
+        infos = zf.infolist()
+        if len(infos) > MAX_ENTRIES:
+            raise PackError("archive has too many entries")
+        for info in infos:
+            name = info.filename
+            if (info.is_dir() or not name.endswith((".yml", ".yaml")) or _is_symlink(info) or name.startswith("/")
+                    or "\\" in name or info.flag_bits & 0x1):
                 continue
-            parts = PurePosixPath(info.filename).parts
+            if info.compress_size and info.file_size / info.compress_size > MAX_RATIO:
+                continue
+            parts = PurePosixPath(name).parts
+            if not parts or ':' in parts[0]:  # drive-style names
+                continue
             # archives from GitHub have one top folder (sigma-master/rules/...)
             for i in range(min(2, len(parts))):
                 if parts[i] == folder:
                     rel = PurePosixPath(*parts[i + 1:])
-                    if ".." not in rel.parts:
-                        out[rel.as_posix()] = zf.read(info).decode("utf-8", "replace")
+                    if rel.parts and ".." not in rel.parts:
+                        with zf.open(info) as fh:
+                            raw = fh.read(MAX_RULE_BYTES + 1)
+                        if len(raw) > MAX_RULE_BYTES:
+                            break
+                        total += len(raw)
+                        if total > MAX_TOTAL_READ:
+                            raise PackError("archive content is too large (over 100 MB of rules)")
+                        out[rel.as_posix()] = raw.decode("utf-8", "replace")
                     break
     return out
 
@@ -92,10 +224,10 @@ def _from_dir(root: Path, folder: str) -> dict[str, str]:
 
 
 def read_source(source: str, folder: str = "rules") -> dict[str, str]:
-    if source == "sigmahq":
-        return _from_zip(_download(SIGMAHQ_URL), folder)
-    if source.startswith("https://"):
-        return _from_zip(_download(source), folder)
+    if source == "sigmahq" or source.startswith("https://"):
+        with tempfile.TemporaryDirectory(prefix="vitrix-pack-") as tmp:
+            archive, _, _ = _download_file(SIGMAHQ_URL if source == "sigmahq" else source, Path(tmp))
+            return _from_zip(archive, folder)
     path = Path(source)
     if path.is_dir():
         return _from_dir(path, folder)
@@ -218,55 +350,124 @@ def _matches(doc: dict, product: str | None, category: str | None, service: str 
     return True
 
 
-def import_pack(cfg: Config, source: str, *, into: str = "sigmahq", product: str | None = None, category: str | None = None,
-                service: str | None = None, statuses: tuple[str, ...] = ("stable", "test"), text: str | None = None,
-                limit: int | None = None, owner: str | None = None, include_untested: bool = False,
-                force: bool = False, dry_run: bool = False, folder: str = "rules") -> PackResult:
+@dataclass
+class Candidate:
+    path: str  # <into>/<rel>, validated by service.normalize_rule_path
+    rel: str
+    title: str
+    level: str | None
+    status: str | None
+    logsource: dict
+    text: str
+    cases: list | None
+    state: str  # "ready" | "untested"
+    reason: str
+    exists: bool
+
+    def public(self) -> dict:
+        return {"path": self.path, "title": self.title, "level": self.level, "status": self.status,
+                "logsource": self.logsource, "cases": len(self.cases or []), "state": self.state,
+                "reason": self.reason, "exists": self.exists}
+
+
+def iter_candidates(files: dict[str, str], *, product: str | None = None, category: str | None = None,
+                    service: str | None = None, statuses: tuple[str, ...] | list[str] | None = ("stable", "test"),
+                    text: str | None = None, into: str = "sigmahq", rules_dir: Path | None = None,
+                    only: set[str] | None = None, skipped: list[dict] | None = None):
+    """Yield a Candidate for every rule that passes the filters (pure: no disk writes, nothing executed).
+    Cases are generated and verified here; each rule's regex time is budgeted."""
     into_rel = PurePosixPath(into)
     if into_rel.is_absolute() or ".." in into_rel.parts:
-        raise PackError("--into must be a folder inside rules/")
-    files = read_source(source, folder)
-    if not files:
-        raise PackError(f"no Sigma rules found in {source} (folder {folder}/)")
-    result = PackResult()
+        raise PackError("'into' must be a folder inside rules/")
     status_set = {s.lower() for s in statuses} if statuses else None
     for rel in sorted(files):
-        if limit is not None and len(result.imported) >= limit:
-            break
-        text_ = files[rel]
+        raw = files[rel]
         try:
-            docs = [d for d in yaml.safe_load_all(text_) if d is not None]
+            rid = normalize_rule_path((into_rel / rel).as_posix())
+        except ChangeError as exc:
+            if skipped is not None:
+                skipped.append({"path": rel, "reason": str(exc)})
+            continue
+        if only is not None and rid not in only:
+            continue
+        try:
+            docs = [d for d in yaml.safe_load_all(raw) if d is not None]
         except yaml.YAMLError:
-            result.skipped.append({"path": rel, "reason": "invalid YAML"})
+            if skipped is not None:
+                skipped.append({"path": rid, "reason": "invalid YAML"})
             continue
         doc = next((d for d in docs if isinstance(d, dict) and "detection" in d), None)
         if doc is None or not _matches(doc, product, category, service, status_set, text):
             continue
-        result.matched += 1
-        dest = cfg.rules_dir / into_rel / rel
-        cases_dest = cfg.cases_dir / into_rel / rel
-        rid = (into_rel / rel).as_posix()
-        if dest.exists() and not force:
-            result.skipped.append({"path": rid, "reason": "already exists (use --force)"})
-            continue
         try:
-            cases = generate_cases(doc) if len(docs) == 1 else None
-            state = "ready" if cases else "untested"
-            reason = "multi-document rule" if cases is None else ""
+            with regex_budget():
+                cases = generate_cases(doc) if len(docs) == 1 else None
+            state, reason = ("ready", "") if cases else ("untested", "multi-document rule")
         except UnsupportedError as exc:
             cases, state, reason = None, "untested", str(exc)
-        if cases is None and not include_untested:
-            result.skipped.append({"path": rid, "reason": f"no test cases could be generated ({reason})"})
+        ls = doc.get("logsource") if isinstance(doc.get("logsource"), dict) else {}
+        yield Candidate(path=rid, rel=rel, title=str(doc.get("title", rel)), level=doc.get("level"),
+                        status=doc.get("status"), logsource={k: str(v) for k, v in ls.items()}, text=raw,
+                        cases=cases, state=state, reason=reason,
+                        exists=bool(rules_dir and (rules_dir / rid).exists()))
+
+
+def scan(files: dict[str, str], *, limit: int | None = None, **kwargs) -> list[Candidate]:  # noqa: ANN003
+    out = []
+    for cand in iter_candidates(files, **kwargs):
+        out.append(cand)
+        if limit is not None and len(out) >= limit:
+            break
+    return out
+
+
+def cases_text(cases: list) -> str:
+    return HEADER + yaml.safe_dump({"cases": cases}, sort_keys=False, allow_unicode=True)
+
+
+def with_owner(raw: str, owner: str | None) -> str:
+    """The rule text plus a `vitrix: owner:` block when the rule has none (single-document rules)."""
+    if not owner:
+        return raw
+    try:
+        docs = [d for d in yaml.safe_load_all(raw) if d is not None]
+    except yaml.YAMLError:
+        return raw
+    if len(docs) != 1 or not isinstance(docs[0], dict) or "vitrix" in docs[0]:
+        return raw
+    return raw.rstrip("\n") + f"\nvitrix:\n  owner: {yaml.safe_dump(owner, default_flow_style=True).strip().removesuffix('...').strip()}\n"
+
+
+def import_pack(cfg: Config, source: str, *, into: str = "sigmahq", product: str | None = None, category: str | None = None,
+                service: str | None = None, statuses: tuple[str, ...] = ("stable", "test"), text: str | None = None,
+                limit: int | None = None, owner: str | None = None, include_untested: bool = False,
+                force: bool = False, dry_run: bool = False, folder: str = "rules") -> PackResult:
+    """CLI writer: `scan` plus files in rules/ and cases/ (the API never does this; it makes drafts)."""
+    files = read_source(source, folder)
+    if not files:
+        raise PackError(f"no Sigma rules found in {source} (folder {folder}/)")
+    result = PackResult()
+    skipped: list[dict] = []
+    for cand in iter_candidates(files, product=product, category=category, service=service, statuses=statuses,
+                                text=text, into=into, rules_dir=cfg.rules_dir, skipped=skipped):
+        if limit is not None and len(result.imported) >= limit:
+            break
+        result.matched += 1
+        if cand.exists and not force:
+            result.skipped.append({"path": cand.path, "reason": "already exists (use --force)"})
             continue
-        rule_text = text_
-        if owner and "vitrix" not in doc and len(docs) == 1:
-            rule_text = rule_text.rstrip("\n") + f"\nvitrix:\n  owner: {yaml.safe_dump(owner, default_flow_style=True).strip().removesuffix('...').strip()}\n"
+        if cand.cases is None and not include_untested:
+            result.skipped.append({"path": cand.path, "reason": f"no test cases could be generated ({cand.reason})"})
+            continue
         if not dry_run:
+            dest = cfg.rules_dir / cand.path
             dest.parent.mkdir(parents=True, exist_ok=True)
-            dest.write_text(rule_text, encoding="utf-8")
-            if cases:
+            dest.write_text(with_owner(cand.text, owner), encoding="utf-8")
+            if cand.cases:
+                cases_dest = cfg.cases_dir / cand.path
                 cases_dest.parent.mkdir(parents=True, exist_ok=True)
-                cases_dest.write_text(HEADER + yaml.safe_dump({"cases": cases}, sort_keys=False, allow_unicode=True), encoding="utf-8")
-        result.imported.append({"id": rid, "title": str(doc.get("title", rel)), "level": doc.get("level"),
-                                "cases": len(cases or []), "state": state, "reason": reason})
+                cases_dest.write_text(cases_text(cand.cases), encoding="utf-8")
+        result.imported.append({"id": cand.path, "title": cand.title, "level": cand.level,
+                                "cases": len(cand.cases or []), "state": cand.state, "reason": cand.reason})
+    result.skipped = skipped + result.skipped
     return result

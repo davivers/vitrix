@@ -1,14 +1,9 @@
 import { useQuery } from "@tanstack/react-query";
 import { Copy, Download, FileJson, FileText, RefreshCw, Route } from "lucide-react";
 import { useState } from "react";
+import { api } from "../api";
 import { Card, ErrorBox, PageHeader, btnSecondary } from "../components/ui";
 import { t } from "../i18n";
-
-async function fetchText(url: string): Promise<string> {
-  const res = await fetch(url);
-  if (!res.ok) throw new Error(`${res.status} ${res.statusText}`);
-  return res.text();
-}
 
 function download(name: string, text: string, type: string) {
   const url = URL.createObjectURL(new Blob([text], { type }));
@@ -20,7 +15,7 @@ function download(name: string, text: string, type: string) {
 }
 
 export default function ReportsPage() {
-  const md = useQuery({ queryKey: ["report-md"], queryFn: () => fetchText("/api/report?format=md") });
+  const md = useQuery({ queryKey: ["report-md"], queryFn: () => api.report("md") });
   const [copied, setCopied] = useState(false);
   const stamp = new Date().toISOString().slice(0, 10);
 
@@ -54,7 +49,7 @@ export default function ReportsPage() {
             <button
               type="button"
               className={btnSecondary}
-              onClick={async () => download(`vitrix-report-${stamp}.json`, await fetchText("/api/report?format=json"), "application/json")}
+              onClick={async () => download(`vitrix-report-${stamp}.json`, await api.report("json"), "application/json")}
             >
               <FileJson size={14} aria-hidden /> .json
             </button>
