@@ -38,7 +38,37 @@ MAX_SAMPLE = 20  # indexes of matching events, per rule
 
 
 class ReplayError(Exception):
-    """Invalid dataset or expectations file."""
+    """Invalid dataset, expectations file or draft rule. `code`/`hint` feed the structured API error."""
+
+    def __init__(self, message: str, code: str = "invalid-rule", hint: str | None = None):
+        super().__init__(message)
+        self.code, self.hint = code, hint
+
+    def payload(self) -> dict:
+        return {"code": self.code, "message": str(self), "hint": self.hint}
+
+
+def error_payload(exc: Exception, **where: object) -> dict:
+    """Structured replay error `{code, message, hint, path?, line?, ...}` for a dataset / case / rule.
+
+    Codes: `unsupported` (outside the local evaluator's subset), `regex-timeout`, `bad-dataset`,
+    `invalid-rule`, `internal`. Never a raw exception string without a hint."""
+    from .evaluator import RegexError  # local: keeps the module header light
+
+    msg = " ".join(str(exc).split())
+    if isinstance(exc, ReplayError):
+        code, hint = exc.code, exc.hint
+    elif ("timed out" in msg or "budget exhausted" in msg) and (isinstance(exc, RegexError) or msg.startswith("regex ")):
+        code = "regex-timeout"
+        hint = "A |re pattern backtracks too much. Avoid nested quantifiers such as (a+)+ and test it in the Regex Workbench."
+    elif isinstance(exc, RegexError):
+        code, hint = "invalid-regex", "Fix the |re pattern (see the Regex Workbench for the exact position of the error)."
+    elif isinstance(exc, UnsupportedError):
+        code = "unsupported"
+        hint = "Replay evaluates a subset of Sigma locally. Simplify the unsupported part, or test the converted query in your SIEM."
+    else:
+        code, hint = "invalid-rule", "The detection section could not be evaluated; check its structure against the Sigma specification."
+    return {"code": code, "message": msg, **{k: v for k, v in where.items() if v is not None}, "hint": hint}
 
 
 def load_events(text: str, name: str = "dataset") -> list[dict]:
@@ -57,16 +87,16 @@ def load_events(text: str, name: str = "dataset") -> list[dict]:
             try:
                 data = yaml.safe_load(text)
             except yaml.YAMLError as exc:
-                raise ReplayError(f"{name}: not valid JSON, JSON Lines or YAML ({exc})") from exc
+                raise ReplayError(f"{name}: not valid JSON, JSON Lines or YAML ({exc})", code="bad-dataset", hint="Valid formats: JSON list, JSON Lines (one event per line) or YAML; every event must be a mapping of fields.") from exc
     if isinstance(data, dict):
         data = data.get("events", [data])
     if not isinstance(data, list):
-        raise ReplayError(f"{name}: expected a list of events")
+        raise ReplayError(f"{name}: expected a list of events", code="bad-dataset", hint="Valid formats: JSON list, JSON Lines (one event per line) or YAML; every event must be a mapping of fields.")
     if len(data) > MAX_EVENTS:
-        raise ReplayError(f"{name}: {len(data)} events; the limit is {MAX_EVENTS}")
+        raise ReplayError(f"{name}: {len(data)} events; the limit is {MAX_EVENTS}", code="bad-dataset", hint="Valid formats: JSON list, JSON Lines (one event per line) or YAML; every event must be a mapping of fields.")
     bad = next((i for i, e in enumerate(data, 1) if not isinstance(e, dict)), None)
     if bad:
-        raise ReplayError(f"{name}: event {bad} is not a mapping of fields")
+        raise ReplayError(f"{name}: event {bad} is not a mapping of fields", code="bad-dataset", hint="Valid formats: JSON list, JSON Lines (one event per line) or YAML; every event must be a mapping of fields.")
     return data  # type: ignore[return-value]
 
 
@@ -153,9 +183,9 @@ def load_expectations(path: Path) -> tuple[dict[str, dict], int | None]:
     try:
         data = yaml.safe_load(epath.read_text(encoding="utf-8")) or {}
     except yaml.YAMLError as exc:
-        raise ReplayError(f"{epath.name}: invalid YAML ({exc})") from exc
+        raise ReplayError(f"{epath.name}: invalid YAML ({exc})", code="bad-expectation", hint="Use `expect: {rule: count}` or `{min, max}`, and an integer `others`.") from exc
     if not isinstance(data, dict) or not isinstance(data.get("expect", {}), dict):
-        raise ReplayError(f"{epath.name}: use 'expect: {{rule: count}}'")
+        raise ReplayError(f"{epath.name}: use 'expect: {{rule: count}}'", code="bad-expectation", hint="Use `expect: {rule: count}` or `{min, max}`, and an integer `others`.")
     rules: dict[str, dict] = {}
     for rule, spec in (data.get("expect") or {}).items():
         if isinstance(spec, int) and not isinstance(spec, bool):
@@ -163,10 +193,10 @@ def load_expectations(path: Path) -> tuple[dict[str, dict], int | None]:
         elif isinstance(spec, dict) and set(spec) <= {"min", "max"} and all(isinstance(v, int) for v in spec.values()):
             rules[str(rule)] = {"min": spec.get("min", 0), "max": spec.get("max")}
         else:
-            raise ReplayError(f"{epath.name}: the expectation for {rule} must be a number or {{min, max}}")
+            raise ReplayError(f"{epath.name}: the expectation for {rule} must be a number or {{min, max}}", code="bad-expectation", hint="Use `expect: {rule: count}` or `{min, max}`, and an integer `others`.")
     others = data.get("others")
     if others is not None and (not isinstance(others, int) or isinstance(others, bool)):
-        raise ReplayError(f"{epath.name}: 'others' must be a number")
+        raise ReplayError(f"{epath.name}: 'others' must be a number", code="bad-expectation", hint="Use `expect: {rule: count}` or `{min, max}`, and an integer `others`.")
     return rules, others
 
 
@@ -224,61 +254,156 @@ def list_dataset_info(cfg: Config) -> list[dict]:
     return out
 
 
-def replay_draft(cfg: Config, rule_text: str, names: list[str] | None = None, path: str | None = None) -> dict:
-    """Run an unsaved rule (YAML text) against datasets. `names` None = all.
+def case_selections(docs: list, event: dict) -> list[dict]:
+    """Per selection of the rule: did it match this event and, per field, what was expected vs. found."""
+    from .cases import _field_matches, _lookup  # noqa: PLC0415  (same helpers `explain` uses)
+    from .evaluator import _eval_selection, _selections, exclusion_selections
+
+    out: list[dict] = []
+    for doc in docs:
+        excl = exclusion_selections(doc)
+        for sname, sel in _selections(doc).items():
+            fields: list[dict] = []
+            if isinstance(sel, dict):
+                for spec, raw in sel.items():
+                    field = str(spec).split("|")[0]
+                    found, actual = _lookup(event, field)
+                    fields.append({"field": str(spec), "expected": raw, "actual": actual if found else None,
+                                   "present": found, "matched": _field_matches(str(spec), raw, event)})
+                matched = all(f["matched"] for f in fields) if fields else True
+            else:
+                try:
+                    matched = bool(_eval_selection(sel, event))
+                except UnsupportedError:
+                    matched = False
+            out.append({"name": sname, "exclusion": sname in excl, "matched": matched, "fields": fields})
+    return out
+
+
+def _run_cases(cfg: Config, cases_text: str | None, path: str | None, detection_docs: list) -> tuple[list[dict], list[dict]]:
+    """Cases (events with an expectation) of the draft, evaluated against the draft. Returns (cases, problems)."""
+    from .cases import case_kind, cases_path, parse_cases, run_cases  # noqa: PLC0415
+    from .service import resolve_rule  # noqa: PLC0415
+
+    if cases_text is None and path:
+        saved = resolve_rule(cfg, path)
+        cpath = cases_path(cfg, RuleFile(saved, path, "", [])) if saved else None
+        cases_text = cpath.read_text(encoding="utf-8") if cpath and cpath.is_file() else None
+    if not cases_text or not cases_text.strip():
+        return [], []
+    valid, problems = parse_cases(cases_text, "cases", path or "<editor>")
+    results, more = run_cases(cfg, path or "<editor>", detection_docs, valid, problems)
+    out = []
+    for case, r in zip(valid, results, strict=False):
+        error = None
+        if r.error:
+            error = error_payload(UnsupportedError(r.error))
+        out.append({
+            "name": r.name, "kind": case_kind(case), "expected": r.expect, "matched": None if r.got == "error" else r.got == "match",
+            "passed": r.passed, "hint": r.hint, "error": error, "error_text": r.error, "event": case["event"],
+            "selections": case_selections(detection_docs, case["event"]) if r.got != "error" else [],
+        })
+    return out, [{"severity": i.severity, "code": i.code, "message": i.message, "hint": i.hint, "line": i.line, "column": i.column}
+                 for i in more]
+
+
+def _matching(docs: list, events: list[dict]) -> list[int]:
+    return [i for i, e in enumerate(events, 1) if any(evaluate(d, e) for d in docs)]
+
+
+def replay_draft(cfg: Config, rule_text: str, names: list[str] | None = None, path: str | None = None,
+                 cases_text: str | None = None, compare: bool = False) -> dict:
+    """Run an unsaved rule (YAML text) against datasets (and its cases). `names` None = all.
 
     `path` is the rule id used to look the draft up in `<dataset>.expect.yml` (an existing rule
     being edited); without it a dataset's `others` limit, if any, still applies.
-    Raises ReplayError for bad input (invalid YAML, no detection, unknown dataset, too large).
+    `cases_text` is the cases YAML of the draft (default: the saved cases file of `path`).
+    `compare` adds `before` / `added` / `removed` per dataset against the saved version of `path`.
+    Raises ReplayError (code `invalid-rule` / `bad-dataset`) for bad input; per-dataset failures
+    come back as `error: {code, message, hint}` (old string in `error_text`).
     """
     if len(rule_text) > MAX_DRAFT_YAML:
-        raise ReplayError(f"the rule is larger than {MAX_DRAFT_YAML} characters")
+        raise ReplayError(f"the rule is larger than {MAX_DRAFT_YAML} characters", hint="Split the rule or remove generated content.")
     try:
         docs = [d for d in yaml.safe_load_all(rule_text) if d is not None]
     except yaml.YAMLError as exc:
-        raise ReplayError(f"the rule is not valid YAML: {exc}") from exc
+        raise ReplayError(f"the rule is not valid YAML: {exc}", hint="Fix the YAML syntax (indent with spaces, `:` after keys).") from exc
     if not any(isinstance(d, dict) and "detection" in d for d in docs):
-        raise ReplayError("the rule has no 'detection' section")
+        raise ReplayError("the rule has no 'detection' section", hint="Add `detection:` with at least one selection and a `condition`.")
     if names is None:
         paths = dataset_files(cfg)
     else:
         if len(names) > MAX_DRAFT_DATASETS:
-            raise ReplayError(f"at most {MAX_DRAFT_DATASETS} datasets per request")
+            raise ReplayError(f"at most {MAX_DRAFT_DATASETS} datasets per request", code="bad-dataset")
         paths = []
         for n in dict.fromkeys(names):
             p = resolve_dataset(cfg, n)
             if p is None or p.name.endswith(EXPECT_SUFFIX):
-                raise ReplayError(f"unknown dataset: {n!r}")
+                raise ReplayError(f"unknown dataset: {n!r}", code="bad-dataset", hint="Pick a dataset from GET /api/datasets.")
             paths.append(p)
     rid = path or "<editor>"
     detection_docs = [d for d in docs if isinstance(d, dict) and "detection" in d]
+    saved_docs: list | None = None
+    if compare and path:
+        from .service import resolve_rule  # noqa: PLC0415
+
+        sp = resolve_rule(cfg, path)
+        if sp is not None:
+            try:
+                saved_docs = [d for d in yaml.safe_load_all(sp.read_text(encoding="utf-8")) if isinstance(d, dict) and "detection" in d]
+            except (yaml.YAMLError, OSError):
+                saved_docs = None
     started = time.perf_counter()
+    cases, case_problems = _run_cases(cfg, cases_text, path, detection_docs)
     results: list[dict] = []
+
+    def fail(item: dict, exc: Exception, **where: object) -> None:
+        err = error_payload(exc, dataset=item["dataset"], **where)
+        item.update(error=err, error_text=str(exc), passed=False, matches=0, sample=[])
+
     for p in paths:
         name = dataset_name(cfg, p)
         item: dict = {"dataset": name, "events": 0, "matches": 0, "duration_ms": 0.0, "expectation": None,
-                      "passed": None, "message": None, "error": None, "sample": [], "truncated": False}
+                      "passed": None, "message": None, "error": None, "error_text": None, "sample": [], "truncated": False}
+        if compare:
+            item.update(before=None, added=[], removed=[])
         try:
             events = load_events(p.read_text(encoding="utf-8"), p.name)
             expect_rules, others = load_expectations(p)
         except (ReplayError, OSError, UnicodeDecodeError) as exc:
-            item.update(error=str(exc), passed=False)
+            fail(item, exc if isinstance(exc, ReplayError) else ReplayError(str(exc), code="bad-dataset", hint="Check the file is readable UTF-8."))
             results.append(item)
             continue
         item["events"] = len(events)
         t0 = time.perf_counter()
+        after: list[int] = []
         try:
             for i, event in enumerate(events, 1):
                 if any(evaluate(d, event) for d in detection_docs):
-                    item["matches"] += 1
+                    after.append(i)
                     if len(item["sample"]) < MAX_DRAFT_SAMPLE:
                         item["sample"].append({"index": i, "event": event})
+            item["matches"] = len(after)
         except UnsupportedError as exc:  # never a silent pass
-            item.update(error=str(exc), passed=False, matches=0, sample=[])
+            fail(item, exc)
+            after = []
         except (AttributeError, TypeError, ValueError, KeyError) as exc:  # malformed detection section
-            item.update(error=f"the detection section could not be evaluated ({type(exc).__name__}: {exc})", passed=False, matches=0, sample=[])
+            fail(item, ReplayError(f"the detection section could not be evaluated ({type(exc).__name__}: {exc})"))
+            after = []
         item["duration_ms"] = round((time.perf_counter() - t0) * 1000, 2)
         item["truncated"] = item["matches"] > len(item["sample"])
+        if compare and item["error"] is None:
+            before: list[int] = []
+            if saved_docs is not None:
+                try:
+                    before = _matching(saved_docs, events)
+                except UnsupportedError:
+                    before = []
+            item["before"] = len(before) if saved_docs is not None else None
+            add, rem = sorted(set(after) - set(before)), sorted(set(before) - set(after))
+            item["added"] = [{"index": i, "event": events[i - 1]} for i in add[:MAX_DRAFT_SAMPLE]]
+            item["removed"] = [{"index": i, "event": events[i - 1]} for i in rem[:MAX_DRAFT_SAMPLE]]
+            item["added_total"], item["removed_total"] = len(add), len(rem)
         if item["error"] is None:
             spec = expect_rules.get(rid) if path else None
             if spec is None and others is not None:
@@ -287,7 +412,10 @@ def replay_draft(cfg: Config, rule_text: str, names: list[str] | None = None, pa
                 ok = item["matches"] >= spec["min"] and (spec["max"] is None or item["matches"] <= spec["max"])
                 item.update(expectation=spec, passed=ok, message=None if ok else _describe(spec, item["matches"]))
         results.append(item)
+    cases_ok = all(c["passed"] for c in cases) if cases else None
     return {"rule": rid, "duration_ms": round((time.perf_counter() - started) * 1000, 2), "datasets": results,
+            "saved": (saved_docs is not None) if compare else None,
+            "cases": cases, "case_problems": case_problems, "cases_passed": cases_ok,
             "passed": (all(r["passed"] is not False for r in results) if results else None),
             "message": None if results else "no datasets to replay",
             "errors": sum(r["error"] is not None for r in results)}

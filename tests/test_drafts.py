@@ -282,30 +282,25 @@ def test_roles_viewer_reads_editor_writes(tmp_path):
     assert t["view"].put(f"/api/drafts/{d['id']}", json={**BODY, "version": 1}).status_code == 403
     assert t["view"].delete(f"/api/drafts/{d['id']}").status_code == 403
     seen = t["view"].get("/api/drafts").json()
-    assert seen["enabled"] is True and [x["id"] for x in seen["drafts"]] == [d["id"]] and seen["drafts"][0]["mine"] is False
-    assert t["view"].get(f"/api/drafts/{d['id']}").json()["rule"] == RULE_OK
+    assert seen["enabled"] is True and seen["drafts"] == []  # drafts are private to their author (ADR 0007)
+    assert t["view"].get(f"/api/drafts/{d['id']}").status_code == 404
     assert TestClient(t["owner"].app, base_url=BASE).get("/api/drafts").status_code == 401
 
 
-def test_only_the_author_updates(tmp_path):
+def test_drafts_are_private_to_their_author(tmp_path):
     t = team(tmp_path)
     d = t["ed1"].post("/api/drafts", json=BODY).json()
-    other = t["ed2"].put(f"/api/drafts/{d['id']}", json={**BODY, "version": 1})
-    assert other.status_code == 403
-    assert t["owner"].put(f"/api/drafts/{d['id']}", json={**BODY, "version": 1}).status_code == 403  # not even admin+
-    assert t["ed2"].get(f"/api/drafts/{d['id']}").json()["version"] == 1
+    for who in ("ed2", "owner", "view"):  # other editor, owner and viewer: same 404 as a missing id
+        assert t[who].get(f"/api/drafts/{d['id']}").status_code == 404, who
+        assert t[who].get("/api/drafts").json()["drafts"] == [], who
+        assert t[who].delete(f"/api/drafts/{d['id']}").status_code in (403, 404), who
+    assert t["ed2"].put(f"/api/drafts/{d['id']}", json={**BODY, "version": 1}).status_code == 404
+    assert t["owner"].put(f"/api/drafts/{d['id']}", json={**BODY, "version": 1}).status_code == 404
+    assert t["ed2"].post("/api/ci/drafts", json={"draft_ids": [d["id"]]}).status_code == 404
+    assert t["ed1"].get(f"/api/drafts/{d['id']}").json()["version"] == 1
     assert t["ed1"].put(f"/api/drafts/{d['id']}", json={**BODY, "version": 1}).status_code == 200
     assert t["ed1"].put(f"/api/drafts/{d['id']}", json={**BODY, "version": 1}).status_code == 409
-
-
-def test_delete_author_or_admin(tmp_path):
-    t = team(tmp_path)
-    a = t["ed1"].post("/api/drafts", json=BODY).json()
-    b = t["ed1"].post("/api/drafts", json=BODY).json()
-    assert t["ed2"].delete(f"/api/drafts/{a['id']}").status_code == 403
-    assert t["ed1"].delete(f"/api/drafts/{a['id']}").status_code == 204
-    assert t["owner"].delete(f"/api/drafts/{b['id']}").status_code == 204  # admin+ may delete anyone's
-    assert t["owner"].get("/api/drafts").json()["drafts"] == []
+    assert t["ed1"].delete(f"/api/drafts/{d['id']}").status_code == 204
 
 
 def test_authorless_drafts_are_shared_once_accounts_are_on(tmp_path):
@@ -314,6 +309,7 @@ def test_authorless_drafts_are_shared_once_accounts_are_on(tmp_path):
     a = store.create(path=None, title="old", rule="r", cases=None, base_hash=None)
     b = store.create(path=None, title="old2", rule="r", cases=None, base_hash=None)
     assert t["ed2"].get(f"/api/drafts/{a['id']}").json()["mine"] is True
+    assert t["view"].get(f"/api/drafts/{a['id']}").status_code == 200  # authorless ones stay shared
     assert t["view"].put(f"/api/drafts/{a['id']}", json={**BODY, "version": 1}).status_code == 403
     assert t["ed2"].put(f"/api/drafts/{a['id']}", json={**BODY, "version": 1}).status_code == 200
     assert t["ed1"].delete(f"/api/drafts/{a['id']}").status_code == 204

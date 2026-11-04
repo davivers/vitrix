@@ -1,8 +1,8 @@
 import { useQuery } from "@tanstack/react-query";
+import { useEffect, useRef } from "react";
 import clsx from "clsx";
 import {
   Activity,
-  FileBarChart,
   FlaskConical,
   Gauge,
   Grid3x3,
@@ -21,6 +21,8 @@ import { NavLink, Navigate, Route, Routes } from "react-router-dom";
 import { DEMO, api } from "./api";
 import { useMe } from "./components/auth";
 import { Logo, LogoMark } from "./components/Logo";
+import { SyncChip } from "./components/SyncChip";
+import { Toaster, toast } from "./components/Toast";
 import { UserMenu } from "./components/UserMenu";
 import ConnectionsPage from "./pages/Connections";
 import CoveragePage from "./pages/Coverage";
@@ -28,9 +30,9 @@ import DashboardPage from "./pages/Dashboard";
 import EditorPage from "./pages/Editor";
 import PacksPage from "./pages/Packs";
 import ReviewsPage from "./pages/Reviews";
+import ReviewPage from "./pages/ReviewPage";
 import ExecutivePage from "./pages/Executive";
 import RegexLabPage from "./pages/RegexLab";
-import ReportsPage from "./pages/Reports";
 import RulesPage from "./pages/Rules";
 import SettingsPage from "./pages/Settings";
 import TeamPage from "./pages/Team";
@@ -69,7 +71,6 @@ const NAV: { title: string; items: NavItem[] }[] = [
     items: [
       { to: "/tests", label: t("l_test_suites"), Icon: FlaskConical },
       { to: "/coverage", label: t("l_mitre_coverage"), Icon: Grid3x3 },
-      { to: "/reports", label: t("l_reports"), Icon: FileBarChart },
     ],
   },
   {
@@ -87,8 +88,26 @@ function Sidebar() {
   const me = useMe();
   const health = useQuery({ queryKey: ["health"], queryFn: api.health });
   // Reviews need accounts: no item (and no polling) otherwise; the badge is the number waiting for me.
-  const counts = useQuery({ queryKey: ["review-counts"], queryFn: api.reviewCounts, enabled: me.enabled && !DEMO, refetchInterval: 60_000, retry: false });
-  const toReview = counts.data?.enabled ? counts.data.to_review : 0;
+  const counts = useQuery({
+    queryKey: ["review-counts"],
+    queryFn: api.reviewCounts,
+    enabled: me.enabled && !DEMO,
+    // 30 s while the tab is visible (immediately on focus via refetchOnWindowFocus), paused when hidden.
+    refetchInterval: () => (document.visibilityState === "visible" ? 30_000 : false),
+    refetchOnWindowFocus: true,
+    retry: false,
+  });
+  const toReview = counts.data?.enabled ? (counts.data.unread ?? counts.data.to_review) : 0;
+  const lastUnread = useRef<number | null>(null);
+  useEffect(() => {
+    if (!counts.data?.enabled) return;
+    const n = counts.data.unread ?? counts.data.to_review;
+    if (lastUnread.current !== null && n > lastUnread.current) {
+      const first = counts.data.latest?.[0];
+      toast(n - lastUnread.current === 1 && first ? t("rv_toast_one", { title: first.title, who: first.requester ?? "" }) : t("rv_toast_many", { n: n - lastUnread.current }), { to: first && n - lastUnread.current === 1 ? `/reviews/${first.id}` : "/reviews", label: t("rv_toast_view") });
+    }
+    lastUnread.current = n;
+  }, [counts.data]);
   return (
     <aside className="flex w-16 shrink-0 flex-col border-r border-line bg-surface-2 px-2.5 py-5 text-muted lg:w-58 lg:px-3.5">
       <div className="flex justify-center pb-6 lg:justify-start lg:px-2">
@@ -127,6 +146,7 @@ function Sidebar() {
           </div>
         ))}
       </nav>
+      <SyncChip />
       <UserMenu />
       <p className="mt-2 hidden px-2 text-[11px] text-subtle lg:block">{health.data ? `Vitrix v${health.data.version}` : "Vitrix"}</p>
     </aside>
@@ -146,9 +166,29 @@ function DemoBanner() {
   );
 }
 
+/** Print always uses the light theme (exports spec), whatever the screen theme is. */
+function usePrintLight() {
+  useEffect(() => {
+    let prev: string | null = null;
+    const before = () => {
+      prev = document.documentElement.getAttribute("data-theme");
+      document.documentElement.setAttribute("data-theme", "light");
+    };
+    const after = () => prev !== null && document.documentElement.setAttribute("data-theme", prev);
+    window.addEventListener("beforeprint", before);
+    window.addEventListener("afterprint", after);
+    return () => {
+      window.removeEventListener("beforeprint", before);
+      window.removeEventListener("afterprint", after);
+    };
+  }, []);
+}
+
 export default function App() {
+  usePrintLight();
   return (
     <div className="flex h-full">
+      <Toaster />
       <Sidebar />
       <main className="min-w-0 flex-1 overflow-auto">
         {DEMO && <DemoBanner />}
@@ -160,13 +200,14 @@ export default function App() {
           <Route path="/editor" element={<EditorPage />} />
           <Route path="/editor/*" element={<EditorPage />} />
           <Route path="/reviews" element={<ReviewsPage />} />
+          <Route path="/reviews/:id" element={<ReviewPage />} />
           <Route path="/packs" element={<PacksPage />} />
           <Route path="/regex" element={<RegexLabPage />} />
           <Route path="/tests" element={<TestSuitesPage />} />
           <Route path="/replay" element={<Navigate to="/editor" replace />} />
           <Route path="/coverage" element={<CoveragePage />} />
           <Route path="/gate" element={<Navigate to="/rules?view=gate" replace />} />
-          <Route path="/reports" element={<ReportsPage />} />
+          <Route path="/reports" element={<Navigate to="/executive" replace />} />
           <Route path="/connections" element={<ConnectionsPage />} />
           <Route path="/settings" element={<SettingsPage />} />
           <Route path="/team" element={<TeamPage />} />

@@ -154,3 +154,17 @@ code, pre, kbd, samp, .font-mono, .cm-editor, .cm-content {
     display: none;
   }
 }
+
+/* Print / Save as PDF (exports spec): light tokens, no chrome. */
+@media print {
+  :root, :root[data-theme="dark"] {
+    color-scheme: light;
+    --color-bg: #ffffff;
+  }
+  aside, header button, header a, [role="status"], .print\:hidden { display: none !important; }
+  html, body, #root { height: auto !important; background: #fff !important; color: #111 !important; }
+  main { overflow: visible !important; }
+  * { box-shadow: none !important; }
+  section, table, svg, [class*="rounded"] { break-inside: avoid; }
+  thead { display: table-header-group; }
+}

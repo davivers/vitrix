@@ -225,6 +225,23 @@ def list_rules(cfg: Config) -> list[dict]:
     return sorted(out, key=lambda r: r["id"])
 
 
+def targets_view(cfg: Config) -> list[dict]:
+    """Supported query languages: label, backend, plugin, status and how many rules use each as FINAL language."""
+    from .backends import target_info
+
+    used: Counter[str] = Counter()
+    if cfg.rules_dir.is_dir():
+        files, _ = _load_all(cfg)
+        for rf in files:
+            for t in routing.resolve(cfg, rule_id(cfg, rf.path), routing.first_detection(rf.docs)).targets:
+                used[t] += 1
+    return [
+        {"name": name, "label": t.label, "extension": t.extension, "active": name in cfg.targets, "default": name == cfg.default_target,
+         **target_info(t), "used_by": used.get(name, 0)}
+        for name, t in sorted(available_targets().items())
+    ]
+
+
 def rule_detail(cfg: Config, rid: str) -> dict:
     """Everything about one rule. Raises KeyError if the id does not exist."""
     path = resolve_rule(cfg, rid)
@@ -402,7 +419,8 @@ def _change_body(summary: dict, validation: dict, quality: dict, rule_repo_path:
 
 
 def submit_rule(cfg: Config, path: str, rule_text: str, cases_text: str | None, title: str | None = None,
-                client: GitHubClient | None = None, submitted_by: str = "", trailers: list[str] | None = None) -> dict:
+                client: GitHubClient | None = None, submitted_by: str = "", trailers: list[str] | None = None,
+                is_new: bool | None = None) -> dict:
     """Step 1: send the rule (and its cases) to a new branch so the real CI validates it.
 
     Rules blocked by the local quality gate are not sent: CI would fail them the same way.
@@ -422,7 +440,8 @@ def submit_rule(cfg: Config, path: str, rule_text: str, cases_text: str | None, 
     docs = [d for d in yaml.safe_load_all(rule_text) if d is not None]
     summary = summarize(_first_detection(docs))
     rule_file = cfg.rules_dir / rel
-    is_new = not rule_file.is_file()
+    if is_new is None:
+        is_new = not rule_file.is_file()
     rule_repo_path = gh.repo_path(cfg.rel(rule_file))
     files = {rule_repo_path: rule_text}
     cases_repo_path = None

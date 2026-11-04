@@ -3,9 +3,10 @@ import clsx from "clsx";
 import { AlertTriangle, Check, CheckCircle2, ChevronDown, Copy, Loader2, Minus, Play, Upload, XCircle } from "lucide-react";
 import { useEffect, useRef, useState } from "react";
 import { ApiError, api } from "../api";
-import type { DraftReplay, DraftReplayDataset, ReplayResult } from "../types";
+import { Link } from "react-router-dom";
+import type { DraftReplay, DraftReplayDataset, ReplayCase, ReplayError, ReplayResult } from "../types";
 import { ErrorBox, btnSecondary } from "./ui";
-import { locale, t, tn } from "../i18n";
+import { locale, t } from "../i18n";
 
 const EXAMPLE = `{"Image": "C:\\\\Windows\\\\System32\\\\WindowsPowerShell\\\\v1.0\\\\powershell.exe", "CommandLine": "powershell.exe -enc SQBFAFgA"}
 {"Image": "C:\\\\Windows\\\\explorer.exe", "CommandLine": "explorer.exe"}`;
@@ -13,9 +14,9 @@ const EXAMPLE = `{"Image": "C:\\\\Windows\\\\System32\\\\WindowsPowerShell\\\\v1
 const AUTO_KEY = "vitrix.replay.auto";
 const readAuto = () => {
   try {
-    return localStorage.getItem(AUTO_KEY) === "1";
+    return localStorage.getItem(AUTO_KEY) !== "0";
   } catch {
-    return false;
+    return true;
   }
 };
 
@@ -27,11 +28,7 @@ const expectText = (d: DraftReplayDataset) => {
 
 function Verdict({ d }: { d: DraftReplayDataset }) {
   if (d.error)
-    return (
-      <span className="inline-flex items-center gap-1.5 text-warn">
-        <AlertTriangle size={14} aria-hidden /> {t("not_evaluated")}
-      </span>
-    );
+    return <span className="text-warn">{t("not_evaluated")}</span>;
   if (d.passed === null)
     return (
       <span className="inline-flex items-center gap-1.5 text-muted">
@@ -87,88 +84,262 @@ function EventViewer({ d, start }: { d: DraftReplayDataset; start: number }) {
   );
 }
 
-function ResultTable({ res }: { res: DraftReplay }) {
-  const [open, setOpen] = useState<string | null>(null);
-  const [chip, setChip] = useState(0);
+const ERR_TITLE: Record<string, "rp_e_unsupported" | "rp_e_regex_timeout" | "rp_e_invalid_regex" | "rp_e_bad_dataset" | "rp_e_bad_expectation" | "rp_e_invalid_rule"> = {
+  unsupported: "rp_e_unsupported",
+  "regex-timeout": "rp_e_regex_timeout",
+  "invalid-regex": "rp_e_invalid_regex",
+  "bad-dataset": "rp_e_bad_dataset",
+  "bad-expectation": "rp_e_bad_expectation",
+  "invalid-rule": "rp_e_invalid_rule",
+};
+
+/** A replay error in plain language: icon + title + message + hint + fix actions (never a raw exception). */
+export function ErrorCard({ err, onJump }: { err: ReplayError; onJump?: () => void }) {
+  const [copied, setCopied] = useState(false);
+  const title = ERR_TITLE[err.code] ? t(ERR_TITLE[err.code]) : t("rp_e_generic");
+  const regex = err.code === "regex-timeout" || err.code === "invalid-regex";
+  return (
+    <div role="alert" className="rounded-[10px] border border-warn/30 bg-warn-soft p-3 text-[13px] text-text">
+      <p className="flex items-center gap-2 font-semibold text-warn">
+        <AlertTriangle size={15} aria-hidden /> {title}
+      </p>
+      <p className="mt-1 [overflow-wrap:anywhere]">{err.message}</p>
+      {err.hint && <p className="mt-1 text-muted">{t("rp_hint")} {err.hint}</p>}
+      <div className="mt-2 flex flex-wrap items-center gap-3 text-xs">
+        {onJump && (
+          <button type="button" className="font-medium text-accent hover:underline" onClick={onJump}>
+            {t("rp_open_line")}
+          </button>
+        )}
+        {regex && (
+          <Link to="/regex" className="font-medium text-accent hover:underline">
+            {t("rp_open_regex")}
+          </Link>
+        )}
+        <button
+          type="button"
+          className="text-muted hover:text-text"
+          onClick={async () => {
+            try {
+              await navigator.clipboard.writeText(JSON.stringify(err, null, 2));
+              setCopied(true);
+              setTimeout(() => setCopied(false), 1500);
+            } catch {
+              /* no clipboard permission */
+            }
+          }}
+        >
+          {copied ? t("l_copied") : t("rp_copy_details")}
+        </button>
+      </div>
+    </div>
+  );
+}
+
+const statusCell = (ok: boolean | null, errored: boolean) =>
+  errored ? (
+    <span className="inline-flex items-center gap-1.5 font-medium text-warn">
+      <AlertTriangle size={14} aria-hidden /> {t("rp_error")}
+    </span>
+  ) : ok === null ? (
+    <span className="inline-flex items-center gap-1.5 text-muted">
+      <Minus size={14} aria-hidden /> {t("rp_no_expect")}
+    </span>
+  ) : ok ? (
+    <span className="inline-flex items-center gap-1.5 font-medium text-good">
+      <CheckCircle2 size={14} aria-hidden /> {t("rp_pass")}
+    </span>
+  ) : (
+    <span className="inline-flex items-center gap-1.5 font-medium text-bad">
+      <XCircle size={14} aria-hidden /> {t("rp_fail")}
+    </span>
+  );
+
+function CaseDetail({ c }: { c: ReplayCase }) {
+  return (
+    <div className="space-y-2">
+      {c.error && <ErrorCard err={c.error} />}
+      {c.hint && !c.passed && <p className="text-muted">{c.hint}</p>}
+      {c.selections && c.selections.length > 0 && (
+        <ul className="space-y-1.5">
+          {c.selections.map((s) => (
+            <li key={s.name}>
+              <p className="flex items-center gap-1.5 font-medium text-text">
+                {s.matched ? <CheckCircle2 size={13} className="text-good" aria-hidden /> : <XCircle size={13} className="text-bad" aria-hidden />}
+                {s.name}
+                {s.exclusion && <span className="text-xs font-normal text-subtle">({t("rp_exclusion")})</span>}
+                <span className="text-xs font-normal text-muted">{s.matched ? t("rp_sel_matched") : t("rp_sel_not")}</span>
+              </p>
+              <ul className="ml-5 mt-0.5 space-y-0.5 font-mono text-[12px]">
+                {s.fields.map((f, i) => (
+                  <li key={i} className="flex flex-wrap items-baseline gap-x-2">
+                    {f.matched ? <CheckCircle2 size={12} className="text-good" aria-hidden /> : <XCircle size={12} className="text-bad" aria-hidden />}
+                    <span className="text-accent">{f.field}</span>
+                    <span className="text-muted">{t("rp_wants")} {JSON.stringify(f.expected)}</span>
+                    <span className="text-muted">{f.present ? `${t("rp_has")} ${JSON.stringify(f.actual)}` : t("rp_absent")}</span>
+                  </li>
+                ))}
+              </ul>
+            </li>
+          ))}
+        </ul>
+      )}
+      {c.event && (
+        <details className="text-xs">
+          <summary className="cursor-pointer text-muted">{t("ts_event")}</summary>
+          <pre className="mt-1 max-h-48 overflow-auto rounded-lg border border-line bg-code p-2 font-mono text-[12px] text-code-text">{JSON.stringify(c.event, null, 2)}</pre>
+        </details>
+      )}
+    </div>
+  );
+}
+
+function ResultTable({ res, compare }: { res: DraftReplay; compare: boolean }) {
+  const cases = res.cases ?? [];
+  const failingKeys = [...cases.filter((c) => !c.passed).map((c) => `c:${c.name}`), ...res.datasets.filter((d) => d.passed === false || d.error).map((d) => `d:${d.dataset}`)];
+  const [open, setOpen] = useState<Set<string>>(() => new Set(failingKeys.slice(0, 3)));
+  const [chip, setChip] = useState<Record<string, number>>({});
+  const [filter, setFilter] = useState<"all" | "fail" | "pass">("all");
+  const toggle = (k: string) => {
+    const n = new Set(open);
+    if (n.has(k)) n.delete(k);
+    else n.add(k);
+    setOpen(n);
+  };
+  const casesFailed = cases.filter((c) => !c.passed).length;
+  const dsWithExpect = res.datasets.filter((d) => d.passed !== null);
+  const dsFailed = dsWithExpect.filter((d) => !d.passed).length + res.datasets.filter((d) => d.error).length;
+  const show = (ok: boolean) => filter === "all" || (filter === "pass") === ok;
   const events = res.datasets.reduce((s, d) => s + d.events, 0);
-  const withExpect = res.datasets.filter((d) => d.passed !== null);
-  const meeting = withExpect.filter((d) => d.passed).length;
+  const allGood = casesFailed === 0 && dsFailed === 0;
+
+  const rows: React.ReactNode[] = [];
+  const head = (k: string, text: string) => (
+    <tr key={k} className="bg-surface-2">
+      <th colSpan={5} scope="colgroup" className="px-2 py-1.5 text-left text-[11px] font-semibold uppercase tracking-wider text-subtle">
+        {text}
+      </th>
+    </tr>
+  );
+  if (cases.length > 0) {
+    rows.push(head("hc", t("ed_cases_head")));
+    [...cases].sort((a, b) => Number(a.passed) - Number(b.passed)).forEach((c) => {
+      if (!show(c.passed)) return;
+      const k = `c:${c.name}`;
+      const on = open.has(k);
+      rows.push(
+        <tr key={k} className="border-t border-line align-top">
+          <td className="px-2 py-2">{statusCell(c.passed, Boolean(c.error))}</td>
+          <td className="py-2 pr-3">
+            <button type="button" aria-expanded={on} onClick={() => toggle(k)} className="inline-flex items-start gap-1.5 text-left text-text">
+              <ChevronDown size={13} className={clsx("mt-1 shrink-0 transition-transform", !on && "-rotate-90")} aria-hidden />
+              <span>
+                {c.name} <span className="ml-1 text-xs text-subtle">{c.kind}</span>
+              </span>
+            </button>
+            {on && (
+              <div className="pl-5 pt-2">
+                <CaseDetail c={c} />
+              </div>
+            )}
+          </td>
+          <td className="py-2 pr-3 text-xs text-muted">
+            {t("expected")} <b className="font-mono text-text">{c.expected}</b>
+          </td>
+          <td className="py-2 pr-3 text-xs text-muted">
+            {t("got")} <b className="font-mono text-text">{c.matched === null ? "-" : c.matched ? "match" : "no_match"}</b>
+          </td>
+          <td />
+        </tr>,
+      );
+    });
+  }
+  if (res.datasets.length > 0) {
+    rows.push(head("hd", t("ed_datasets_head")));
+    res.datasets.forEach((d) => {
+      const ok = d.passed !== false && !d.error;
+      if (!show(ok)) return;
+      const k = `d:${d.dataset}`;
+      const on = open.has(k);
+      const pos = chip[k] ?? 0;
+      const expandable = d.sample.length > 0 || Boolean(d.error) || (compare && ((d.added?.length ?? 0) > 0 || (d.removed?.length ?? 0) > 0));
+      rows.push(
+        <tr key={k} className="border-t border-line align-top">
+          <td className="px-2 py-2">{statusCell(d.passed, Boolean(d.error))}</td>
+          <td className="py-2 pr-3">
+            <button type="button" aria-expanded={on} disabled={!expandable} onClick={() => toggle(k)} className="inline-flex items-center gap-1.5 text-left font-mono text-xs text-text disabled:cursor-default">
+              <ChevronDown size={13} className={clsx("shrink-0 transition-transform", !on && "-rotate-90", !expandable && "opacity-30")} aria-hidden />
+              <span className="break-all">{d.dataset}</span>
+            </button>
+            {on && (
+              <div className="space-y-2 pl-5 pt-2">
+                {d.error && <ErrorCard err={d.error} />}
+                {d.passed === false && !d.error && d.message && <p className="text-xs text-bad">{d.message}</p>}
+                {compare && ((d.added?.length ?? 0) > 0 || (d.removed?.length ?? 0) > 0) && (
+                  <p className="text-xs text-muted">
+                    {t("rp_added")} {(d.added ?? []).map((e) => `#${e.index}`).join(" ") || "-"} · {t("rp_removed")} {(d.removed ?? []).map((e) => `#${e.index}`).join(" ") || "-"}
+                  </p>
+                )}
+                {d.sample.length > 0 && (
+                  <>
+                    <div className="flex flex-wrap gap-1">
+                      {d.sample.map((m, i) => (
+                        <button key={m.index} type="button" aria-pressed={pos === i} onClick={() => setChip({ ...chip, [k]: i })} className={clsx("rounded-md px-1.5 py-0.5 font-mono text-[11px]", pos === i ? "bg-accent-soft text-strong" : "bg-surface-2 text-muted hover:text-text")}>
+                          #{m.index}
+                        </button>
+                      ))}
+                    </div>
+                    {d.truncated && <p className="text-xs text-subtle">{t("rp_showing", { n: d.sample.length, more: d.matches - d.sample.length })}</p>}
+                    <EventViewer key={`${k}-${pos}`} d={d} start={pos} />
+                  </>
+                )}
+              </div>
+            )}
+          </td>
+          <td className="py-2 pr-3 text-xs text-muted">
+            <Verdict d={d} />
+          </td>
+          <td className="py-2 pr-3 text-xs tabular-nums text-muted">
+            {d.error ? "-" : `${d.matches} / ${d.events.toLocaleString(locale())}`}
+            {compare && d.before !== null && d.before !== undefined && <span className="block text-subtle">{t("rp_before")} {d.before}</span>}
+          </td>
+          <td className="py-2 text-right text-xs tabular-nums text-subtle">{d.duration_ms} ms</td>
+        </tr>,
+      );
+    });
+  }
   return (
     <div className="space-y-3">
-      <div className="flex flex-wrap items-center justify-between gap-2 text-[13px] text-muted">
-        <span>
-          <b className="text-strong tabular-nums">{events.toLocaleString(locale())}</b> {t("events")} {tn("rp_datasets", res.datasets.length)} · <span className="tabular-nums">{res.duration_ms}</span> ms
+      <div className="flex flex-wrap items-center justify-between gap-2 text-[13px]">
+        <span className={clsx("inline-flex items-center gap-1.5 font-medium", allGood ? "text-good" : "text-bad")}>
+          {allGood ? <CheckCircle2 size={14} aria-hidden /> : <XCircle size={14} aria-hidden />}
+          {allGood ? t("rp_all_pass") : t("rp_summary", { c: casesFailed, d: dsFailed })}
         </span>
-        {withExpect.length > 0 && (
-          <span className={clsx("inline-flex items-center gap-1.5 font-medium", res.passed ? "text-good" : "text-bad")}>
-            {res.passed ? <CheckCircle2 size={14} aria-hidden /> : <XCircle size={14} aria-hidden />}
-            {t("rp_meet", { a: meeting, b: withExpect.length })}
-          </span>
-        )}
+        <span className="text-xs text-muted">
+          {events.toLocaleString(locale())} {t("events")} · {res.duration_ms} ms
+        </span>
+        <span className="flex gap-1" role="group" aria-label={t("rp_filter")}>
+          {(["all", "fail", "pass"] as const).map((f) => (
+            <button key={f} type="button" aria-pressed={filter === f} onClick={() => setFilter(f)} className={clsx("rounded-full px-2.5 py-0.5 text-xs", filter === f ? "bg-accent-soft font-semibold text-strong" : "text-muted hover:text-text")}>
+              {t(`rp_f_${f}` as "rp_f_all")}
+            </button>
+          ))}
+        </span>
       </div>
+      {res.case_problems && res.case_problems.length > 0 && (
+        <ul className="space-y-0.5 text-xs text-warn">
+          {res.case_problems.map((p, i) => (
+            <li key={i} className="flex gap-1.5">
+              <AlertTriangle size={13} className="mt-0.5 shrink-0" aria-hidden /> {p.message}
+              {p.hint && <span className="text-muted"> {p.hint}</span>}
+            </li>
+          ))}
+        </ul>
+      )}
       <div className="overflow-x-auto">
         <table className="w-full min-w-[480px] text-left text-[13px]">
           <caption className="sr-only">{t("draft_replay_per_dataset")}</caption>
-          <thead className="text-[11px] uppercase tracking-wide text-subtle">
-            <tr>
-              <th className="py-2 pr-3 font-medium">{t("dataset")}</th>
-              <th className="py-2 pr-3 text-right font-medium">{t("events_2")}</th>
-              <th className="py-2 pr-3 text-right font-medium">{t("matches")}</th>
-              <th className="py-2 pr-3 font-medium">{t("expectation")}</th>
-              <th className="py-2 text-right font-medium">{t("time")}</th>
-            </tr>
-          </thead>
-          <tbody>
-            {res.datasets.map((d) => {
-              const isOpen = open === d.dataset;
-              return (
-                <tr key={d.dataset} className="border-t border-line align-top">
-                  <td className="py-2 pr-3">
-                    <button
-                      type="button"
-                      aria-expanded={isOpen}
-                      disabled={d.sample.length === 0}
-                      onClick={() => {
-                        setOpen(isOpen ? null : d.dataset);
-                        setChip(0);
-                      }}
-                      className="inline-flex items-center gap-1.5 text-left font-mono text-xs text-text disabled:cursor-default"
-                    >
-                      <ChevronDown size={13} className={clsx("shrink-0 transition-transform", !isOpen && "-rotate-90", d.sample.length === 0 && "opacity-30")} aria-hidden />
-                      <span className="break-all">{d.dataset}</span>
-                    </button>
-                    {isOpen && (
-                      <div className="pl-5">
-                        <div className="mt-1.5 flex flex-wrap gap-1">
-                          {d.sample.map((m, i) => (
-                            <button
-                              key={m.index}
-                              type="button"
-                              aria-pressed={chip === i}
-                              onClick={() => setChip(i)}
-                              className={clsx("rounded-md px-1.5 py-0.5 font-mono text-[11px]", chip === i ? "bg-accent-soft text-strong" : "bg-surface-2 text-muted hover:text-text")}
-                            >
-                              #{m.index}
-                            </button>
-                          ))}
-                        </div>
-                        {d.truncated && <p className="mt-1 text-xs text-subtle">{t("rp_showing", { n: d.sample.length, more: d.matches - d.sample.length })}</p>}
-                        <EventViewer key={`${d.dataset}-${chip}`} d={d} start={chip} />
-                      </div>
-                    )}
-                  </td>
-                  <td className="py-2 pr-3 text-right tabular-nums">{d.error ? "—" : d.events.toLocaleString(locale())}</td>
-                  <td className="py-2 pr-3 text-right font-semibold text-strong tabular-nums">{d.error ? "—" : d.matches}</td>
-                  <td className="py-2 pr-3">
-                    <Verdict d={d} />
-                    {d.passed === false && !d.error && d.message && <span className="block text-xs text-bad">{d.message}</span>}
-                    {d.error && <span className="block text-xs text-warn [overflow-wrap:anywhere]">{d.error}</span>}
-                  </td>
-                  <td className="py-2 text-right text-xs text-subtle tabular-nums">{d.duration_ms} ms</td>
-                </tr>
-              );
-            })}
-          </tbody>
+          <tbody>{rows}</tbody>
         </table>
       </div>
     </div>
@@ -250,15 +421,16 @@ function PastedEvents({ rule }: { rule: string }) {
  * Replays the unsaved draft on the local datasets (pure compute, nothing leaves the machine) and
  * compares the matches with `<dataset>.expect.yml`. Reports to the Editor whether an expectation broke.
  */
-export function ReplayPanel(props: { rule: string; ruleId: string | null; invalid: boolean; onBroken: (broken: boolean | null) => void }) {
-  const { rule, ruleId, invalid, onBroken } = props;
+export function ReplayPanel(props: { rule: string; cases: string; ruleId: string | null; invalid: boolean; onBroken: (broken: boolean | null) => void }) {
+  const { rule, cases, ruleId, invalid, onBroken } = props;
   const list = useQuery({ queryKey: ["replay-datasets"], queryFn: api.replayDatasets, retry: false });
   const [pick, setPick] = useState("");
   const [auto, setAuto] = useState(readAuto);
   const [res, setRes] = useState<DraftReplay | null>(null);
   const [ranRule, setRanRule] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
-  const [error, setError] = useState<string | null>(null);
+  const [error, setError] = useState<ReplayError | null>(null);
+  const [compare, setCompare] = useState(false);
   const ctrl = useRef<AbortController | null>(null);
 
   const run = () => {
@@ -267,17 +439,18 @@ export function ReplayPanel(props: { rule: string; ruleId: string | null; invali
     ctrl.current = c;
     setBusy(true);
     api
-      .replayDraft({ rule, path: ruleId, ...(pick ? { datasets: [pick] } : {}) }, c.signal)
+      .replayDraft({ rule, path: ruleId, ...(cases.trim() ? { cases } : {}), ...(compare && ruleId ? { compare: true } : {}), ...(pick ? { datasets: [pick] } : {}) }, c.signal)
       .then((r) => {
         setRes(r);
         setRanRule(rule);
         setError(null);
         setBusy(false);
-        onBroken(r.datasets.some((d) => d.passed === false));
+        onBroken(r.datasets.some((d) => d.passed === false) || (r.cases ?? []).some((x) => !x.passed));
       })
       .catch((e: Error) => {
         if (e.name === "AbortError") return;
-        setError(e.message);
+        const detail = e instanceof ApiError ? (e.body?.detail as unknown) : null;
+        setError(detail && typeof detail === "object" && "message" in detail ? (detail as ReplayError) : { code: "server", message: e.message, hint: null });
         setBusy(false);
       });
   };
@@ -288,7 +461,7 @@ export function ReplayPanel(props: { rule: string; ruleId: string | null; invali
     const t = setTimeout(run, 600);
     return () => clearTimeout(t);
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [auto, rule, pick, invalid]);
+  }, [auto, rule, cases, pick, invalid, compare]);
   useEffect(() => () => ctrl.current?.abort(), []);
 
   const toggleAuto = (v: boolean) => {
@@ -331,6 +504,9 @@ export function ReplayPanel(props: { rule: string; ruleId: string | null; invali
           <button type="button" onClick={run} disabled={busy || invalid} aria-busy={busy} className={btnSecondary}>
             {busy ? <Loader2 size={14} className="animate-spin" aria-hidden /> : <Play size={14} aria-hidden />} {t("rp_run_replay")}
           </button>
+          <label className="flex items-center gap-1.5 text-[13px] text-muted" title={ruleId ? undefined : t("rp_no_saved")}>
+            <input type="checkbox" checked={compare} disabled={!ruleId} onChange={(e) => setCompare(e.target.checked)} className="accent-accent" /> {t("rp_compare")}
+          </label>
           <label className="flex items-center gap-1.5 text-[13px] text-muted">
             <input type="checkbox" checked={auto} onChange={(e) => toggleAuto(e.target.checked)} className="accent-accent" /> {t("run_on_edit")}
           </label>
@@ -351,7 +527,7 @@ export function ReplayPanel(props: { rule: string; ruleId: string | null; invali
             ))}
         </ul>
       )}
-      {error && <ErrorBox message={error} />}
+      {error && <ErrorCard err={error} />}
       {stale && (
         <p className="flex flex-wrap items-center gap-2 text-xs text-warn">
           <AlertTriangle size={13} aria-hidden /> {t("results_are_from_an_older_version_of_t")}
@@ -360,7 +536,7 @@ export function ReplayPanel(props: { rule: string; ruleId: string | null; invali
           </button>
         </p>
       )}
-      {res && <ResultTable res={res} />}
+      {res && <ResultTable res={res} compare={compare && res.saved !== undefined} />}
       <PastedEvents rule={rule} />
     </div>
   );

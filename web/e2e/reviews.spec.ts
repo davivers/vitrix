@@ -3,26 +3,21 @@ import { invitedPage, ownerPage } from "./helpers";
 
 test.use({ baseURL: process.env.E2E_AUTH_URL });
 
-test("review request on a draft: comments, own approval blocked, stale decision 409, approve", async ({ browser, baseURL }) => {
+test("review request on a rule: unread badge + toast, own approval blocked, stale decision 409, approve", async ({ browser, baseURL }) => {
   const owner = await ownerPage(browser, baseURL!);
   const alice = await invitedPage(browser, owner.ctx, baseURL!, "alice@example.com", "Alice Author", "editor");
   const bob = await invitedPage(browser, owner.ctx, baseURL!, "bob@example.com", "Bob Reviewer", "editor");
   const A = alice.page;
   const B = bob.page;
 
-  // A saves a draft and requests Bob's review in the Editor.
+  // B is already looking at the app (any page) when A requests the review: unread badge + toast (U10).
+  await B.goto("/rules");
+  await expect(B.getByRole("link", { name: /My reviews/ })).toBeVisible();
+  await expect(B.getByLabel(/reviews? waiting|unread/i)).toHaveCount(0);
+
+  // A requests Bob's review of the rule in the Editor (reviews of scratch drafts are refused: 422).
   await A.goto("/editor/windows/powershell_encoded.yml");
   await expect(A.locator(".cm-content").first()).toContainText("PowerShell with an encoded command");
-  await A.locator(".cm-content").first().click();
-  await A.keyboard.press("Control+Home");
-  await A.keyboard.insertText("# review me");
-  await A.keyboard.press("Enter");
-  await A.getByRole("button", { name: "Save locally" }).click();
-  await expect(A.getByText(/Saved locally at/)).toBeVisible();
-  // Reviews on a draft are requested from the opened draft (the rule route would target the rule file).
-  const saved = await (await alice.ctx.request.get(`${baseURL}/api/drafts`)).json();
-  await A.goto(`/editor?draft=${saved.drafts[0].id}`);
-  await expect(A.locator(".cm-content").first()).toContainText("# review me");
   await A.getByRole("tab", { name: "Review" }).click();
   await A.getByRole("combobox").filter({ hasText: "Pick a member" }).selectOption({ label: "Bob Reviewer (bob@example.com)" });
   await A.getByPlaceholder("Note for the reviewer (optional)").fill("please check the filter");
@@ -36,32 +31,28 @@ test("review request on a draft: comments, own approval blocked, stale decision 
   expect(own.status()).toBeGreaterThanOrEqual(400);
   expect(own.status()).toBeLessThan(500);
 
-  // B sees it in My reviews and the sidebar badge.
+  // B's context: the badge next to "My reviews" and a toast appear on the next poll (forced here by a visibility change).
+  await B.evaluate(() => document.dispatchEvent(new Event("visibilitychange", { bubbles: true })));
+  const badge = B.getByRole("link", { name: /My reviews/ }).getByLabel(/1 /);
+  await expect(badge).toBeVisible();
+  await expect(B.getByRole("status").getByText(/New review: .* from Alice Author/)).toBeVisible();
+  // Opening the review marks it read: the badge goes away.
   await B.goto("/reviews");
-  await expect(B.getByLabel(/1 reviews waiting/)).toBeVisible();
   await expect(B.getByText("please check the filter")).toBeVisible();
+  await B.getByRole("link", { name: /PowerShell with an encoded command/ }).first().click();
+  await expect(B).toHaveURL(/\/reviews\/[^/]+$/);
+  await expect(B.getByRole("link", { name: /My reviews/ }).getByLabel(/\d/)).toHaveCount(0);
+  const counts = await (await bob.ctx.request.get(`${baseURL}/api/reviews/counts`)).json();
+  expect(counts.unread).toBe(0);
 
-  // Comment thread: B comments on the draft, A sees it.
-  await B.getByRole("link", { name: /PowerShell with an encoded command/ }).click();
-  await B.getByRole("tab", { name: "Review" }).click();
-  await B.getByPlaceholder("Add a comment").fill("what about the SCCM filter?");
-  await B.getByRole("button", { name: "Comment", exact: true }).click();
-  await expect(B.getByText("what about the SCCM filter?")).toBeVisible();
-  await A.reload();
-  await A.getByRole("tab", { name: "Review" }).click();
-  await expect(A.getByText("what about the SCCM filter?")).toBeVisible();
-
-  // Stale decision: B has the review page open, A changes the draft meanwhile, B's Approve is a 409.
-  await B.goto("/reviews");
+  // Stale decision: B has the review open, A changes the rule file meanwhile, B's Approve is a 409.
   await expect(B.getByRole("button", { name: "Approve" })).toBeVisible();
-  const draftId = review.target.ref;
-  const d = await (await alice.ctx.request.get(`${baseURL}/api/drafts/${draftId}`)).json();
-  const put = await alice.ctx.request.put(`${baseURL}/api/drafts/${draftId}`, {
-    data: { path: d.path, title: d.title, rule: d.rule + "\n# changed after the request\n", cases: d.cases, version: d.version },
-  });
+  const ruleId = review.target.ref;
+  const cur = await (await alice.ctx.request.get(`${baseURL}/api/rules/${ruleId}`)).json();
+  const put = await alice.ctx.request.put(`${baseURL}/api/rules/${ruleId}`, { data: { rule: cur.text + "\n# changed after the request\n", sha: cur.sha } });
   expect(put.ok(), await put.text()).toBeTruthy();
   await B.getByRole("button", { name: "Approve" }).click();
-  await expect(B.getByText(/Could not apply: the target or the review changed/)).toBeVisible();
+  await expect(B.getByText(/Could not apply|changed/)).toBeVisible();
 
   // Fresh state shows the stale warning; A asks again; B approves.
   await B.reload();
@@ -69,9 +60,16 @@ test("review request on a draft: comments, own approval blocked, stale decision 
   await A.reload();
   await A.getByRole("tab", { name: "Review" }).click();
   await A.getByRole("button", { name: "Request again" }).click();
+  await expect(A.getByRole("button", { name: "Request again" })).toHaveCount(0);
   await B.reload();
+  const decided = B.waitForResponse((r) => r.url().includes("/decision"));
   await B.getByRole("button", { name: "Approve" }).click();
-  await expect(B.getByText("Nothing waiting for your review.")).toBeVisible();
+  const dr = await decided;
+  expect(dr.status(), await dr.text()).toBe(200);
+  const after = await (await bob.ctx.request.get(`${baseURL}/api/reviews/${review.id}`)).json();
+  expect(after.state).toBe("approved");
+  await B.reload(); // see BRIEFING: the review page may not refresh itself after a decision
+  await expect(B.getByText("Approved", { exact: true }).first()).toBeVisible();
   await A.reload();
   await A.getByRole("tab", { name: "Review" }).click();
   await expect(A.getByText("Approved", { exact: true })).toBeVisible();

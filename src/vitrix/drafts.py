@@ -188,6 +188,21 @@ class DraftStore:
                 raise DraftError("draft changed since you loaded it", 409)
         return self.get(draft_id)
 
+    def delete_for_author(self, user_id: int) -> int:
+        """Delete every draft of one author (logout, last session expired, account removal). Returns the count."""
+        with self._lock:
+            db = self._conn(create=False)
+            return db.execute("DELETE FROM drafts WHERE workspace_id=? AND author_id=?", (self.workspace_id, user_id)).rowcount if db else 0
+
+    def purge_except(self, active_user_ids: set[int]) -> int:
+        """Delete the drafts of every author NOT in `active_user_ids` (authorless drafts are kept)."""
+        with self._lock:
+            db = self._conn(create=False)
+            if db is None:
+                return 0
+            authors = {r[0] for r in db.execute("SELECT DISTINCT author_id FROM drafts WHERE workspace_id=? AND author_id IS NOT NULL", (self.workspace_id,))}
+            return sum(self.delete_for_author(uid) for uid in authors - set(active_user_ids))
+
     def delete(self, draft_id: str) -> None:
         with self._lock:
             db = self._conn(create=False)

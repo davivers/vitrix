@@ -49,6 +49,24 @@ CREATE TABLE IF NOT EXISTS reviews (
 CREATE INDEX IF NOT EXISTS reviews_by_reviewer ON reviews (workspace_id, reviewer_id, state);
 CREATE INDEX IF NOT EXISTS reviews_by_requester ON reviews (workspace_id, requester_id, state);
 CREATE INDEX IF NOT EXISTS reviews_by_target ON reviews (workspace_id, target_kind, target_ref);
+CREATE TABLE IF NOT EXISTS review_events (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  review_id TEXT NOT NULL REFERENCES reviews(id),
+  type TEXT NOT NULL,
+  actor_id INTEGER NOT NULL,
+  actor_name TEXT NOT NULL,
+  text TEXT NOT NULL,
+  at REAL NOT NULL
+);
+CREATE INDEX IF NOT EXISTS review_events_by_review ON review_events (review_id, id);
+CREATE TABLE IF NOT EXISTS review_unread (
+  review_id TEXT NOT NULL REFERENCES reviews(id),
+  user_id INTEGER NOT NULL,
+  kind TEXT NOT NULL,
+  actor_name TEXT NOT NULL DEFAULT '',
+  at REAL NOT NULL,
+  PRIMARY KEY (review_id, user_id)
+);
 CREATE TABLE IF NOT EXISTS comments (
   id TEXT PRIMARY KEY,
   workspace_id INTEGER NOT NULL DEFAULT 1,
@@ -98,6 +116,11 @@ class ReviewStore:
             self._db = sqlite3.connect(str(self.path), check_same_thread=False, isolation_level=None)
             self._db.row_factory = sqlite3.Row
             self._db.executescript(_SCHEMA)
+            for column in ("snapshot_text", "base_text"):  # added after the first release: migrate older files
+                try:
+                    self._db.execute(f"ALTER TABLE reviews ADD COLUMN {column} TEXT")  # nosec B608 - literal names
+                except sqlite3.OperationalError:
+                    pass  # already there
         return self._db
 
     def _q(self, sql: str, args: tuple = ()) -> list[dict]:
@@ -129,12 +152,57 @@ class ReviewStore:
     def counts(self, user_id: int) -> dict:
         rows = self._q(
             "SELECT SUM(reviewer_id=? AND state='pending') AS to_review, SUM(requester_id=? AND state IN ('pending','changes_requested')) AS requested"
-            " FROM reviews WHERE workspace_id=?", (user_id, user_id, self.workspace_id))
+            " FROM reviews WHERE workspace_id=? AND target_kind != 'draft'", (user_id, user_id, self.workspace_id))
         row = rows[0] if rows else {}
         return {"to_review": int(row.get("to_review") or 0), "requested": int(row.get("requested") or 0)}
 
+    # ------------------------------------------------------------------ events and unread state
+
+    def _event(self, db: sqlite3.Connection, review_id: str, type_: str, actor: dict, text: str) -> None:
+        db.execute("INSERT INTO review_events (review_id, type, actor_id, actor_name, text, at) VALUES (?,?,?,?,?,?)",
+                   (review_id, type_, actor["id"], actor["name"] or actor.get("email", ""), text, self._now()))
+
+    def _mark_unread(self, db: sqlite3.Connection, review_id: str, user_id: int, kind: str, actor_name: str) -> None:
+        db.execute("INSERT OR REPLACE INTO review_unread (review_id, user_id, kind, actor_name, at) VALUES (?,?,?,?,?)",
+                   (review_id, user_id, kind, actor_name, self._now()))
+
+    def events(self, review_id: str) -> list[dict]:
+        return self._q("SELECT id, type, actor_id, actor_name, text, at FROM review_events WHERE review_id=? ORDER BY id", (review_id,))
+
+    def unread_ids(self, user_id: int) -> set[str]:
+        return {r["review_id"] for r in self._q("SELECT review_id FROM review_unread WHERE user_id=?", (user_id,))}
+
+    def mark_read(self, review_id: str, user_id: int) -> None:
+        with self._lock:
+            db = self._conn(create=False)
+            if db:
+                db.execute("DELETE FROM review_unread WHERE review_id=? AND user_id=?", (review_id, user_id))
+
+    def mark_unread(self, review_id: str, user_id: int) -> None:
+        with self._lock:
+            row = self.get(review_id)
+            if user_id not in (row["reviewer_id"], row["requester_id"]):
+                raise ReviewError("This review is not yours.", 403)
+            assigned = user_id == row["reviewer_id"]
+            db = self._conn(create=True)
+            if db is None:
+                raise ReviewError("review store unavailable", 503)
+            self._mark_unread(db, review_id, user_id, "assigned" if assigned else "decided", row["requester_name"] if assigned else row["reviewer_name"])
+
+    def read_all(self, user_id: int) -> int:
+        with self._lock:
+            db = self._conn(create=False)
+            return db.execute("DELETE FROM review_unread WHERE user_id=?", (user_id,)).rowcount if db else 0
+
+    def unread_summary(self, user_id: int, limit: int = 3) -> dict:
+        """Number of unread reviews and the newest `limit` of them (for the notification toast)."""
+        rows = self._q(
+            "SELECT u.review_id AS id, u.kind, u.actor_name, u.at, r.target_title AS title, r.requester_name, r.state FROM review_unread u"
+            " JOIN reviews r ON r.id=u.review_id WHERE u.user_id=? AND r.workspace_id=? AND r.target_kind != 'draft' ORDER BY u.at DESC", (user_id, self.workspace_id))
+        return {"unread": len(rows), "latest": rows[:limit]}
+
     def request(self, *, kind: str, ref: str, title: str, target_hash: str, target_version: int | None,
-                requester: dict, reviewer: dict, note: str | None) -> dict:
+                requester: dict, reviewer: dict, note: str | None, snapshot_text: str | None = None) -> dict:
         """`requester` / `reviewer`: {"id","email","name"}. 409 on a duplicate open request or over the limit."""
         review_id = uuid.uuid4().hex
         now = self._now()
@@ -151,9 +219,12 @@ class ReviewStore:
                 raise ReviewError(f"You have {MAX_OPEN_PER_REQUESTER} open review requests; cancel some first.", 409)
             db.execute(
                 "INSERT INTO reviews (id, workspace_id, target_kind, target_ref, target_title, target_hash, target_version, requester_id, requester_email,"
-                " requester_name, reviewer_id, reviewer_email, reviewer_name, note, state, created_at, updated_at) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,'pending',?,?)",
+                " requester_name, reviewer_id, reviewer_email, reviewer_name, note, state, created_at, updated_at, snapshot_text, base_text)"
+                " VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,'pending',?,?,?,?)",
                 (review_id, self.workspace_id, kind, ref, title, target_hash, target_version, requester["id"], requester["email"], requester["name"],
-                 reviewer["id"], reviewer["email"], reviewer["name"], note, now, now))
+                 reviewer["id"], reviewer["email"], reviewer["name"], note, now, now, snapshot_text, snapshot_text))
+            self._event(db, review_id, "requested", requester, f"{requester['name']} requested review from {reviewer['name']}" + (f': "{note}"' if note else ""))
+            self._mark_unread(db, review_id, reviewer["id"], "assigned", requester["name"])
         return self.get(review_id)
 
     def _transition(self, review_id: str, version: int, sets: str, args: tuple, allowed: tuple[str, ...], why: str) -> dict:
@@ -175,15 +246,46 @@ class ReviewStore:
         if row["state"] == "pending" and current_hash != row["target_hash"]:
             raise ReviewError("The rule changed since the review was requested; ask for a new review.", 409)
         now = self._now()
-        return self._transition(review_id, version, "state=?, decision_note=?, decided_at=?", (decision, note, now), ("pending",),
-                                "This review is no longer pending.")
+        out = self._transition(review_id, version, "state=?, decision_note=?, decided_at=?", (decision, note, now), ("pending",),
+                               "This review is no longer pending.")
+        with self._lock:
+            db = self._conn(create=True)
+            if db is None:
+                raise ReviewError("review store unavailable", 503)
+            who = {"id": row["reviewer_id"], "name": row["reviewer_name"], "email": row["reviewer_email"]}
+            verb = "approved" if decision == "approved" else "requested changes"
+            self._event(db, review_id, decision, who, f"{who['name']} {verb}" + (f': "{note}"' if note else ""))
+            self._mark_unread(db, review_id, row["requester_id"], "decided", who["name"])
+            db.execute("DELETE FROM review_unread WHERE review_id=? AND user_id=?", (review_id, row["reviewer_id"]))
+        return out
 
-    def rerequest(self, review_id: str, *, version: int, title: str, target_hash: str, target_version: int | None) -> dict:
-        return self._transition(review_id, version, "state='pending', decision_note=NULL, decided_at=NULL, target_title=?, target_hash=?, target_version=?",
-                                (title, target_hash, target_version), OPEN_STATES, "Only a pending or changes-requested review can be re-requested.")
+    def rerequest(self, review_id: str, *, version: int, title: str, target_hash: str, target_version: int | None,
+                  snapshot_text: str | None = None, note: str | None = None) -> dict:
+        """New round on the same review: the previous round's snapshot becomes the diff baseline."""
+        out = self._transition(
+            review_id, version,
+            "state='pending', decision_note=NULL, decided_at=NULL, target_title=?, target_hash=?, target_version=?,"
+            " base_text=snapshot_text, snapshot_text=?, note=COALESCE(?, note)",
+            (title, target_hash, target_version, snapshot_text, note), OPEN_STATES, "Only a pending or changes-requested review can be re-requested.")
+        with self._lock:
+            db = self._conn(create=True)
+            if db is None:
+                raise ReviewError("review store unavailable", 503)
+            who = {"id": out["requester_id"], "name": out["requester_name"], "email": out["requester_email"]}
+            self._event(db, review_id, "rerequested", who, f"{who['name']} requested again" + (f': "{note}"' if note else ""))
+            self._mark_unread(db, review_id, out["reviewer_id"], "assigned", who["name"])
+        return out
 
-    def cancel(self, review_id: str, *, version: int) -> dict:
-        return self._transition(review_id, version, "state='cancelled'", (), OPEN_STATES, "Only an open review can be cancelled.")
+    def cancel(self, review_id: str, *, version: int, actor: dict | None = None) -> dict:
+        out = self._transition(review_id, version, "state='cancelled'", (), OPEN_STATES, "Only an open review can be cancelled.")
+        with self._lock:
+            db = self._conn(create=True)
+            if db is None:
+                raise ReviewError("review store unavailable", 503)
+            who = actor or {"id": out["requester_id"], "name": out["requester_name"]}
+            self._event(db, review_id, "cancelled", who, f"{who['name']} cancelled the request")
+            db.execute("DELETE FROM review_unread WHERE review_id=?", (review_id,))
+        return out
 
     def approved(self, kind: str, ref: str, target_hash: str) -> list[dict]:
         """Approved reviews of this target whose reviewed content is exactly `target_hash` (for `Reviewed-by`)."""

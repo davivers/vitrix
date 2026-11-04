@@ -138,7 +138,7 @@ export function FlowFunnel({ q }: { q: QualityReport }) {
           const meta = STAGES.find((x) => x.id === s.id)!;
           return (
             <li key={s.id} className="flex-1 px-4 py-3" title={meta.hint}>
-              <span className="text-[11px] font-semibold uppercase tracking-wider text-subtle">{s.label}</span>
+              <span className="text-[11px] font-semibold uppercase tracking-wider text-subtle">{s.id === "deploy" ? t("l_deploy") : s.label}</span>
               <span className="mt-1 block text-[22px] font-bold leading-tight text-strong tabular-nums">
                 {s.id === "deploy" ? (s.counts.pending ?? 0) : passed}
                 <span className="text-sm font-medium text-subtle">/{q.summary.total}</span>

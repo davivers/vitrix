@@ -2,6 +2,7 @@ import { useQuery } from "@tanstack/react-query";
 import { Link } from "react-router-dom";
 import { api } from "../api";
 import { BarList, ConnectorNotice, LineChart, Section, StatTile, StateBar, formatDate, formatHours, pct } from "../components/dash";
+import ExportMenu from "../components/ExportMenu";
 import { ErrorBox, PageHeader, TARGET_CODE, TargetSwatch } from "../components/ui";
 import type { State } from "../types";
 import { t, tn } from "../i18n";
@@ -49,6 +50,20 @@ export default function ExecutivePage() {
       <PageHeader
         title={t("executive")}
         subtitle={t("threat_coverage_detection_quality_and_")}
+        actions={
+          <ExportMenu
+            page="executive"
+            title={t("executive")}
+            disabled={!s}
+            facts={s ? [["ATT&CK coverage", `${s.mitre.coverage_pct}%`], ["Rules", s.rules.total], ["Tests passed", `${s.tests.passed}/${s.tests.total}`], ["Ready to publish", quality.data ? `${quality.data.summary.ready}/${quality.data.summary.total}` : "-"]] : []}
+            tables={[
+              { name: "risk-by-tactic", label: t("ex_tbl_tactic"), columns: ["tactic_id", "tactic", "rules"], rows: (s?.mitre.tactics ?? []).map((x) => [x.id, x.name, x.count]) },
+              { name: "rules-by-level", label: t("rules_by_severity"), columns: ["level", "rules"], rows: Object.entries(s?.rules.by_level ?? {}) },
+              { name: "rules-by-status", label: t("rules_by_maturity_status"), columns: ["status", "rules"], rows: Object.entries(s?.rules.by_status ?? {}) },
+              { name: "rules-by-language", label: t("rules_by_final_language"), columns: ["language", "rules"], rows: Object.entries(s?.by_target ?? {}) },
+            ]}
+          />
+        }
       />
       {!s && <p className="text-sm text-muted">{t("reading_the_repository")}</p>}
 
@@ -85,7 +100,7 @@ export default function ExecutivePage() {
           <div className="grid gap-5 lg:grid-cols-2">
             <Section title={t("detection_coverage_over_time")} aside={history.data?.available ? tn("n_commits", history.data.commits) : undefined}>
               {!history.data && <p className="text-sm text-muted">{t("reading_git_history")}</p>}
-              {history.data && !history.data.available && <p className="text-sm text-subtle">{t("no_git_history")}{history.data.reason}). Coverage over time needs a Git repository.</p>}
+              {history.data && !history.data.available && <p className="text-sm text-subtle">{history.data.message ?? `${t("no_git_history")}${history.data.reason}). Coverage over time needs a Git repository.`}</p>}
               {history.data?.available && (
                 <LineChart
                   ariaLabel={t("att_ck_techniques_covered_after_each_c")}

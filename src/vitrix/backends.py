@@ -7,6 +7,7 @@ Third-party plugins register new targets through the `vitrix.targets` entry poin
 from __future__ import annotations
 
 import hashlib
+import re
 from collections.abc import Callable
 from dataclasses import dataclass
 from importlib import metadata
@@ -69,6 +70,29 @@ BUILTIN: dict[str, Target] = {
 }
 
 
+# pySigma backend id (and flavor) and pip package of the built-in targets; plugins may set the same
+# attributes on their Target object (`backend`, `plugin`).
+BUILTIN_INFO: dict[str, tuple[str, str]] = {
+    "splunk": ("splunk", "pysigma-backend-splunk"),
+    "kql": ("kusto", "pysigma-backend-kusto"),
+    "elastic-eql": ("elasticsearch (eql)", "pysigma-backend-elasticsearch"),
+    "elastic-lucene": ("elasticsearch (lucene)", "pysigma-backend-elasticsearch"),
+}
+
+
+def target_info(target: Target) -> dict:
+    """{backend, plugin, status: ok|missing_plugin|error, message}: can the backend be built right now?"""
+    backend, plugin = BUILTIN_INFO.get(target.name, (getattr(target, "backend", "") or target.name, getattr(target, "plugin", "") or ""))
+    try:
+        target.factory([])
+        status, message = "ok", None
+    except ImportError as exc:
+        status, message = "missing_plugin", f"{exc}" + (f". Install it with: pip install {plugin}" if plugin else "")
+    except Exception as exc:  # noqa: BLE001 - a broken plugin must not break the list
+        status, message = "error", str(exc)[:300]
+    return {"backend": backend, "plugin": plugin, "status": status, "message": message}
+
+
 def available_targets() -> dict[str, Target]:
     """Alvos embutidos mais os registrados por plugins (entry point `vitrix.targets`)."""
     targets = dict(BUILTIN)
@@ -90,20 +114,41 @@ def load_extra_pipelines(paths: list[Path]) -> list:
 
 
 # Tables for logsources the Kusto backend cannot place by itself (no mapped category, no EventID).
-# Used only as a fallback, after the rule's `vitrix.kql_table` and vitrix.yml `kql.tables`.
+# Used only as a fallback, after the rule's `vitrix.kql_table` and vitrix.yml `kql.tables`. Keys are
+# `product/service`, `product/category`, `product/*`, or a bare service/category for rules without a product.
+# Only Microsoft first-party tables (docs: learn.microsoft.com/azure/azure-monitor/reference/tables) and the
+# standard CEF/Syslog tables are built in; third-party sources (Okta, Zeek, GitHub...) depend on how the user
+# ingests them, so they stay an actionable `kql-table` issue with a suggested table in the hint.
 KQL_DEFAULT_TABLES: dict[str, str] = {
     "windows/security": "SecurityEvent",
-    **{f"windows/{svc}": "Event" for svc in (
-        "system", "application", "powershell", "powershell-classic", "taskscheduler", "windefend", "wmi", "bits-client",
-        "dns-server", "dns-server-analytic", "sysmon", "applocker", "firewall-as", "codeintegrity-operational",
-        "driver-framework", "ntlm", "smbclient-security", "terminalservices-localsessionmanager", "msexchange-management")},
+    "windows/*": "Event",  # every other Windows channel / Sysmon category arrives in the Event table
     "linux/*": "Syslog",
+    "macos/*": "Syslog",
     "azure/activitylogs": "AzureActivity",
     "azure/auditlogs": "AuditLogs",
+    "azure/pim": "AuditLogs",
     "azure/signinlogs": "SigninLogs",
-    "m365/audit": "OfficeActivity",
-    "aws/cloudtrail": "AWSCloudTrail",
+    "azure/riskdetection": "AADUserRiskEvents",
+    "azure/*": "AzureActivity",
+    "m365/*": "OfficeActivity",
+    "aws/*": "AWSCloudTrail",
     "gcp/gcp.audit": "GCPAuditLogs",
+    "kubernetes/audit": "AKSAudit",
+    "cisco/*": "Syslog",
+    "juniper/*": "Syslog",
+    "huawei/*": "Syslog",
+    "fortigate/*": "CommonSecurityLog",
+    "apache": "Syslog",
+    "nginx": "Syslog",
+    "proxy": "CommonSecurityLog",
+    "firewall": "CommonSecurityLog",
+    "dns": "DnsEvents",
+    "webserver": "W3CIISLog",
+}
+# Shown in the hint when nothing resolves; these depend on the user's connector, so they are suggestions only.
+KQL_SUGGESTED_TABLES: dict[str, str] = {
+    "okta": "Okta_CL", "github": "GitHubAuditLogPolling_CL", "onelogin": "OneLogin_CL", "zeek": "Corelight_v2_<service>",
+    "gcp": "GoogleWorkspaceReports", "antivirus": "SecurityAlert", "application": "AppTraces",
 }
 
 
@@ -118,13 +163,19 @@ class ConversionError(Exception):
         return {"code": self.code, "path": self.path, "line": self.line, "column": self.column, "hint": self.hint}
 
 
-def _logsource_keys(doc: object) -> list[str]:
-    """`product/service`, `product/category` lookup keys of a rule, most specific first."""
+def _logsource(doc: object) -> dict:
     ls = doc.get("logsource") if isinstance(doc, dict) else None
-    if not isinstance(ls, dict):
-        return []
-    product = str(ls.get("product") or "").strip().lower()
-    return [f"{product}/{str(ls[k]).strip().lower()}" for k in ("service", "category") if product and ls.get(k)]
+    return {k: str(v).strip().lower() for k, v in ls.items() if v} if isinstance(ls, dict) else {}
+
+
+def _logsource_keys(doc: object) -> list[str]:
+    """Lookup keys of a rule, most specific first: `product/service`, `product/category`, `product/*`
+    (or the bare service / category when the rule has no product)."""
+    ls = _logsource(doc)
+    product = ls.get("product", "")
+    if not product:
+        return [ls[k] for k in ("service", "category") if k in ls]
+    return [*(f"{product}/{ls[k]}" for k in ("service", "category") if k in ls), f"{product}/*"]
 
 
 def _first_doc(text: str) -> object:
@@ -146,13 +197,46 @@ def _table_pipeline(table: str) -> Any:
 
 def _kql_table_error(text: str, doc: object) -> ConversionError:
     keys = _logsource_keys(doc)
-    key = keys[0] if keys else "windows/system"
+    ls = _logsource(doc)
+    key = next((k for k in keys if not k.endswith("/*")), keys[0] if keys else "windows/system")
     line = next((i for i, row in enumerate(text.splitlines(), 1) if row.startswith("logsource:")), None)
-    where = f" ({keys[0]})" if keys else ""
+    where = f" ({key})" if keys else ""
+    suggest = next((KQL_SUGGESTED_TABLES[v] for v in (ls.get("product"), ls.get("category"), ls.get("service")) if v in KQL_SUGGESTED_TABLES), None)
+    tip = f" Likely table for this source: {suggest} (depends on your connector)." if suggest else ""
     return ConversionError(
         f"KQL needs a table for this rule's logsource{where} and none is configured.",
         code="kql-table", path="logsource", line=line,
-        hint=f"Add `vitrix: {{kql_table: Event}}` to the rule, or `kql: {{tables: {{{key}: Event}}}}` (or `kql: {{default_table: Event}}`) to vitrix.yml.")
+        hint=f"Add `vitrix: {{kql_table: Event}}` to the rule, or `kql: {{tables: {{{key}: Event}}}}` (or `kql: {{default_table: Event}}`) to vitrix.yml.{tip}")
+
+
+_FIELD_ERR = re.compile(r"Invalid SigmaDetectionItem field name encountered: (\S+?)\.")
+
+
+def _explain(exc: Exception, text: str, target: Target) -> ConversionError:
+    """Turn any pySigma / plugin exception into an actionable issue (never the raw exception string)."""
+    msg = " ".join(str(exc).split())
+    name = type(exc).__name__
+    line = next((i for i, row in enumerate(text.splitlines(), 1) if row.startswith("detection:")), None)
+    m = _FIELD_ERR.search(msg)
+    if m:
+        fld = m.group(1)
+        return ConversionError(
+            f"{target.label} has no mapping for field `{fld}` in the table chosen for this rule's logsource.",
+            code="kql-field", path="detection", line=line,
+            hint=f"Map it with a field-mapping pipeline listed under `pipelines:` in vitrix.yml (`transformations: [{{type: field_name_mapping, mapping: {{{fld}: <column>}}}}]`), "
+                 "or pick another table with `vitrix: {kql_table: ...}` whose columns match the rule's fields.")
+    if "No valid hash algo" in msg:
+        return ConversionError("The rule's Hashes values use an algorithm this KQL table cannot match (only MD5, SHA1 and SHA256 are supported).",
+                               code="kql-hash", path="detection", line=line,
+                               hint="Use `Hashes|contains: 'SHA256=...'` (or MD5/SHA1) values, or drop other algorithms such as IMPHASH from the rule.")
+    if "correlation" in msg.lower() or "Correlation" in name:
+        return ConversionError(f"{target.label} cannot convert this correlation rule yet.", code="conversion-correlation", path="correlation", line=line,
+                               hint="Keep this rule for the targets that support correlation, or split it into plain detection rules.")
+    if "not supported" in msg or "Unsupported" in name or "unsupported" in msg:
+        return ConversionError(f"{target.label} does not support a construct in this rule: {msg[:160]}", code="conversion-unsupported", path="detection", line=line,
+                               hint="Rewrite the offending field/modifier with ones the target supports (e.g. contains/startswith instead of re/cidr), or drop this target for the rule.")
+    return ConversionError(f"{target.label} could not convert this rule ({name}).", code="conversion-failed", path="detection", line=line,
+                           hint=f"Check the rule's logsource, fields and modifiers against the {target.label} backend. Detail: {msg[:200]}")
 
 
 def _convert(text: str, target: Target, extra: list) -> str:
@@ -166,6 +250,15 @@ def _convert(text: str, target: Target, extra: list) -> str:
 
 
 def convert_text(text: str, target: Target, extra: list, kql: Any = None) -> str:
+    try:
+        return _convert_text(text, target, extra, kql)
+    except ConversionError:
+        raise
+    except Exception as exc:
+        raise _explain(exc, text, target) from None
+
+
+def _convert_text(text: str, target: Target, extra: list, kql: Any) -> str:
     """Convert the text of a Sigma file for the target.
 
     pySigma mutates the rule while converting (it renames fields). So every call parses the
@@ -189,8 +282,7 @@ def convert_text(text: str, target: Target, extra: list, kql: Any = None) -> str
     except Exception as exc:
         if "Unable to determine table name" not in str(exc):
             raise
-    product = keys[0].split("/")[0] if keys else ""
-    fallback = next((KQL_DEFAULT_TABLES[k] for k in [*keys, f"{product}/*"] if k in KQL_DEFAULT_TABLES), None) or getattr(kql, "default_table", None)
+    fallback = next((KQL_DEFAULT_TABLES[k] for k in keys if k in KQL_DEFAULT_TABLES), None) or getattr(kql, "default_table", None)
     if not fallback:
         raise _kql_table_error(text, doc) from None
     return _convert(text, target, [_table_pipeline(fallback), *extra])

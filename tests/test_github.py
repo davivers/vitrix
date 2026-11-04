@@ -32,7 +32,7 @@ READS = {
     "": {"html_url": f"https://github.com/{REPO}", "default_branch": "main", "private": True},
     "/commits/main": {"sha": "9e3f1c2aaaa", "html_url": f"https://github.com/{REPO}/commit/9e3f1c2",
                       "author": {"login": "ana"}, "commit": {"message": "feat: new rule\n\nbody", "author": {"date": "2026-11-02T10:00:00Z"}}},
-    "/pulls?state=open&base=main&per_page=50": [
+    "/pulls?state=open&per_page=100&page=1": [
         {"number": 9, "title": "feat: new rule X", "user": {"login": "ana"}, "html_url": f"https://github.com/{REPO}/pull/9",
          "head": {"ref": "vitrix/x-abc123"}, "draft": False, "created_at": "2026-11-01T12:00:00Z"},
         {"number": 8, "title": "tune: Y", "user": {"login": "bruno"}, "html_url": f"https://github.com/{REPO}/pull/8",
@@ -303,7 +303,7 @@ def test_activity_summarises_prs_merge_time_and_ci():
 
 
 def test_activity_without_data_never_invents_numbers():
-    empty = {"": {}, "/commits/main": {}, "/pulls?state=open&base=main&per_page=50": [],
+    empty = {"": {}, "/commits/main": {}, "/pulls?state=open&per_page=100&page=1": [],
              "/pulls?state=closed&base=main&sort=updated&direction=desc&per_page=50": [],
              "/actions/runs?branch=main&per_page=20": {"workflow_runs": []},
              "/actions/runs?event=pull_request&per_page=50": {"workflow_runs": []}}
@@ -437,3 +437,57 @@ def test_api_config_validate_and_submit(api):
     assert client.post("/api/ci/config", json={"text": text}).status_code == 201
     assert client.post("/api/ci/config", json={"text": "targets: [xyz]"}).status_code == 422
     assert not fake.posted("/pulls")
+
+
+def _transport(overrides):
+    base = {**READS, **overrides}
+    return lambda m, u, b: (200, base[u.split(f"/repos/{REPO}", 1)[1]])
+
+
+def test_open_prs_are_listed_even_when_base_is_misdetected():
+    # configured base is "feature-x" but the PRs target main: they must still show, flagged
+    pr = {"number": 3, "title": "t", "user": {"login": "a"}, "html_url": "u", "head": {"ref": "b", "repo": {"fork": True}},
+          "base": {"ref": "main"}, "created_at": "2026-11-01T12:00:00Z", "draft": True}
+    t = _transport({"/pulls?state=open&per_page=100&page=1": [pr], "/commits/feature-x": READS["/commits/main"],
+                    "/pulls?state=closed&base=feature-x&sort=updated&direction=desc&per_page=50": [],
+                    "/actions/runs?branch=feature-x&per_page=20": {"workflow_runs": []}})
+    a = GitHubClient(GitHubConfig(repo=REPO, base="feature-x"), transport=t).activity(now=NOW)
+    p = a["pulls"]
+    assert p["open"] == 1 and p["against_base"] == 0
+    assert p["items"][0]["base"] == "main" and p["items"][0]["draft"] and p["items"][0]["fork"]
+    assert a["merge"]["median_hours"] is None and a["merge"]["sample"] == 0  # unknown, not 0
+
+
+def test_open_prs_are_paginated():
+    mk = lambda n: {"number": n, "title": "t", "head": {"ref": f"b{n}"}, "created_at": "2026-11-01T12:00:00Z"}  # noqa: E731
+    pages = {1: [mk(i) for i in range(100)], 2: [mk(i) for i in range(100, 130)]}
+    t = _transport({})
+
+    def send(m, u, b):
+        if "/pulls?state=open" in u:
+            return 200, pages[int(u.rsplit("page=", 1)[1])]
+        return t(m, u, b)
+
+    assert GitHubClient(GitHubConfig(repo=REPO), transport=send).activity(now=NOW)["pulls"]["open"] == 130
+
+
+def test_pulls_failure_or_garbage_is_an_error_not_an_empty_list(tmp_path):
+    for fake in (FakeGitHub(fail={"/pulls?state=open": 403}), _transport({"/pulls?state=open&per_page=100&page=1": None})):
+        with pytest.raises(GitHubError):
+            GitHubClient(GitHubConfig(repo=REPO), transport=fake).activity(now=NOW)
+    cfg = project_cfg(tmp_path)
+    service._activity_cache.clear()
+    out = service.github_activity(cfg, client=client_for(cfg, FakeGitHub(fail={"/pulls?state=open": 403})))
+    assert out["available"] is False and out["reason"] == "error" and "permission" in out["message"]
+    assert not service._activity_cache  # failures are never cached
+
+
+@pytest.mark.parametrize("url", [
+    "git@github.com:org/repo.git", "https://github.com/org/repo", "https://github.com/org/repo.git/",
+    "https://www.github.com/org/repo.git", "https://user:tok@github.com/org/repo.git", "ssh://git@github.com/org/repo.git",
+    "ssh://git@github.com:22/org/repo.git", "git://github.com/org/repo.git", "  git@github.com:org/repo.git\n",
+])
+def test_remote_url_variants(url):
+    from vitrix.gitremote import parse_remote
+
+    assert parse_remote(url) == "org/repo"

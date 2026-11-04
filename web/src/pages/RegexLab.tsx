@@ -1,5 +1,5 @@
 import clsx from "clsx";
-import { AlertTriangle, Check, CheckCircle2, Copy, Info, Loader2, Plus, Timer, Trash2, XCircle } from "lucide-react";
+import { AlertTriangle, Check, Cpu, CheckCircle2, Copy, Info, Loader2, Plus, Timer, Trash2, XCircle } from "lucide-react";
 import { useEffect, useState } from "react";
 import { request } from "../api";
 import { Card, ErrorBox, PageHeader } from "../components/ui";
@@ -24,7 +24,21 @@ interface RegexResult {
   tips: { severity: "error" | "warning" | "info"; message: string }[];
   sigma: string | null;
   elapsed_ms?: number;
+  /** Same engine as Replay and the evaluator (telemetry contract). */
+  engine?: { name: string; version?: string; timeout_ms?: number };
+  flavor_warnings?: ({ target?: string; message?: string; construct?: string } | string)[];
 }
+
+/** Static scan for constructs some SIEM regex flavors lack (spec regex-workbench-label.md). */
+const FLAVOR_CHECKS: { re: RegExp; key: "rx_w_look" | "rx_w_backref" | "rx_w_atomic" | "rx_w_short" | "rx_w_inline" | "rx_w_nested" | "rx_w_prop"; langs: string[] }[] = [
+  { re: /\(\?<?[=!]/, key: "rx_w_look", langs: ["KQL", "Lucene"] },
+  { re: /\\[1-9]|\\k</, key: "rx_w_backref", langs: ["KQL"] },
+  { re: /\(\?>|[*+?}]\+/, key: "rx_w_atomic", langs: ["KQL", "Lucene"] },
+  { re: /\\[dwsb]/i, key: "rx_w_short", langs: ["Lucene"] },
+  { re: /\(\?[a-z]+[:)]/i, key: "rx_w_inline", langs: ["Lucene"] },
+  { re: /\([^)]*[+*]\)[+*]/, key: "rx_w_nested", langs: ["SPL", "Replay"] },
+  { re: /\\[pP]\{/, key: "rx_w_prop", langs: ["Lucene"] },
+];
 
 const START_SAMPLES = [
   "powershell.exe -nop -w hidden -enc SQBFAFgAIAAoAE4AZQB3AC0ATwBiAGoA",
@@ -136,6 +150,56 @@ export default function RegexLabPage() {
             <span className="grid place-items-center px-3 font-mono text-subtle">/{flags}</span>
           </span>
         </label>
+        <p
+          className={clsx("mt-2 inline-flex items-center gap-1.5 rounded-md px-2 py-1 font-mono text-xs", result?.engine ? "bg-surface-2 text-text" : "bg-warn-soft text-warn")}
+          title={result?.engine ? t("rx_engine_tip") : undefined}
+          data-testid="regex-engine"
+        >
+          {result?.engine ? <Cpu size={12} aria-hidden /> : <AlertTriangle size={12} aria-hidden />}{" "}
+          {result?.engine
+            ? t("rx_engine", { e: `${result.engine.name === "regex" ? "Python regex" : result.engine.name}${result.engine.version ? ` ${result.engine.version}` : ""}${result.engine.timeout_ms ? ` · ${t("rx_timeout", { ms: result.engine.timeout_ms })}` : ""}` })
+            : t("rx_engine_unknown")}
+        </p>
+        <ul className="mt-3 space-y-1" aria-live="polite" aria-label={t("rx_compat")} data-testid="regex-flavor-scan">
+          {FLAVOR_CHECKS.filter((c) => c.re.test(pattern)).map((c) => (
+            <li key={c.key} className="flex items-start gap-2 text-[13px] text-warn">
+              <AlertTriangle size={14} className="mt-0.5 shrink-0" aria-hidden />
+              <span>
+                {t(c.key)} <span className="font-mono text-xs">[{c.langs.join(", ")}]</span>
+              </span>
+            </li>
+          ))}
+          {!FLAVOR_CHECKS.some((c) => c.re.test(pattern)) && (
+            <li className="flex items-start gap-2 text-[13px] text-muted">
+              <CheckCircle2 size={14} className="mt-0.5 shrink-0 text-good" aria-hidden /> {t("rx_w_none")}
+            </li>
+          )}
+        </ul>
+        <details className="mt-2 text-[13px] text-muted">
+          <summary className="cursor-pointer">{t("rx_flavors")}</summary>
+          <table className="mt-2 w-full text-left text-xs">
+            <tbody>
+              {[["Splunk SPL", "PCRE"], ["Microsoft KQL", "RE2"], ["Elastic Lucene", "Lucene regex"], ["Elastic EQL", "Java regex"]].map(([l, f]) => (
+                <tr key={l} className="border-t border-line">
+                  <th scope="row" className="py-1 pr-3 font-medium text-text">{l}</th>
+                  <td className="py-1">{f}</td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        </details>
+        {(result?.flavor_warnings?.length ?? 0) > 0 && (
+          <ul className="mt-3 space-y-1" aria-label={t("rx_flavor_title")} data-testid="regex-flavor-warnings">
+            {result!.flavor_warnings!.map((w, i) => (
+              <li key={i} className="flex items-start gap-2 text-[13px] text-warn">
+                <AlertTriangle size={14} className="mt-0.5 shrink-0" aria-hidden />
+                <span>
+                  {typeof w === "string" ? w : (<><span className="font-semibold">{w.target}</span>{w.target ? ": " : ""}{w.message ?? w.construct}</>)}
+                </span>
+              </li>
+            ))}
+          </ul>
+        )}
         <div className="mt-3 flex flex-wrap items-center gap-2">
           {FLAG_INFO.map(([f, label]) => (
             <label key={f} className={clsx("flex cursor-pointer items-center gap-1.5 rounded-md border px-2.5 py-1 text-[12.5px]", flags.includes(f) ? "border-accent/50 bg-accent-soft text-strong" : "border-line text-muted")}>

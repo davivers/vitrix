@@ -51,6 +51,32 @@ def _git(cfg: Config, *args: str, input: bytes | None = None) -> bytes:
     return proc.stdout
 
 
+NO_COMMITS_MESSAGE = "This repository has no commits yet. Commit your rules to see their history."
+NOT_A_REPO_MESSAGE = "This folder is not a Git repository, so there is no history to show."
+GIT_MISSING_MESSAGE = "Git is not installed or not on PATH, so there is no history to show."
+
+
+def repo_state(cfg: Config) -> dict | None:
+    """None when the project is in a Git repository with at least one commit; otherwise
+    `{state: "no_commits" | "not_a_repo" | "git_missing", message}` with a friendly message
+    (never the raw git error)."""
+    if shutil.which("git") is None:
+        return {"state": "git_missing", "message": GIT_MISSING_MESSAGE}
+    try:
+        _git(cfg, "rev-parse", "--is-inside-work-tree")
+    except (HistoryError, OSError, subprocess.TimeoutExpired):
+        return {"state": "not_a_repo", "message": NOT_A_REPO_MESSAGE}
+    try:
+        _git(cfg, "rev-parse", "--verify", "--quiet", "HEAD^{commit}")
+    except (HistoryError, OSError, subprocess.TimeoutExpired):
+        return {"state": "no_commits", "message": NO_COMMITS_MESSAGE}
+    return None
+
+
+def unavailable(state: dict) -> dict:
+    return {"available": False, "state": state["state"], "message": state["message"], "reason": state["message"]}
+
+
 @dataclass
 class _RuleState:
     tactics: set[str] = field(default_factory=set)
@@ -190,10 +216,13 @@ def build_history(cfg: Config) -> dict:
 
 def history(cfg: Config) -> dict:
     """History with a short cache (per HEAD). Never raises."""
+    state = repo_state(cfg)
+    if state:
+        return unavailable(state)
     try:
         head = _git(cfg, "rev-parse", "HEAD").decode().strip()
-    except (HistoryError, OSError, subprocess.TimeoutExpired) as exc:
-        return {"available": False, "reason": str(exc) or "not a Git repository"}
+    except (HistoryError, OSError, subprocess.TimeoutExpired):
+        return unavailable({"state": "no_commits", "message": NO_COMMITS_MESSAGE})
     key = str(cfg.root)
     cached = _cache.get(key)
     if cached and cached[1] == head and time.monotonic() - cached[0] < CACHE_TTL:
@@ -201,7 +230,7 @@ def history(cfg: Config) -> dict:
     try:
         data = build_history(cfg)
     except (HistoryError, OSError, subprocess.TimeoutExpired, ValueError) as exc:
-        return {"available": False, "reason": str(exc)}
+        return {"available": False, "state": "error", "message": "The Git history could not be read.", "reason": str(exc)}
     data["head"] = head[:7]
     _cache[key] = (time.monotonic(), head, data)
     return data
@@ -210,6 +239,6 @@ def history(cfg: Config) -> dict:
 def rule_history(cfg: Config, rid: str) -> dict:
     h = history(cfg)
     if not h.get("available"):
-        return {"available": False, "reason": h.get("reason")}
+        return {k: v for k, v in h.items() if k != "rules"}
     info = h["rules"].get(rid)
     return {"available": True, "tracked": info is not None, **(info or {})}

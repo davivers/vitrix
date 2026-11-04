@@ -197,6 +197,10 @@ class Config:
     drafts_enabled: bool = True  # local drafts in <data_dir>/drafts.db (drafts.enabled)
     kql: KqlConfig = field(default_factory=KqlConfig)  # fallback tables for KQL
     reviews_enabled: bool = True  # comments and review requests in <data_dir>/reviews.db (reviews.enabled; needs accounts)
+    local_rules_enabled: bool = True  # Save writes rule files into rules/ and cases/ (local_rules.enabled; ADR 0007)
+    sync_enabled: bool = True  # GitHub sync: throttled fetch + safe fast-forward (ADR 0006); `sync: false` or VITRIX_SYNC=off
+    sync_interval: int = 30  # seconds between fetches, clamped 10..3600
+    sync_fast_forward: bool = True
 
     def rel(self, path: Path) -> str:
         """Path relative to the project root, for messages."""
@@ -222,6 +226,18 @@ def _dir(data: dict, key: str, default: str) -> str:
     value = data.get(key, default)
     if not isinstance(value, str) or not value.strip():
         raise ConfigError(f"'{key}' must be a folder name (a non-empty string), not {value!r}")
+    return value
+
+
+def _inside(root: Path, key: str, value: str) -> str:
+    """A configured folder must stay inside the project root: sync can pull a vitrix.yml change from
+    GitHub, and rules/cases/datasets/output folders are written to by the app."""
+    try:
+        (root / value).resolve().relative_to(root.resolve())
+    except (ValueError, OSError):
+        raise ConfigError(f"'{key}' must be a folder inside the project, not {value!r}") from None
+    if Path(value).is_absolute() or Path(value).drive:
+        raise ConfigError(f"'{key}' must be a relative folder inside the project, not {value!r}")
     return value
 
 
@@ -301,11 +317,36 @@ def parse_config_text(text: str, root: Path, name: str = "vitrix.yml") -> Config
     if not isinstance(raw_reviews, dict) or not isinstance(raw_reviews.get("enabled", True), bool):
         raise ConfigError("'reviews' must be a mapping (or false) and reviews.enabled must be true or false")
 
+    raw_local = data.get("local_rules")
+    if raw_local is None:
+        raw_local = {}
+    elif raw_local is False:
+        raw_local = {"enabled": False}
+    if not isinstance(raw_local, dict) or not isinstance(raw_local.get("enabled", True), bool):
+        raise ConfigError("'local_rules' must be a mapping (or false) and local_rules.enabled must be true or false")
+
+    raw_sync = data.get("sync")
+    if raw_sync is None:
+        raw_sync = {}
+    elif raw_sync is False:
+        raw_sync = {"enabled": False}
+    if not isinstance(raw_sync, dict) or not isinstance(raw_sync.get("enabled", True), bool) or not isinstance(raw_sync.get("fast_forward", True), bool):
+        raise ConfigError("'sync' must be a mapping (or false); sync.enabled and sync.fast_forward must be true or false")
+    interval = raw_sync.get("interval_seconds", 30)
+    if isinstance(interval, bool) or not isinstance(interval, int):
+        raise ConfigError("sync.interval_seconds must be a whole number of seconds")
+    sync_enabled = raw_sync.get("enabled", True)
+    env_sync = os.environ.get("VITRIX_SYNC", "").strip().lower()
+    if env_sync in ("off", "0", "false"):
+        sync_enabled = False
+    elif env_sync in ("on", "1", "true"):
+        sync_enabled = True
+
     return Config(
         root=root,
-        rules_dir=root / _dir(data, "rules_dir", "rules"),
-        cases_dir=root / _dir(data, "cases_dir", "cases"),
-        output_dir=root / _dir(data, "output_dir", "dist"),
+        rules_dir=root / _inside(root, "rules_dir", _dir(data, "rules_dir", "rules")),
+        cases_dir=root / _inside(root, "cases_dir", _dir(data, "cases_dir", "cases")),
+        output_dir=root / _inside(root, "output_dir", _dir(data, "output_dir", "dist")),
         targets=targets,
         default_target=default_target.strip() if default_target else None,
         routes=routes,
@@ -313,13 +354,17 @@ def parse_config_text(text: str, root: Path, name: str = "vitrix.yml") -> Config
         require_cases=bool(data.get("require_cases", True)),
         github=github,
         github_source=github_source,
-        datasets_dir=root / _dir(data, "datasets_dir", "datasets"),
+        datasets_dir=root / _inside(root, "datasets_dir", _dir(data, "datasets_dir", "datasets")),
         gate=_parse_gate(data.get("quality_gate")),
         auth=_auth_with_env(data.get("auth")),
         data_dir=root / _dir(data, "data_dir", ".vitrix"),
         drafts_enabled=raw_drafts.get("enabled", True),
         reviews_enabled=raw_reviews.get("enabled", True),
         kql=_parse_kql(data.get("kql")),
+        local_rules_enabled=raw_local.get("enabled", True),
+        sync_enabled=sync_enabled,
+        sync_interval=max(10, min(3600, interval)),
+        sync_fast_forward=raw_sync.get("fast_forward", True),
     )
 
 
@@ -368,6 +413,15 @@ class ConfigHolder:
                     self._stamp = stamp
                     self._reload()
             return self._cfg
+
+    def refresh(self) -> None:
+        """Re-read vitrix.yml now (after a sync changed the working tree), ignoring the debounce."""
+        if self.path is None:
+            return
+        with self._lock:
+            self._checked = self._clock()
+            self._stamp = self._stat()
+            self._reload()
 
     def _reload(self) -> None:
         try:

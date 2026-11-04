@@ -1,4 +1,53 @@
+import { spawnSync } from "node:child_process";
+import { mkdirSync, mkdtempSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import path from "node:path";
 import { expect, type Page } from "@playwright/test";
+
+/** Runs git in `cwd` with a throwaway identity; throws with stderr on failure. */
+export function git(cwd: string, ...args: string[]) {
+  const r = spawnSync("git", ["-c", "user.email=e2e@example.com", "-c", "user.name=e2e", ...args], { cwd, encoding: "utf8" });
+  if (r.status !== 0) throw new Error(`git ${args.join(" ")} failed: ${r.stderr}`);
+  return r.stdout.trim();
+}
+
+/** Commits `files` (path -> content) to the bare "GitHub" repo from a separate clone, like a teammate merging a PR. */
+export function pushToBare(files: Record<string, string>, message: string) {
+  const dir = mkdtempSync(path.join(tmpdir(), "vitrix-e2e-teammate-"));
+  git(dir, "clone", "-q", process.env.E2E_AUTH_BARE!, "work");
+  const work = path.join(dir, "work");
+  for (const [rel, text] of Object.entries(files)) {
+    mkdirSync(path.dirname(path.join(work, rel)), { recursive: true });
+    writeFileSync(path.join(work, rel), text, "utf8");
+  }
+  git(work, "add", "-A");
+  git(work, "commit", "-q", "-m", message);
+  git(work, "push", "-q", "origin", process.env.E2E_AUTH_BRANCH!);
+}
+
+/** A minimal valid Sigma rule for tests (unique id/title per call). `selection` is the body of the selection block. */
+export function sigmaRule(title: string, id: string, extra = { selection: "Image|endswith: '\\powershell.exe'\n    CommandLine|contains: ' -enc '" }) {
+  return `title: ${title}
+id: ${id}
+status: experimental
+description: E2E rule ${title}
+author: e2e
+date: 2026-11-04
+tags:
+  - attack.execution
+  - attack.t1059.001
+logsource:
+  category: process_creation
+  product: windows
+detection:
+  selection:
+    ${extra.selection}
+  condition: selection
+falsepositives:
+  - none
+level: medium
+`;
+}
 
 export const AUTH_URL = () => process.env.E2E_AUTH_URL!;
 export const LOCAL_URL = () => process.env.E2E_LOCAL_URL!;

@@ -1,7 +1,8 @@
 """Regex Workbench: develop, test and optimise the regular expressions of Sigma rules.
 
-Uses the same engine as the local evaluator (Python's `re`), so what passes here passes in
-the test cases. Each analysis runs in a separate process with a timeout: a regex with
+Uses the same engine as the local evaluator (the `regex` package, default V0 semantics, same
+flags), so what passes here passes in the test cases. Per-target flavor warnings tell you which
+constructs a SIEM's own regex flavor would not accept. Each analysis runs in a separate process with a timeout: a regex with
 catastrophic backtracking hits the timeout instead of freezing the server.
 
     python -m vitrix.regex_lab   (reads JSON from stdin; internal use)
@@ -16,14 +17,18 @@ import sys
 import threading
 import time
 
+import regex as rx  # the evaluator's engine (evaluator.py); stdlib `re` is only used for linting below
+
 from .lint import NESTED_QUANTIFIER
+from .regex_flavors import flavor_warnings
 
 TIMEOUT_S = 2.0
 _SLOTS = threading.BoundedSemaphore(2)  # at most 2 regex processes at the same time
 MAX_SAMPLES = 50
 MAX_SAMPLE_LEN = 20_000
 MAX_PATTERN_LEN = 2_000
-FLAGS = {"i": re.IGNORECASE, "m": re.MULTILINE, "s": re.DOTALL}
+FLAGS = {"i": rx.IGNORECASE, "m": rx.MULTILINE, "s": rx.DOTALL}  # same mapping as evaluator._match_value
+ENGINE_NAME = "Python regex (Vitrix evaluator)"
 # \W, \S, \D, \B... right after something that looks like a Windows path: the backslash was
 # probably meant literally (C:\Windows becomes C: + "non-word" + indows).
 WINDOWS_PATH_ESCAPE = re.compile(r"[A-Za-z]:\\(?=[A-Za-z])|\\(?:Windows|System32|Users|Program|AppData|Temp)\b", re.IGNORECASE)
@@ -58,31 +63,43 @@ def lint_pattern(pattern: str) -> list[dict]:
     return tips
 
 
+
 def _run(pattern: str, flags: str, samples: list[str]) -> dict:
     """Executa no processo atual. Chamado pelo subprocesso."""
     value = 0
     for f in flags:
         value |= FLAGS[f]
     try:
-        rx = re.compile(pattern, value)
-    except re.error as exc:
-        return {"ok": False, "error": str(exc), "position": exc.pos}
+        compiled = rx.compile(pattern, value)
+    except rx.error as exc:
+        return {"ok": False, "error": str(exc), "position": getattr(exc, "pos", None)}
     results = []
     for s in samples:
         t0 = time.perf_counter()
         matches = []
-        for m in rx.finditer(s):
+        try:
+            found = list(compiled.finditer(s, timeout=TIMEOUT_S / 2))
+        except TimeoutError:
+            return {"ok": False, "timeout": True, "error": "the run timed out: catastrophic backtracking is likely"}
+        for m in found:
             matches.append({"start": m.start(), "end": m.end(), "text": m.group(0)[:500],
                             "groups": [g if g is None else g[:200] for g in m.groups()],
                             "named": {k: (v if v is None else v[:200]) for k, v in m.groupdict().items()}})
             if len(matches) >= 100:
                 break
         results.append({"matched": bool(matches), "matches": matches, "duration_ms": round((time.perf_counter() - t0) * 1000, 3)})
-    return {"ok": True, "groups": rx.groups, "names": list(rx.groupindex), "results": results}
+    return {"ok": True, "groups": compiled.groups, "names": list(compiled.groupindex), "results": results}
 
 
-def analyze(pattern: str, flags: str = "", samples: list[str] | None = None, timeout: float = TIMEOUT_S) -> dict:
-    """Compile, run on the samples (in a subprocess, with a timeout) and give optimisation tips."""
+def engine_info(timeout: float = TIMEOUT_S) -> dict:
+    return {"name": ENGINE_NAME, "version": getattr(rx, "__version__", "unknown"), "timeout_ms": int(timeout * 1000)}
+
+
+def analyze(pattern: str, flags: str = "", samples: list[str] | None = None, timeout: float = TIMEOUT_S,
+            targets: list[str] | None = None) -> dict:
+    """Compile, run on the samples (in a subprocess, with a timeout) and give optimisation tips.
+
+    Adds `engine` ({name, version, timeout_ms}) and `flavor_warnings` ([{target, flavor, message}]) for `targets`."""
     samples = list(samples or [])
     if len(pattern) > MAX_PATTERN_LEN:
         raise RegexLabError(f"regex longer than {MAX_PATTERN_LEN} characters")
@@ -95,6 +112,7 @@ def analyze(pattern: str, flags: str = "", samples: list[str] | None = None, tim
         raise RegexLabError(f"unknown flag: {''.join(sorted(bad))} (use i, m, s)")
 
     tips = lint_pattern(pattern)
+    extra = {"engine": engine_info(timeout), "flavor_warnings": flavor_warnings(pattern, flags, list(targets or []))}
     started = time.perf_counter()
     if not _SLOTS.acquire(timeout=timeout):
         raise RegexLabError("too many runs at the same time; try again")
@@ -108,14 +126,15 @@ def analyze(pattern: str, flags: str = "", samples: list[str] | None = None, tim
         )
     except subprocess.TimeoutExpired:
         return {"ok": False, "timeout": True, "error": f"the run took more than {timeout:g} s: catastrophic backtracking is likely",
-                "tips": tips, "sigma": None}
+                "tips": tips, "sigma": None, **extra}
     finally:
         _SLOTS.release()
     if proc.returncode != 0:
         raise RegexLabError(f"failed to run the regex: {proc.stderr.strip()[-300:]}")
     out = json.loads(proc.stdout)
     out["tips"] = tips
-    out["timeout"] = False
+    out.update(extra)
+    out.setdefault("timeout", False)
     out["elapsed_ms"] = round((time.perf_counter() - started) * 1000, 1)
     mods = "".join(f"|{f}" for f in sorted(flags))
     out["sigma"] = f"Field|re{mods}: '{pattern.replace(chr(39), chr(39) * 2)}'" if out.get("ok") else None

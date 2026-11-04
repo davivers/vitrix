@@ -80,8 +80,10 @@ test("owner bootstraps, invites an editor, role changes keep the session", async
   await eddie.reload();
   const save = eddie.getByRole("button", { name: "Save locally" });
   await expect(save).not.toHaveAttribute("aria-disabled", "true");
-  await save.click();
-  await expect(eddie.getByText(/Saved locally at/)).toBeVisible();
+  await save.click(); // a new rule asks for its file path first
+  await eddie.getByLabel("Rule file path inside rules/").fill("e2e/eddie_rule.yml");
+  await eddie.getByRole("button", { name: "Save here" }).click();
+  await expect(eddie.getByText("Local · not in a PR").first()).toBeVisible(); // written to rules/, flagged as local
   await ctx2.close();
 });
 

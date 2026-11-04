@@ -153,4 +153,106 @@ def test_viewer_replay_draft_with_catastrophic_regex_is_bounded(tmp_path):
     resp = _bounded(viewer, "/api/replay/draft", {"rule": EVIL_RULE})
     assert resp.status_code == 200
     body = resp.json()
-    assert body["passed"] is False and body["errors"] == 1 and "timed out" in body["datasets"][0]["error"]
+    assert body["passed"] is False and body["errors"] == 1 and "timed out" in body["datasets"][0]["error_text"]
+
+
+# --------------------------------------------------------------------------- Sprint 4: roles, private drafts (ADR 0006/0007)
+
+ROLE_TABLE = [  # method, path, minimum role
+    ("GET", "/api/sync", "viewer"), ("POST", "/api/sync", "viewer"),  # `force` is checked inside the route
+    ("POST", "/api/rules", "editor"), ("PUT", "/api/rules/a/b.yml", "editor"), ("DELETE", "/api/rules/a/b.yml", "editor"),
+    ("POST", "/api/ci/local-rules", "editor"),
+    ("GET", "/api/rules/a/b.yml/related", "viewer"), ("POST", "/api/related", "viewer"),
+    ("POST", "/api/reviews/read-all", "viewer"), ("POST", "/api/reviews/" + "a" * 32 + "/read", "viewer"),
+    ("POST", "/api/reviews/" + "a" * 32 + "/unread", "viewer"),
+    ("POST", "/api/reviews/" + "a" * 32 + "/decision", "editor"), ("POST", "/api/reviews", "editor"),
+    ("POST", "/api/rules/a/b.yml", "admin"),  # no such route: unknown writes stay admin-only
+    ("PATCH", "/api/rules/a/b.yml", "admin"),
+]
+
+
+@pytest.mark.parametrize("method,path,need", ROLE_TABLE)
+def test_required_role_table_sprint4(method, path, need):
+    from vitrix.auth import Identity
+    from vitrix.auth_api import required_role
+
+    assert required_role(method, path) == need
+    for role in ("viewer", "editor", "admin", "owner"):
+        ident = Identity(1, "a@example.com", "A", role, None, None, None, "h")
+        assert ident.can(need) == (auth_levels()[role] >= auth_levels()[need])
+
+
+def auth_levels():
+    from vitrix.auth import ROLE_LEVEL
+
+    return ROLE_LEVEL
+
+
+def test_anonymous_is_401_on_every_sprint4_route(tmp_path):
+    from fastapi.testclient import TestClient
+
+    from vitrix.api import create_app
+
+    c = TestClient(create_app(make_project(tmp_path, extra_cfg="auth:\n  enabled: true\n")), base_url="http://127.0.0.1:8000")
+    for method, path, _ in ROLE_TABLE:
+        assert c.request(method, path, json={}).status_code == 401, (method, path)
+
+
+def test_drafts_are_deleted_on_logout_expiry_and_removal(tmp_path):
+    from vitrix.auth import AuthConfig, AuthStore
+    from vitrix.drafts import DraftStore
+
+    clock = [1000.0]
+    store = AuthStore(":memory:", AuthConfig(enabled=True, session_days=1), clock=lambda: clock[0])
+    drafts = DraftStore(tmp_path / "drafts.db")
+    store.on_user_done.append(drafts.delete_for_author)
+    a = store.create_user("a@example.com", "A", "correct horse battery", "owner")
+    b = store.create_user("b@example.com", "B", "correct horse battery", "editor")
+    c = store.create_user("c@example.com", "C", "correct horse battery", "editor")
+
+    def save(uid):
+        drafts.create(path=None, title="t", rule="r", cases=None, base_hash=None, author={"id": uid, "email": "x", "name": "x"})
+
+    keep = drafts.create(path=None, title="shared", rule="r", cases=None, base_hash=None)  # authorless: never auto-deleted
+    for uid in (a, b, c):
+        save(uid)
+    ta, tb = store.create_session(a), store.create_session(b)
+    store.create_session(c)
+    # logout wipes the author's drafts (and only theirs)
+    store.end_session(ta)
+    assert {r["author_id"] for r in drafts.list()} == {None, b, c}
+    # expiry: b and c have no session after the clock moves; a new login sweeps them
+    clock[0] += 86400 + 1
+    assert store.identify(tb) is None
+    store.create_session(a)
+    assert [r["id"] for r in drafts.list()] == [keep["id"]]
+    # removal
+    save(b)
+    store.remove_member(store.identify(store.create_session(a)), b)
+    assert [r["id"] for r in drafts.list()] == [keep["id"]]
+
+
+def test_purge_except_keeps_active_authors_and_authorless(tmp_path):
+    from vitrix.drafts import DraftStore
+
+    drafts = DraftStore(tmp_path / "d.db")
+    for uid in (1, 2, None):
+        drafts.create(path=None, title="t", rule="r", cases=None, base_hash=None, author={"id": uid, "email": "x", "name": "x"} if uid else None)
+    assert drafts.purge_except({1}) == 1
+    assert sorted(str(r["author_id"]) for r in drafts.list()) == ["1", "None"]
+    assert drafts.purge_except(set()) == 1
+
+
+def test_logout_over_http_deletes_the_users_drafts(tmp_path):
+    from fastapi.testclient import TestClient
+
+    from vitrix.api import create_app
+
+    c = TestClient(create_app(make_project(tmp_path, extra_cfg="auth:\n  enabled: true\n")), base_url="http://127.0.0.1:8000")
+    pw = "correct horse battery"
+    c.post("/api/auth/register", json={"email": "o@example.com", "name": "O", "password": pw})
+    assert c.post("/api/drafts", json={"rule": RULE_OK}).status_code == 201
+    assert len(c.get("/api/drafts").json()["drafts"]) == 1
+    assert c.post("/api/auth/logout", json={}).status_code == 200
+    assert c.post("/api/auth/login", json={"email": "o@example.com", "password": pw}).status_code == 200
+    assert c.get("/api/drafts").json()["drafts"] == []

@@ -26,7 +26,7 @@ detection:
   condition: selection
 level: low
 """
-ODD_RULE = SYSTEM_RULE.replace("service: system", "service: nosuchservice")
+ODD_RULE = SYSTEM_RULE.replace("product: windows\n  service: system", "product: nosuchproduct\n  service: nosuchservice")
 
 
 def with_block(text: str, block: str) -> str:
@@ -64,8 +64,8 @@ def test_default_table_then_actionable_error():
         convert_text(ODD_RULE, KQL, [])
     err = e.value
     assert err.code == "kql-table" and err.path == "logsource" and err.line == 7 and err.column == 1
-    assert "windows/nosuchservice" in str(err) and len(str(err)) < 200
-    assert "kql_table" in err.hint and "windows/nosuchservice: Event" in err.hint and "vitrix.yml" in err.hint
+    assert "nosuchproduct/nosuchservice" in str(err) and len(str(err)) < 200
+    assert "kql_table" in err.hint and "nosuchproduct/nosuchservice: Event" in err.hint and "vitrix.yml" in err.hint
 
 
 def test_other_targets_unaffected():
@@ -112,3 +112,52 @@ def test_cli_convert_uses_the_default(tmp_path, capsys):
 
     cfg = make_project(tmp_path, rule_text=SYSTEM_RULE, cases_text=CASES_OK)
     assert run(cfg, "convert", "--target", "kql") == 0
+
+
+# ---- U4: SigmaHQ-style logsources beyond the Windows defaults --------------------------------
+
+
+def _rule(ls: str, det: str = "    Foo: bar") -> str:
+    body = "\n".join("  " + x for x in ls.split(";"))
+    return SYSTEM_RULE.split("logsource:")[0] + f"logsource:\n{body}\ndetection:\n  selection:\n{det}\n  condition: selection\nlevel: low\n"
+
+
+@pytest.mark.parametrize("ls,table", [
+    ("product: linux", "Syslog"),
+    ("product: macos", "Syslog"),
+    ("product: windows;category: pipe_created", "Event"),
+    ("product: windows;service: dns-client", "Event"),
+    ("product: azure;service: pim", "AuditLogs"),
+    ("product: azure;service: riskdetection", "AADUserRiskEvents"),
+    ("product: m365;service: threat_management", "OfficeActivity"),
+    ("product: kubernetes;service: audit", "AKSAudit"),
+    ("product: cisco;service: aaa", "Syslog"),
+    ("product: fortigate;service: event", "CommonSecurityLog"),
+    ("category: proxy", "CommonSecurityLog"),
+    ("category: dns", "DnsEvents"),
+    ("service: nginx", "Syslog"),
+])
+def test_u4_builtin_tables(ls, table):
+    assert first_line(convert_text(_rule(ls), KQL, [], KqlConfig())) == table
+
+
+def test_u4_third_party_stays_actionable_with_suggestion():
+    with pytest.raises(ConversionError) as ei:
+        convert_text(_rule("product: okta;service: okta"), KQL, [], KqlConfig())
+    assert ei.value.code == "kql-table" and "okta/okta" in ei.value.hint and "Okta_CL" in ei.value.hint
+    assert convert_text(_rule("product: okta;service: okta"), KQL, [], KqlConfig(tables={"okta/okta": "Okta_CL"})).startswith("Okta_CL")
+
+
+def test_u4_no_raw_pysigma_error():
+    # a field the chosen table has no mapping for -> kql-field issue, not "SigmaTransformationError: ..."
+    text = _rule("product: windows;service: bits-client", "    processPath: x")
+    try:
+        convert_text(text, KQL, [], KqlConfig())
+    except ConversionError as exc:
+        assert exc.code == "kql-field" and "processPath" in str(exc) and exc.hint
+        assert "SigmaTransformationError" not in str(exc) and "SigmaTransformationError" not in exc.hint
+    corr = SYSTEM_RULE.replace("detection:", "detection:")  # unrelated: bad hash algo below
+    hashes = _rule("product: windows;category: driver_load", "    Hashes|contains: IMPHASH=ABC")
+    with pytest.raises(ConversionError) as ei:
+        convert_text(hashes, KQL, [], KqlConfig())
+    assert ei.value.code == "kql-hash" and corr

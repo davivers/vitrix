@@ -37,6 +37,7 @@ export function parseGovernance(text: string): { owner: string | null; review_by
 
 function invalidate(qc: ReturnType<typeof useQueryClient>) {
   void qc.invalidateQueries({ queryKey: ["reviews"] });
+  void qc.invalidateQueries({ queryKey: ["review"] });
   void qc.invalidateQueries({ queryKey: ["review-counts"] });
   void qc.invalidateQueries({ queryKey: ["comments"] });
 }
@@ -161,7 +162,7 @@ function RequestForm({ kind, target }: { kind: "rule" | "draft"; target: string 
   );
 }
 
-function Thread({ kind, target }: { kind: "rule" | "draft"; target: string }) {
+export function Thread({ kind, target }: { kind: "rule" | "draft"; target: string }) {
   const qc = useQueryClient();
   const comments = useQuery({ queryKey: ["comments", kind, target], queryFn: () => api.comments(kind, target), retry: false });
   const [body, setBody] = useState("");

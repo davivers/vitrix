@@ -145,3 +145,20 @@ def test_api_history_impact_and_navigator(tmp_path):
     assert nav.json()["domain"] == "enterprise-attack" and "attachment" in nav.headers["content-disposition"]
     v = client.post("/api/validate", json={"rule": RULE_OK, "cases": CASES_OK, "path": "r.yml"}).json()
     assert v["quality"]["ready"] is True and "score" in v["quality"]
+
+
+def test_empty_repo_and_non_repo_are_structured_states_not_git_errors(tmp_path):
+    cfg = load_config(make_project(tmp_path))
+    nr = history.history(cfg)
+    assert nr["available"] is False and nr["state"] == "not_a_repo" and "fatal" not in nr["message"]
+    git(tmp_path, "init", "-q", "-b", "main")
+    history._cache.clear()
+    empty = history.history(cfg)
+    assert empty["state"] == "no_commits" and "no commits yet" in empty["message"] and "ambiguous" not in json.dumps(empty)
+    rh = history.rule_history(cfg, "r.yml")
+    assert rh["available"] is False and rh["state"] == "no_commits"
+    from vitrix import drift
+
+    with pytest.raises(drift.DriftError) as exc:
+        drift.drift(cfg)
+    assert "no commits yet" in str(exc.value) and "ambiguous" not in str(exc.value)

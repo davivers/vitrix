@@ -32,12 +32,14 @@ import type {
   ReviewComment,
   ReviewCounts,
   ReviewList,
+  RelatedRule,
   Reviewer,
   RuleDetail,
   RuleHistory,
   RuleSummary,
   Stats,
   Submission,
+  SyncStatus,
   Target,
   TestSuites,
   Validation,
@@ -119,6 +121,7 @@ export async function request<T>(url: string, init?: RequestInit): Promise<T> {
     try {
       const body = await res.json();
       if (typeof body.detail === "string") detail = body.detail;
+      else if (body.detail && typeof body.detail === "object" && typeof body.detail.message === "string") detail = body.detail.message;
       else if (Array.isArray(body.detail)) detail = body.detail.map((d: { msg: string }) => d.msg).join("; ");
       extra = body;
     } catch {
@@ -179,6 +182,8 @@ export const api = {
   revokeInvite: (id: number) => del<{ ok: boolean }>(`/api/workspace/invites/${id}`),
   audit: () => request<AuditEntry[]>("/api/workspace/audit?limit=100"),
 
+  syncStatus: () => request<SyncStatus>("/api/sync"),
+  syncTrigger: (force = false) => post<SyncStatus>("/api/sync", { force }),
   rules: () => request<RuleSummary[]>("/api/rules"),
   rule: (id: string) => request<RuleDetail>(`/api/rules/${path(id)}`),
   stats: () => request<Stats>("/api/stats"),
@@ -188,7 +193,16 @@ export const api = {
 
   github: () => request<GitHubStatus>("/api/github"),
   activity: (refresh = false) => request<Activity>(`/api/github/activity${refresh ? "?refresh=true" : ""}`),
-  submitRule: (body: { path: string; rule: string; cases: string | null; title: string | null; draft_id?: string | null }) => post<Submission>("/api/ci/rules", body),
+  submitRule: (
+    body:
+      | { path: string; rule: string; cases: string | null; title: string | null; draft_id?: string | null }
+      | { source: "file"; path: string; sha: string; cases_sha: string | null; title: string | null },
+  ) => post<Submission>("/api/ci/rules", body),
+  createRule: (body: { path: string; rule: string; cases: string | null }) => post<RuleDetail>("/api/rules", body),
+  updateRule: (id: string, body: { rule: string; cases: string | null; remove_cases?: boolean; sha: string; cases_sha: string | null }) => put<RuleDetail>(`/api/rules/${path(id)}`, body),
+  deleteRule: (id: string, sha: string) => del<void>(`/api/rules/${path(id)}?sha=${encodeURIComponent(sha)}`),
+  related: (id: string, limit = 8) => request<RelatedRule[]>(`/api/rules/${path(id)}/related?limit=${limit}`),
+  relatedDraft: (rule: string) => post<RelatedRule[]>("/api/related", { rule }),
   submitConfig: (body: { text: string; title: string | null }) => post<Submission>("/api/ci/config", body),
   ciStatus: (commit: string) => request<CiStatus>(`/api/ci/status?commit=${encodeURIComponent(commit)}`),
   openPullRequest: (body: { branch: string; commit: string; title: string | null }) => post<PullRequest>("/api/pull-requests", body),
@@ -204,7 +218,7 @@ export const api = {
   history: () => request<History>("/api/history"),
   ruleHistory: (id: string) => request<RuleHistory>(`/api/history/${path(id)}`),
   replayDatasets: () => request<ReplayDatasetInfo[]>("/api/replay/datasets"),
-  replayDraft: (body: { rule: string; datasets?: string[]; path?: string | null }, signal?: AbortSignal) => post<DraftReplay>("/api/replay/draft", body, signal),
+  replayDraft: (body: { rule: string; datasets?: string[]; path?: string | null; cases?: string; compare?: boolean }, signal?: AbortSignal) => post<DraftReplay>("/api/replay/draft", body, signal),
 
   drift: (ref: string | null, rule?: string | null) => {
     const q = new URLSearchParams();
@@ -216,12 +230,17 @@ export const api = {
   packSources: () => request<PackSources>("/api/packs/sources"),
   startPackJob: (body: PackJobBody) => post<PackJob>("/api/packs/jobs", body),
   packJob: (id: string) => request<PackJob>(`/api/packs/jobs/${encodeURIComponent(id)}`),
+  submitLocalRules: (body: { paths: string[]; title: string | null }) => post<Submission>("/api/ci/local-rules", body),
   submitDrafts: (body: { draft_ids: string[]; title: string | null }) => post<Submission>("/api/ci/drafts", body),
 
   reviews: (q: { scope?: string; state?: string; kind?: string; ref?: string } = {}) => {
     const p = new URLSearchParams(Object.entries(q).filter((e): e is [string, string] => Boolean(e[1])));
     return request<ReviewList>(`/api/reviews${p.size ? `?${p}` : ""}`);
   },
+  review: (id: string) => request<Review>(`/api/reviews/${encodeURIComponent(id)}`),
+  readReview: (id: string) => post<unknown>(`/api/reviews/${encodeURIComponent(id)}/read`, {}),
+  unreadReview: (id: string) => post<unknown>(`/api/reviews/${encodeURIComponent(id)}/unread`, {}),
+  readAllReviews: () => post<unknown>("/api/reviews/read-all", {}),
   reviewCounts: () => request<ReviewCounts>("/api/reviews/counts"),
   reviewers: () => request<Reviewer[]>("/api/reviews/reviewers"),
   requestReview: (body: { target_kind: "rule" | "draft"; target_ref: string; reviewer_id: number; note: string | null }) => post<Review>("/api/reviews", body),

@@ -1,11 +1,11 @@
-import { useQuery } from "@tanstack/react-query";
+import { useQuery, useQueryClient } from "@tanstack/react-query";
 import clsx from "clsx";
 import { UserCheck } from "lucide-react";
 import { Link, useSearchParams } from "react-router-dom";
 import { api } from "../api";
 import { useMe } from "../components/auth";
 import { ReviewCard } from "../components/ReviewPanel";
-import { Card, ErrorBox, PageHeader } from "../components/ui";
+import { Card, ErrorBox, PageHeader, btnSecondary } from "../components/ui";
 import { t } from "../i18n";
 
 export default function ReviewsPage() {
@@ -14,11 +14,27 @@ export default function ReviewsPage() {
   const scope = params.get("tab") === "requested" ? "requested" : "to_review";
   const { data, error, isLoading } = useQuery({ queryKey: ["reviews", "page", scope], queryFn: () => api.reviews({ scope, state: "open" }), enabled: me.enabled, retry: false });
   const counts = useQuery({ queryKey: ["review-counts"], queryFn: api.reviewCounts, enabled: me.enabled, retry: false });
+  const qc = useQueryClient();
+  const markAll = async () => {
+    await api.readAllReviews().catch(() => undefined);
+    void qc.invalidateQueries({ queryKey: ["reviews"] });
+    void qc.invalidateQueries({ queryKey: ["review-counts"] });
+  };
   const off = !me.enabled ? t("rv_need_accounts") : data && !data.enabled ? (data.reason ?? t("rv_need_accounts")) : null;
 
   return (
     <div className="mx-auto max-w-4xl px-4 py-8 sm:px-8">
-      <PageHeader title={t("rv_my_reviews")} subtitle={t("rv_page_sub")} />
+      <PageHeader
+        title={t("rv_my_reviews")}
+        subtitle={t("rv_page_sub")}
+        actions={
+          counts.data?.enabled && (counts.data.unread ?? 0) > 0 ? (
+            <button type="button" className={btnSecondary} onClick={() => void markAll()}>
+              {t("rv_mark_all")}
+            </button>
+          ) : undefined
+        }
+      />
       {off ? (
         <Card className="flex flex-col items-center gap-3 p-10 text-center">
           <UserCheck size={28} className="text-subtle" aria-hidden />
@@ -52,11 +68,12 @@ export default function ReviewsPage() {
           <ul className="space-y-3">
             {(data?.reviews ?? []).map((r) => (
               <li key={r.id}>
-                <div className="mb-1 flex flex-wrap items-baseline gap-2 text-sm">
+                <div className={clsx("mb-1 flex flex-wrap items-baseline gap-2 border-l-[3px] pl-2 text-sm", r.unread ? "border-accent" : "border-transparent")}>
+                  {r.unread && <span className="rounded bg-accent px-1.5 py-0.5 text-[10.5px] font-semibold uppercase text-on-brand">{t("rv_new")}</span>}
                   {r.target.missing ? (
                     <span className="font-semibold text-muted">{r.target.title || r.target.ref}</span>
                   ) : (
-                    <Link to={r.target.kind === "rule" ? `/editor/${r.target.ref}` : `/editor?draft=${r.target.ref}`} className="font-semibold text-strong hover:text-accent">
+                    <Link to={`/reviews/${r.id}`} className="font-semibold text-strong hover:text-accent">
                       {r.target.title || r.target.ref}
                     </Link>
                   )}

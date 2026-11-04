@@ -44,7 +44,9 @@ from __future__ import annotations
 import ipaddress
 import os
 import re
+import time
 from pathlib import Path
+from typing import Literal
 
 from fastapi import FastAPI, HTTPException, Query, Request
 from fastapi.middleware.cors import CORSMiddleware
@@ -52,7 +54,7 @@ from fastapi.responses import FileResponse, JSONResponse, PlainTextResponse, Res
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field
 
-from . import __version__, auth, auth_api, flow, history, packs_api, regex_lab, reviews_api, service
+from . import __version__, auth, auth_api, flow, history, local_rules, packs_api, publication, regex_lab, reviews_api, service, sync_api
 from . import drafts as drafts_mod
 from . import drift as drift_mod
 from . import replay as replay_mod
@@ -60,6 +62,7 @@ from .backends import available_targets
 from .config import ConfigHolder
 from .evaluator import regex_budget
 from .github import GitHubError
+from .related import related_rules
 from .replay import ReplayError
 
 MAX_TEXT = 200_000  # characters per text field
@@ -73,6 +76,11 @@ class ValidateRequest(BaseModel):
     path: str | None = Field(default=None, max_length=300, description="rule path inside rules/ when editing an existing rule")
 
 
+class RelatedRequest(BaseModel):
+    rule: str = Field(max_length=MAX_TEXT)
+    limit: int = Field(default=8, ge=1, le=50)
+
+
 class ImpactRequest(BaseModel):
     rule: str = Field(max_length=MAX_TEXT)
     path: str | None = Field(default=None, max_length=300)
@@ -80,7 +88,10 @@ class ImpactRequest(BaseModel):
 
 class SubmitRuleRequest(BaseModel):
     path: str = Field(min_length=1, max_length=300, description="rule path inside rules/, e.g. windows/x.yml")
-    rule: str = Field(min_length=1, max_length=MAX_TEXT, description="Sigma rule YAML")
+    source: Literal["text", "file"] = Field(default="text", description="'file': publish the saved rule file (rule/cases must be absent)")
+    sha: str | None = Field(default=None, pattern=r"^[0-9a-f]{64}$", description="source=file: sha of the rule file you saw")
+    cases_sha: str | None = Field(default=None, pattern=r"^[0-9a-f]{64}$", description="source=file: sha of the cases file you saw")
+    rule: str | None = Field(default=None, min_length=1, max_length=MAX_TEXT, description="Sigma rule YAML (source=text)")
     cases: str | None = Field(default=None, max_length=MAX_TEXT, description="test cases YAML (optional)")
     title: str | None = Field(default=None, max_length=200, description="pull request title (optional)")
     draft_id: str | None = Field(default=None, pattern=r"^[0-9a-f]{32}$", description="the draft this rule was loaded from (for Reviewed-by)")
@@ -106,12 +117,15 @@ class ReplayDraftRequest(BaseModel):
     rule: str = Field(max_length=MAX_TEXT, description="the unsaved rule YAML from the Editor")
     datasets: list[str] | None = Field(default=None, max_length=50, description="dataset names; default: all")
     path: str | None = Field(default=None, max_length=500, description="rule id if editing an existing rule (expectation lookup)")
+    cases: str | None = Field(default=None, max_length=MAX_TEXT, description="cases YAML of the draft; default: the saved cases of `path`")
+    compare: bool = Field(default=False, description="add before/added/removed per dataset against the saved version of `path`")
 
 
 class RegexRequest(BaseModel):
     pattern: str = Field(max_length=2_000)
     flags: str = Field(default="", max_length=3, description="i, m and/or s (Sigma's |re|i|m|s)")
     samples: list[str] = Field(default_factory=list, max_length=50)
+    targets: list[str] | None = Field(default=None, max_length=10, description="targets to check flavors for; default: the configured ones")
 
 
 class ConfigTextRequest(BaseModel):
@@ -123,6 +137,25 @@ class DraftRequest(BaseModel):
     title: str | None = Field(default=None, max_length=drafts_mod.MAX_TITLE)
     rule: str = Field(min_length=1, max_length=MAX_TEXT, description="Sigma rule YAML (may be invalid)")
     cases: str | None = Field(default=None, max_length=MAX_TEXT)
+
+
+class LocalRuleCreate(BaseModel):
+    path: str = Field(min_length=1, max_length=300)
+    rule: str = Field(min_length=1, max_length=MAX_TEXT)
+    cases: str | None = Field(default=None, max_length=MAX_TEXT)
+
+
+class LocalRuleUpdate(BaseModel):
+    rule: str = Field(min_length=1, max_length=MAX_TEXT)
+    cases: str | None = Field(default=None, max_length=MAX_TEXT, description="null = leave the cases file unchanged")
+    remove_cases: bool = False
+    sha: str = Field(pattern=r"^[0-9a-f]{64}$")
+    cases_sha: str | None = Field(default=None, pattern=r"^[0-9a-f]{64}$")
+
+
+class SubmitLocalRulesRequest(BaseModel):
+    paths: list[str] = Field(min_length=1, max_length=50, description="local rule ids to publish as one branch")
+    title: str | None = Field(default=None, max_length=200)
 
 
 class SubmitDraftsRequest(BaseModel):
@@ -239,25 +272,87 @@ def create_app(config_path: str | None = None) -> FastAPI:
 
     @app.get("/api/targets")
     def targets() -> list[dict]:
-        return [
-            {"name": name, "label": t.label, "extension": t.extension, "active": name in cfg.targets}
-            for name, t in sorted(available_targets().items())
-        ]
+        return service.targets_view(cfg)
 
     @app.get("/api/stats")
     def stats() -> dict:
         return service.repo_stats(cfg)
 
     @app.get("/api/rules")
-    def rules() -> list[dict]:
-        return service.list_rules(cfg)
+    def rules(publication_state: str | None = Query(default=None, alias="publication", max_length=20)) -> list[dict]:
+        items = service.list_rules(cfg)
+        pm = publication.publication_map(cfg)
+        unknown = publication._info("unknown", reason="no file")  # noqa: SLF001
+        for item in items:
+            item["publication"] = pm.get(item["id"], unknown)
+        if publication_state:
+            wanted = {"unmerged": {"local", "pushed", "in_pr"}}.get(publication_state, {publication_state})
+            items = [i for i in items if i["publication"]["state"] in wanted]
+        return items
+
+    @app.get("/api/rules/{rid:path}/related")
+    def rule_related(rid: str, limit: int = Query(default=8, ge=1, le=50)) -> list[dict]:
+        if service.resolve_rule(cfg, rid) is None:
+            raise HTTPException(status_code=404, detail="rule not found")
+        return related_rules(cfg, rid=rid, limit=limit)
+
+    @app.post("/api/related")
+    def related_unsaved(req: RelatedRequest) -> list[dict]:
+        return related_rules(cfg, text=req.rule, limit=req.limit)
+
+    def rule_view(rid: str) -> dict:
+        try:
+            detail = service.rule_detail(cfg, rid)
+        except KeyError:
+            raise HTTPException(status_code=404, detail="rule not found") from None
+        try:
+            disk = local_rules.read(cfg, detail["id"])
+            sha, cases_sha = disk["sha"], disk["cases_sha"]
+        except local_rules.LocalRuleError:
+            sha = cases_sha = None
+        pub = publication.publication_map(cfg, only=detail["id"]).get(detail["id"]) or publication._info("unknown", reason="no file")  # noqa: SLF001
+        return {**detail, "sha": sha, "cases_sha": cases_sha, "publication": pub}
 
     @app.get("/api/rules/{rid:path}")
     def rule(rid: str) -> dict:
+        return rule_view(rid)
+
+    def local_errors(fn):  # noqa: ANN001, ANN202
         try:
-            return service.rule_detail(cfg, rid)
-        except KeyError:
-            raise HTTPException(status_code=404, detail="rule not found") from None
+            return fn()
+        except local_rules.LocalRuleError as exc:
+            if exc.issues:
+                raise HTTPException(status_code=exc.status, detail={"message": str(exc), "issues": exc.issues}) from None
+            raise HTTPException(status_code=exc.status, detail=str(exc)) from None
+
+    def local_ready(request: Request) -> None:
+        reason = local_writes_off(request)
+        if reason:
+            raise HTTPException(status_code=403, detail=f"Local rules are off: {reason}")
+
+    @app.post("/api/rules", status_code=201)
+    def rules_create(req: LocalRuleCreate, request: Request) -> dict:
+        local_ready(request)
+        made = local_errors(lambda: local_rules.create(cfg, req.path, req.rule, req.cases))
+        if store is not None:
+            store.log(auth_api.who(request), "rule.saved_local", f"{made['id']} created sha {made['sha'][:7]}")
+        return rule_view(made["id"])
+
+    @app.put("/api/rules/{rid:path}")
+    def rules_update(rid: str, req: LocalRuleUpdate, request: Request) -> dict:
+        local_ready(request)
+        made = local_errors(lambda: local_rules.update(cfg, rid, req.rule, req.cases, req.remove_cases, req.sha, req.cases_sha))
+        if store is not None:
+            store.log(auth_api.who(request), "rule.saved_local", f"{made['id']} updated sha {made['sha'][:7]}")
+        return rule_view(made["id"])
+
+    @app.delete("/api/rules/{rid:path}", status_code=204)
+    def rules_delete(rid: str, request: Request, sha: str = Query(pattern=r"^[0-9a-f]{64}$")) -> Response:
+        local_ready(request)
+        local_errors(lambda: local_rules.delete(cfg, rid, sha))
+        if store is not None:
+            store.log(auth_api.who(request), "rule.deleted_local", rid)
+        return Response(status_code=204)
 
     @app.post("/api/validate")
     def validate(req: ValidateRequest) -> dict:
@@ -356,14 +451,14 @@ def create_app(config_path: str | None = None) -> FastAPI:
     def replay_draft(req: ReplayDraftRequest) -> dict:
         try:
             with regex_budget():
-                return replay_mod.replay_draft(cfg, req.rule, req.datasets, req.path)
-        except ReplayError as exc:
-            raise HTTPException(status_code=422, detail=str(exc)) from None
+                return replay_mod.replay_draft(cfg, req.rule, req.datasets, req.path, req.cases, req.compare)
+        except ReplayError as exc:  # structured: {code, message, hint}
+            raise HTTPException(status_code=422, detail=exc.payload()) from None
 
     @app.post("/api/regex")
     def regex(req: RegexRequest) -> dict:
         try:
-            return regex_lab.analyze(req.pattern, req.flags, req.samples)
+            return regex_lab.analyze(req.pattern, req.flags, req.samples, targets=req.targets if req.targets is not None else list(cfg.targets))
         except regex_lab.RegexLabError as exc:
             raise HTTPException(status_code=422, detail=str(exc)) from None
 
@@ -385,13 +480,34 @@ def create_app(config_path: str | None = None) -> FastAPI:
     @app.post("/api/ci/rules", status_code=201)
     def ci_submit_rule(req: SubmitRuleRequest, request: Request) -> dict:
         who = auth_api.who(request)
-        content = {("rule", req.path.strip().replace("\\", "/").strip("/")): req.rule}  # a bad path fails below
+        rule_text, cases_text, sha = req.rule, req.cases, None
+        if req.source == "file":
+            if req.rule is not None or req.cases is not None:
+                raise HTTPException(status_code=422, detail="source=file reads the saved files: do not send rule or cases")
+            if not req.sha:
+                raise HTTPException(status_code=422, detail="source=file needs the sha of the saved rule")
+            disk = local_errors(lambda: local_rules.read(cfg, req.path, strict=True))
+            if disk["sha"] != req.sha or disk["cases_sha"] != req.cases_sha:
+                raise HTTPException(status_code=409, detail="the rule changed on disk since you loaded it")
+            rule_text, cases_text, sha = disk["rule"], disk["cases"], disk["sha"]
+        elif rule_text is None:
+            raise HTTPException(status_code=422, detail="rule is required")
+        content = {("rule", req.path.strip().replace("\\", "/").strip("/")): rule_text}  # a bad path fails below
         if req.draft_id:
-            content[("draft", req.draft_id)] = req.rule
+            content[("draft", req.draft_id)] = rule_text
         trailers = reviews.trailers(content)
-        out = _github_errors(lambda: service.submit_rule(cfg, req.path, req.rule, req.cases, req.title, submitted_by=auth.attribution(who) if who else "", trailers=trailers))
+        try:
+            published = publication.in_base(cfg, local_rules.normalize_id(req.path))
+        except local_rules.LocalRuleError:
+            published = None
+        is_new = (True if req.source == "file" else None) if published is None else not published
+        out = _github_errors(lambda: service.submit_rule(cfg, req.path, rule_text, cases_text, req.title, submitted_by=auth.attribution(who) if who else "",
+                                                         trailers=trailers, is_new=is_new))
+        publication.invalidate()
+        if sha:
+            out["sha"] = sha
         if store is not None:
-            store.log(who, "rule.ci_submitted", f"{req.path} → {out['branch']} @ {out['commit'][:7]}")
+            store.log(who, "rule.ci_submitted", f"{req.path} → {out['branch']} @ {out['commit'][:7]}" + (f" sha {sha[:7]}" if sha else ""))
         return out
 
     @app.post("/api/ci/config", status_code=201)
@@ -416,11 +532,20 @@ def create_app(config_path: str | None = None) -> FastAPI:
     # ------------------------------------------------------------------ local drafts (ADR 0001)
     drafts = drafts_mod.DraftStore(cfg.data_dir / "drafts.db") if cfg.drafts_enabled and cfg.data_dir else None
 
+    def local_writes_off(request: Request) -> str | None:
+        """Why writing local rule files is unavailable for this request, or None (ADR 0007)."""
+        if not cfg.local_rules_enabled:
+            return "local rules are off (local_rules.enabled: false)"
+        return writes_off(request, "local rules")
+
     def drafts_off(request: Request) -> str | None:
         """Why drafts are unavailable for this request, or None. Without accounts only a loopback
         client of a localhost-only server may write (Host alone can be forged by non-browser clients)."""
         if drafts is None:
             return "disabled in vitrix.yml (drafts.enabled: false)"
+        return writes_off(request, "drafts")
+
+    def writes_off(request: Request, what: str) -> str | None:
         if store is not None:
             return None
         host = request.client.host if request.client else ""
@@ -429,7 +554,7 @@ def create_app(config_path: str | None = None) -> FastAPI:
         except ValueError:
             loopback = False
         if not loopback:
-            return "accounts are off, so drafts only work from this machine (in Docker, turn on accounts: auth.enabled: true)"
+            return f"accounts are off, so {what} only work from this machine (in Docker, turn on accounts: auth.enabled: true)"
         if not hosts <= LOCAL_HOSTS:
             return "accounts are off and this server accepts non-local hosts"
         return None
@@ -442,10 +567,35 @@ def create_app(config_path: str | None = None) -> FastAPI:
             raise HTTPException(status_code=404, detail="draft not found")
         return drafts
 
+    draft_meta: dict[tuple[str, int], dict] = {}
+
+    def draft_extras(row: dict) -> dict:
+        """level, final language and quality gate summary of a draft (cached per draft version)."""
+        key = (row["id"], row["version"])
+        if key not in draft_meta:
+            if len(draft_meta) > 500:
+                draft_meta.clear()
+            try:
+                val = service.validate_text(cfg, row["rule"], row["cases"])
+                q = flow.draft_quality(cfg, val, row["rule"], row["cases"] is not None, row["path"])
+                quality = {"ready": bool(q["ready"]), "blockers": len(q["blockers"]), "score": q["score"]}
+            except Exception:  # noqa: BLE001 - a broken draft must still be listed
+                val, quality = {}, None
+            try:
+                import yaml as _yaml
+                doc = next((d for d in _yaml.safe_load_all(row["rule"]) if isinstance(d, dict)), {})
+                level = doc.get("level") if isinstance(doc.get("level"), str) else None
+            except Exception:  # noqa: BLE001
+                level = None
+            targets = val.get("targets") or []
+            draft_meta[key] = {"quality": quality, "level": level, "target": targets[0] if targets else None}
+        return draft_meta[key]
+
     def draft_json(request: Request, row: dict, full: bool = True) -> dict:
         who = auth_api.who(request)
-        return drafts_mod.public(row, current_hash=drafts_mod.rule_hash(cfg.rules_dir, row["path"]),
-                                 me_id=who.user_id if who else None, auth_on=store is not None, full=full)
+        out = drafts_mod.public(row, current_hash=drafts_mod.rule_hash(cfg.rules_dir, row["path"]),
+                                me_id=who.user_id if who else None, auth_on=store is not None, full=full)
+        return {**out, **draft_extras(row)}
 
     def draft_fields(req: DraftRequest) -> dict:
         try:
@@ -454,6 +604,32 @@ def create_app(config_path: str | None = None) -> FastAPI:
             raise HTTPException(status_code=422, detail=str(exc)) from None
         return {"path": path, "title": req.title, "rule": req.rule, "cases": req.cases,
                 "base_hash": drafts_mod.rule_hash(cfg.rules_dir, path)}
+
+    def visible(request: Request, row: dict) -> bool:
+        """Drafts are private scratch (ADR 0007): only their author sees them. Authorless ones (saved with
+        accounts off) stay shared. Anyone else gets the same 404 as for a missing id, admins included."""
+        who = auth_api.who(request)
+        return store is None or row["author_id"] is None or (who is not None and row["author_id"] == who.user_id)
+
+    def own_draft(request: Request, db: drafts_mod.DraftStore, draft_id: str) -> dict:
+        row = db.get(draft_id)
+        if not visible(request, row):
+            raise HTTPException(status_code=404, detail="draft not found")
+        return row
+
+    sweep = {"at": 0.0}
+
+    def sweep_drafts(force: bool = False) -> None:
+        """Drop drafts of users with no live session (expiry), at most every 10 minutes."""
+        if store is None or drafts is None or (not force and time.monotonic() - sweep["at"] < 600):
+            return
+        sweep["at"] = time.monotonic()
+        store.sweep_expired()
+        drafts.purge_except(store.active_user_ids())
+
+    if store is not None and drafts is not None:
+        store.on_user_done.append(drafts.delete_for_author)  # logout, last session expired, account removal
+        sweep_drafts(force=True)
 
     @app.exception_handler(drafts_mod.DraftError)
     def _draft_error(_, exc: drafts_mod.DraftError):  # noqa: ANN001
@@ -464,7 +640,8 @@ def create_app(config_path: str | None = None) -> FastAPI:
         reason = drafts_off(request)
         if reason or drafts is None:
             return {"enabled": False, "reason": reason, "drafts": []}
-        return {"enabled": True, "reason": None, "drafts": [draft_json(request, r, full=False) for r in drafts.list(batch)]}
+        sweep_drafts()
+        return {"enabled": True, "reason": None, "drafts": [draft_json(request, r, full=False) for r in drafts.list(batch) if visible(request, r)]}
 
     @app.post("/api/drafts", status_code=201)
     def drafts_create(req: DraftRequest, request: Request) -> dict:
@@ -475,26 +652,22 @@ def create_app(config_path: str | None = None) -> FastAPI:
 
     @app.get("/api/drafts/{draft_id}")
     def drafts_get(draft_id: str, request: Request) -> dict:
-        return draft_json(request, drafts_ready(request, draft_id).get(draft_id))
+        return draft_json(request, own_draft(request, drafts_ready(request, draft_id), draft_id))
 
     @app.put("/api/drafts/{draft_id}")
     def drafts_update(draft_id: str, req: DraftUpdateRequest, request: Request) -> dict:
         db = drafts_ready(request, draft_id)
-        who = auth_api.who(request)
-        if who and db.get(draft_id)["author_id"] not in (None, who.user_id):  # authorless (saved with accounts off) = shared
-            raise HTTPException(status_code=403, detail="only the author can change this draft")
+        own_draft(request, db, draft_id)  # 404 unless yours (or an authorless shared draft)
         return draft_json(request, db.update(draft_id, version=req.version, **draft_fields(req)))
 
     @app.delete("/api/drafts/{draft_id}", status_code=204)
     def drafts_delete(draft_id: str, request: Request) -> Response:
         db = drafts_ready(request, draft_id)
-        who = auth_api.who(request)
-        if who and db.get(draft_id)["author_id"] not in (None, who.user_id) and not who.can("admin"):
-            raise HTTPException(status_code=403, detail="only the author or an admin can delete this draft")
+        own_draft(request, db, draft_id)
         db.delete(draft_id)
         return Response(status_code=204)
 
-    app.include_router(packs_api.build_router(cfg, drafts=drafts, off=drafts_off, auth_on=store is not None))  # S6, ADR 0004
+    app.include_router(packs_api.build_router(cfg, off=local_writes_off, auth_on=store is not None, audit=store.log if store is not None else None))  # S6, ADR 0004
     def draft_authors(rows: list[dict], publisher) -> list[str]:  # noqa: ANN001
         """`Co-authored-by` for each other draft author with a GitHub-linked account (same rule as `auth.attribution`)."""
         out: dict[int, str] = {}
@@ -512,7 +685,7 @@ def create_app(config_path: str | None = None) -> FastAPI:
         ids = list(dict.fromkeys(req.draft_ids))
         if not all(_DRAFT_ID.match(i) for i in ids):
             raise HTTPException(status_code=422, detail="draft_ids must be 32-character draft ids")
-        rows = [db.get(i) for i in ids]  # 404 if one is missing
+        rows = [own_draft(request, db, i) for i in ids]  # 404 if one is missing or not yours
         who = auth_api.who(request)
         trailers = draft_authors(rows, who) + reviews.trailers({k: row["rule"] for row in rows for k in (("draft", row["id"]), ("rule", row["path"])) if k[1]})
         try:
@@ -526,8 +699,32 @@ def create_app(config_path: str | None = None) -> FastAPI:
             store.log(who, "drafts.ci_submitted", f"{len(ids)} drafts → {out['branch']} @ {out['commit'][:7]}")
         return out
 
+    @app.post("/api/ci/local-rules", status_code=201, response_model=None)
+    def ci_submit_local_rules(req: SubmitLocalRulesRequest, request: Request):  # noqa: ANN202
+        """Publish several saved local rules as one `vitrix/pack-...` branch (all pass the gate, or 422 and nothing is pushed)."""
+        who = auth_api.who(request)
+        ids = list(dict.fromkeys(req.paths))
+        rows = []
+        for rid in ids:
+            disk = local_errors(lambda rid=rid: local_rules.read(cfg, rid, strict=True))
+            rows.append({"id": disk["id"], "path": disk["id"], "title": None, "rule": disk["rule"], "cases": disk["cases"]})
+        trailers = reviews.trailers({("rule", r["path"]): r["rule"] for r in rows})
+        try:
+            out = _github_errors(lambda: service.submit_drafts(cfg, rows, req.title, submitted_by=auth.attribution(who) if who else "", trailers=trailers))
+        except HTTPException as exc:
+            blocked = getattr(exc, "blocked", None)
+            if blocked is None:
+                raise
+            return JSONResponse(status_code=422, content={"detail": exc.detail, "blocked": blocked})
+        publication.invalidate()
+        if store is not None:
+            store.log(who, "rule.ci_submitted", f"{len(ids)} local rules → {out['branch']} @ {out['commit'][:7]}")
+        return out
+
     reviews = reviews_api.Reviews(cfg, store, drafts)
     app.include_router(reviews.router)
+
+    app.include_router(sync_api.build_router(holder, store, local_only=hosts <= LOCAL_HOSTS))  # U1, ADR 0006
 
     _mount_ui(app)
     return app

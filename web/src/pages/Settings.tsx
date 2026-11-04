@@ -1,163 +1,82 @@
 import { useQuery } from "@tanstack/react-query";
 import CodeMirror from "@uiw/react-codemirror";
-import { AlertTriangle, CheckCircle2, Loader2, RefreshCw, RotateCcw, Rocket, XCircle } from "lucide-react";
-import { useEffect, useMemo, useState } from "react";
+import { CheckCircle2, RefreshCw, XCircle } from "lucide-react";
+import { useMemo, useState } from "react";
+import { Link } from "react-router-dom";
 import { api } from "../api";
+import { useMe } from "../components/auth";
 import { LanguageControl, ThemeControl } from "../components/ThemeControl";
 import { useIsDark } from "../theme";
 import { yamlExtensions } from "../components/code";
-import { Section, timeAgo } from "../components/dash";
-import { PublishDialog } from "../components/PublishDialog";
-import { Card, ErrorBox, PageHeader, TargetSwatch, btnPrimary } from "../components/ui";
-import { fmt } from "../components/flow";
-import type { ConfigCheck, ConfigView } from "../types";
+import { timeAgo } from "../components/dash";
+import { Card, ErrorBox, PageHeader, TargetSwatch } from "../components/ui";
+import { GATE_LABELS, fmt } from "../components/flow";
+import { EditorState } from "@codemirror/state";
+import { EditorView } from "@codemirror/view";
 import { t } from "../i18n";
 
-function Effective({ cfg }: { cfg: Omit<ConfigView, "path" | "text"> }) {
-  const row = "grid grid-cols-[9rem_1fr] gap-3 py-2 text-[13px]";
-  return (
-    <dl className="divide-y divide-line">
-      <div className={row}>
-        <dt className="text-subtle">{t("active_siems")}</dt>
-        <dd className="flex flex-wrap gap-1.5">
-          {cfg.targets.map((t) => (
-            <span key={t} className="inline-flex items-center gap-1.5 rounded-md bg-surface-2 px-2 py-0.5 font-mono text-xs text-text">
-              <TargetSwatch target={t} /> {t}
-            </span>
-          ))}
-        </dd>
-      </div>
-      <div className={row}>
-        <dt className="text-subtle">{t("default_language")}</dt>
-        <dd className="font-mono text-text">{cfg.default_target ?? t("l_every_active_target")}</dd>
-      </div>
-      <div className={row}>
-        <dt className="text-subtle">{t("routes")}</dt>
-        <dd className="text-text">
-          {cfg.routes.length === 0 ? (
-            <span className="text-muted">{t("none")}</span>
-          ) : (
-            <ul className="space-y-0.5 font-mono text-xs">
-              {cfg.routes.map((r) => (
-                <li key={r.match}>
-                  {r.match} → {r.target.join(", ")}
-                </li>
-              ))}
-            </ul>
-          )}
-        </dd>
-      </div>
-      <div className={row}>
-        <dt className="text-subtle">{t("folders")}</dt>
-        <dd className="font-mono text-xs text-text">
-          rules {cfg.rules_dir}/ · cases {cfg.cases_dir}/ · datasets {cfg.datasets_dir ?? "—"}/ · output {cfg.output_dir}/
-        </dd>
-      </div>
-      <div className={row}>
-        <dt className="text-subtle">{t("requires_cases")}</dt>
-        <dd className="text-text">{cfg.require_cases ? t("st_req_cases") : t("l_no_lower")}</dd>
-      </div>
-      <div className={row}>
-        <dt className="text-subtle">{t("extra_pipelines")}</dt>
-        <dd className="font-mono text-xs text-text">{cfg.extra_pipelines.length ? cfg.extra_pipelines.join(", ") : <span className="font-sans text-muted">{t("none")}</span>}</dd>
-      </div>
-      <div className={row}>
-        <dt className="text-subtle">GitHub</dt>
-        <dd className="font-mono text-xs text-text">
-          {cfg.github ? (
-            `${cfg.github.repo} @ ${cfg.github.base}${cfg.github.path ? ` (${cfg.github.path}/)` : ""}${cfg.github.workflow ? ` · CI: ${cfg.github.workflow}` : ""}`
-          ) : (
-            <span className="font-sans text-muted">{t("not_configured")}</span>
-          )}
-        </dd>
-      </div>
-    </dl>
-  );
-}
+const NAV = ["general", "appearance", "languages", "gate", "folders", "about", "yml"] as const;
 
-function CheckResult({ check, pending, dirty }: { check: ConfigCheck | null; pending: boolean; dirty: boolean }) {
-  if (!check) return null;
+/** One label/value row; no card per fact (settings-v2 spec). */
+function Row({ label, children }: { label: string; children: React.ReactNode }) {
   return (
-    <div className="space-y-2" aria-live="polite">
-      <p className="flex items-center gap-2 text-sm font-medium">
-        {pending ? (
-          <Loader2 size={15} className="animate-spin text-muted" aria-hidden />
-        ) : check.ok ? (
-          <CheckCircle2 size={15} className="text-good" aria-hidden />
-        ) : (
-          <XCircle size={15} className="text-bad" aria-hidden />
-        )}
-        <span className="text-strong">{pending ? t("l_validating") : check.ok ? (dirty ? t("st_valid") : t("st_current_valid")) : t("st_invalid")}</span>
-      </p>
-      {check.errors.map((e) => (
-        <p key={e} className="flex gap-2 text-[13px]">
-          <span className="shrink-0 font-medium text-bad">{t("error")}</span>
-          <span className="text-text [overflow-wrap:anywhere]">{e}</span>
-        </p>
-      ))}
-      {check.warnings.map((w) => (
-        <p key={w} className="flex gap-2 text-[13px]">
-          <AlertTriangle size={14} className="mt-0.5 shrink-0 text-warn" aria-hidden />
-          <span className="text-text">{w}</span>
-        </p>
-      ))}
+    <div className="grid min-h-11 grid-cols-1 gap-x-4 gap-y-0.5 border-b border-line py-2.5 text-[14px] last:border-0 sm:grid-cols-[12rem_1fr]">
+      <dt className="text-muted">{label}</dt>
+      <dd className="min-w-0 text-text [overflow-wrap:anywhere]">{children}</dd>
     </div>
   );
 }
 
+function Block({ id, title, children }: { id: string; title: string; children: React.ReactNode }) {
+  return (
+    <section id={id} aria-labelledby={`${id}-h`} className="scroll-mt-6 border-t border-line pt-6 first:border-0 first:pt-0">
+      <h2 id={`${id}-h`} className="mb-2 text-[15px] font-semibold text-strong">
+        {title}
+      </h2>
+      <dl>{children}</dl>
+    </section>
+  );
+}
+
+function CopyBtn({ text }: { text: string }) {
+  const [done, setDone] = useState(false);
+  return (
+    <button
+      type="button"
+      className="ml-2 rounded px-1.5 py-0.5 text-xs text-muted hover:bg-surface-2 hover:text-text"
+      onClick={async () => {
+        try {
+          await navigator.clipboard.writeText(text);
+          setDone(true);
+          setTimeout(() => setDone(false), 1500);
+        } catch {
+          /* no clipboard permission */
+        }
+      }}
+    >
+      {done ? t("l_copied") : t("l_copy")}
+    </button>
+  );
+}
+
 export default function SettingsPage() {
+  const me = useMe();
   const config = useQuery({ queryKey: ["config"], queryFn: api.config, refetchOnWindowFocus: "always" }); // vitrix.yml is hot-reloaded: show edits made elsewhere
   const health = useQuery({ queryKey: ["health"], queryFn: api.health });
-  const [text, setText] = useState<string | null>(null);
-  const [check, setCheck] = useState<ConfigCheck | null>(null);
-  const [pending, setPending] = useState(false);
-  const [publishOpen, setPublishOpen] = useState(false);
   const dark = useIsDark();
-  const extensions = useMemo(() => yamlExtensions(dark), [dark]);
-
-  const original = config.data?.text ?? "";
-  const current = text ?? original;
-  const dirty = text !== null && text !== original;
-
-  useEffect(() => {
-    if (!config.data) return;
-    const ctrl = new AbortController();
-    setPending(true);
-    const timer = setTimeout(() => {
-      api
-        .validateConfig(current, ctrl.signal)
-        .then((c) => {
-          setCheck(c);
-          setPending(false);
-        })
-        .catch((e: Error) => {
-          if (e.name !== "AbortError") setPending(false);
-        });
-    }, 400);
-    return () => {
-      clearTimeout(timer);
-      ctrl.abort();
-    };
-  }, [current, config.data]);
-
-  const localReady: boolean | null = pending || !check ? null : check.ok;
+  const extensions = useMemo(() => [...yamlExtensions(dark), EditorState.readOnly.of(true), EditorView.editable.of(false)], [dark]);
+  const current = config.data?.text ?? "";
 
   return (
-    <div className="mx-auto max-w-7xl px-4 py-8 sm:px-8">
+    <div className="mx-auto max-w-5xl px-4 py-8 sm:px-8">
       <PageHeader
         title={t("settings")}
         subtitle={t("the_repository_s_vitrix_yml_nothing_is")}
       />
       {config.error && <ErrorBox message={(config.error as Error).message} />}
-      {(config.data?.file || config.data?.path) && (
-        <p className="mb-4 text-[13px] text-muted">
-          {t("st_file")}: <span className="font-mono text-text break-all">{config.data.file || config.data.path}</span>
-          {config.data.loaded_at != null && ` · ${t("st_loaded", { when: timeAgo(typeof config.data.loaded_at === "number" ? new Date(config.data.loaded_at < 1e12 ? config.data.loaded_at * 1000 : config.data.loaded_at).toISOString() : config.data.loaded_at) })}`}
-        </p>
-      )}
       {config.data?.reload_error && (
-        <div className="mb-4 flex items-start gap-2 rounded-lg border border-warn/30 bg-warn-soft p-3 text-sm text-warn" role="alert">
-          <AlertTriangle size={16} className="mt-0.5 shrink-0" aria-hidden />
+        <div className="mb-4 flex items-start gap-2 rounded-lg border border-bad/30 bg-bad-soft p-3 text-sm text-bad" role="alert">
+          <XCircle size={16} className="mt-0.5 shrink-0" aria-hidden />
           <div className="min-w-0 [overflow-wrap:anywhere]">
             {t("st_reload_error")} <span className="font-mono">{config.data.reload_error}</span>
           </div>
@@ -170,69 +89,148 @@ export default function SettingsPage() {
         </div>
       )}
 
-      {config.data && (
-        <div className="grid gap-5 xl:grid-cols-[1fr_1.15fr]">
-          <div className="flex flex-col gap-5">
-            <Section title={t("effective_configuration")} aside={dirty ? t("st_with_changes") : (config.data.path ?? t("st_defaults"))}>
-              <Effective cfg={check?.config ?? config.data} />
-            </Section>
-            <Section title={t("quality_gate_criteria")} aside="quality_gate">
-              <dl className="space-y-1.5 text-[12.5px]">
-                {Object.entries((check?.config ?? config.data).quality_gate).map(([k, v]) => (
-                  <div key={k} className="flex justify-between gap-3">
-                    <dt className="font-mono text-muted">{k}</dt>
-                    <dd className="text-right font-mono text-text">{fmt(v, k)}</dd>
-                  </div>
-                ))}
-              </dl>
-            </Section>
-            <Section title={t("appearance")} aside={t("this_browser_only")}>
-              <ThemeControl />
-              <p className="mb-2 mt-4 text-[13px] font-medium text-strong">{t("language_label")}</p>
-              <LanguageControl />
-            </Section>
-            <Section title={t("about")}>
-              <dl className="grid grid-cols-[9rem_1fr] gap-y-1.5 text-[13px]">
-                <dt className="text-subtle">{t("version")}</dt>
-                <dd className="font-mono text-text">{health.data?.version ?? "—"}</dd>
-                <dt className="text-subtle">{t("server")}</dt>
-                <dd className="text-text">{t("local_no_authentication_localhost_only")}</dd>
-                <dt className="text-subtle">{t("writes")}</dt>
-                <dd className="text-text">{t("only_through_github_ci_validated_branc")}</dd>
-              </dl>
-            </Section>
-          </div>
+      {config.isLoading && <p className="text-sm text-muted">{t("loading")}</p>}
+      {config.data && (() => {
+        const cfg = config.data;
+        const file = config.data.file || config.data.path;
+        return (
+          <div className="grid gap-6 lg:grid-cols-[12rem_1fr]">
+            <nav aria-label={t("st_sections")} className="no-scrollbar flex gap-1 overflow-x-auto lg:sticky lg:top-6 lg:flex-col lg:self-start lg:overflow-visible">
+              {NAV.map((id) => (
+                <a key={id} href={`#${id}`} className="whitespace-nowrap rounded-md border-l-2 border-transparent px-3 py-1.5 text-[13.5px] text-muted hover:bg-surface-2 hover:text-text">
+                  {t(`st_nav_${id}` as "st_nav_general")}
+                </a>
+              ))}
+            </nav>
+            <div className="max-w-[760px] space-y-6">
+              <Block id="general" title={t("st_nav_general")}>
+                <Row label={t("st_file")}>
+                  {file ? (
+                    <>
+                      <span className="font-mono text-[13px]">{file}</span>
+                      <CopyBtn text={file} />
+                    </>
+                  ) : (
+                    <span className="text-muted">{t("st_no_file")}</span>
+                  )}
+                </Row>
+                <Row label={t("state")}>
+                  <span className="inline-flex flex-wrap items-center gap-2">
+                    <CheckCircle2 size={14} className="text-good" aria-hidden />
+                    {config.data.loaded_at != null
+                      ? t("st_loaded", { when: timeAgo(typeof config.data.loaded_at === "number" ? new Date(config.data.loaded_at < 1e12 ? config.data.loaded_at * 1000 : config.data.loaded_at).toISOString() : config.data.loaded_at) })
+                      : t("st_defaults")}
+                    <button type="button" className="inline-flex items-center gap-1 rounded-md border border-line px-2 py-0.5 text-xs hover:bg-surface-2" onClick={() => void config.refetch()}>
+                      <RefreshCw size={12} className={config.isFetching ? "animate-spin" : undefined} aria-hidden /> {t("st_reload")}
+                    </button>
+                  </span>
+                  <span className="mt-1 block text-xs text-muted">{t("st_hot")}</span>
+                </Row>
+                <Row label={t("default_language")}>{cfg.default_target ? <span className="font-mono">{cfg.default_target}</span> : t("l_every_active_target")}</Row>
+                <Row label={t("requires_cases")}>{cfg.require_cases ? t("st_req_cases") : t("l_no_lower")}</Row>
+              </Block>
 
-          <Card className="flex h-[720px] flex-col overflow-hidden">
-            <div className="flex items-center justify-between gap-3 border-b border-line px-4 py-3">
-              <h2 className="font-mono text-[13px] font-semibold text-strong">{config.data.path ?? "vitrix.yml"}</h2>
-              {dirty && (
-                <button type="button" onClick={() => setText(null)} className="inline-flex items-center gap-1.5 rounded-md px-2 py-1 text-xs text-muted hover:bg-surface-2 hover:text-text">
-                  <RotateCcw size={13} aria-hidden /> {t("discard_changes")}
-                </button>
-              )}
+              <Block id="appearance" title={t("appearance")}>
+                <Row label={t("st_theme")}>
+                  <ThemeControl />
+                </Row>
+                <Row label={t("language_label")}>
+                  <LanguageControl />
+                  <span className="mt-1 block text-xs text-muted">{t("this_browser_only")}</span>
+                </Row>
+              </Block>
+
+              <Block id="languages" title={t("cn_languages")}>
+                <Row label={t("active_siems")}>
+                  <span className="flex flex-wrap gap-1.5">
+                    {cfg.targets.map((x) => (
+                      <span key={x} className="inline-flex items-center gap-1.5 rounded-md bg-surface-2 px-2 py-0.5 font-mono text-xs">
+                        <TargetSwatch target={x} /> {x}
+                      </span>
+                    ))}
+                  </span>
+                  <Link to="/connections" className="mt-1 inline-block text-xs font-medium text-accent hover:underline">
+                    {t("st_details_conn")}
+                  </Link>
+                </Row>
+                <Row label={t("routes")}>
+                  {cfg.routes.length === 0 ? (
+                    <span className="text-muted">{t("none")}</span>
+                  ) : (
+                    <ul className="space-y-0.5 font-mono text-xs">
+                      {cfg.routes.map((r) => (
+                        <li key={r.match}>
+                          {r.match} {"->"} {r.target.join(", ")}
+                        </li>
+                      ))}
+                    </ul>
+                  )}
+                </Row>
+                <Row label={t("extra_pipelines")}>{cfg.extra_pipelines.length ? <span className="font-mono text-xs">{cfg.extra_pipelines.join(", ")}</span> : <span className="text-muted">{t("none")}</span>}</Row>
+              </Block>
+
+              <Block id="gate" title={t("quality_gate_criteria")}>
+                {Object.entries(cfg.quality_gate).map(([k, v]) => (
+                  <Row key={k} label={GATE_LABELS[k] ?? k}>
+                    <span className="font-mono text-[13px]">{fmt(v, k)}</span>
+                  </Row>
+                ))}
+              </Block>
+
+              <Block id="folders" title={t("folders")}>
+                {(
+                  [
+                    ["rules", cfg.rules_dir],
+                    ["cases", cfg.cases_dir],
+                    ["datasets", cfg.datasets_dir],
+                    ["output", cfg.output_dir],
+                  ] as const
+                ).map(([k, v]) => (
+                  <Row key={k} label={k}>
+                    {v ? (
+                      <>
+                        <span className="font-mono text-[13px]">{v}/</span>
+                        <CopyBtn text={v} />
+                      </>
+                    ) : (
+                      <span className="text-muted">-</span>
+                    )}
+                  </Row>
+                ))}
+                <Row label="GitHub">
+                  {cfg.github ? <span className="font-mono text-[13px]">{`${cfg.github.repo} @ ${cfg.github.base}${cfg.github.workflow ? ` · CI: ${cfg.github.workflow}` : ""}`}</span> : <span className="text-muted">{t("not_configured")}</span>}
+                </Row>
+              </Block>
+
+              <Block id="about" title={t("about")}>
+                <Row label={t("version")}>
+                  <span className="font-mono">{health.data?.version ?? "-"}</span>
+                </Row>
+                <Row label={t("server")}>{me.enabled ? t("st_mode_accounts") : t("st_mode_open")}</Row>
+                <Row label={t("writes")}>{t("st_writes_note")}</Row>
+              </Block>
+
+              <section id="yml" aria-labelledby="yml-h" className="scroll-mt-6 border-t border-line pt-6">
+                <details>
+                  <summary id="yml-h" className="cursor-pointer text-[15px] font-semibold text-strong">
+                    {t("st_view_yml")}
+                  </summary>
+                  <Card className="mt-3 flex h-[480px] flex-col overflow-hidden">
+                    <div className="flex items-center justify-between gap-3 border-b border-line px-4 py-2.5">
+                      <h3 className="font-mono text-[13px] font-semibold text-strong">{config.data.path ?? "vitrix.yml"}</h3>
+                      <span className="text-xs text-muted">{t("st_readonly_yml")}</span>
+                      <CopyBtn text={current} />
+                    </div>
+                    <div className="min-h-0 flex-1 overflow-auto bg-code">
+                      <CodeMirror value={current} extensions={extensions} theme="none" height="100%" readOnly basicSetup={{ foldGutter: false }} />
+                    </div>
+                  </Card>
+                </details>
+              </section>
             </div>
-            <div className="min-h-0 flex-1 overflow-auto">
-              <CodeMirror value={current} onChange={setText} extensions={extensions} theme="none" height="100%" basicSetup={{ foldGutter: false }} />
-            </div>
-            <div className="space-y-3 border-t border-line p-4">
-              <CheckResult check={check} pending={pending} dirty={dirty} />
-              <button type="button" disabled={!dirty} onClick={() => setPublishOpen(true)} className={btnPrimary}>
-                <Rocket size={16} aria-hidden /> {t("publish_change")}
-              </button>
-              {!dirty && <p className="text-xs text-subtle">{t("edit_the_file_to_publish_a_change")}</p>}
-            </div>
-          </Card>
-        </div>
-      )}
-      {publishOpen && (
-        <PublishDialog
-          mode={{ kind: "config", text: current }}
-          localReady={localReady}
-          localDetail={check && !check.ok ? check.errors.join("; ") : undefined}
-          onClose={() => setPublishOpen(false)}
-        />
-      )}
+          </div>
+        );
+      })()}
     </div>
   );
 }

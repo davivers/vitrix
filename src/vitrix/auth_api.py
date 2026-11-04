@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import hmac
 import os
+import re
 import secrets
 import urllib.parse
 
@@ -30,14 +31,16 @@ PUBLIC = {
     "/api/auth/github/callback",
 }
 # POSTs that only COMPUTE and write nothing (disk, GitHub): any signed-in viewer may use them.
-VIEWER_POSTS = {"/api/regex", "/api/validate", "/api/impact", "/api/replay", "/api/replay/draft", "/api/config/validate"}
+VIEWER_POSTS = {"/api/regex", "/api/validate", "/api/impact", "/api/replay", "/api/replay/draft", "/api/config/validate", "/api/related"}
 # POSTs that write or publish (CI, pull requests, local drafts): editor and above.
-EDITOR_POSTS = {"/api/ci/rules", "/api/ci/drafts", "/api/pull-requests", "/api/drafts", "/api/packs/jobs", "/api/reviews"}
+EDITOR_POSTS = {"/api/ci/rules", "/api/ci/drafts", "/api/pull-requests", "/api/drafts", "/api/packs/jobs", "/api/reviews",
+                "/api/rules", "/api/ci/local-rules"}
 # Writes any signed-in viewer may do: comments change no rule (ADR 0005). Author/admin checks live in the routes.
-VIEWER_WRITES = {"/api/comments"}
+VIEWER_WRITES = {"/api/comments", "/api/sync", "/api/reviews/read-all"}  # /api/sync: `force` needs editor, checked in the route
 VIEWER_WRITE_PREFIXES = ("/api/comments/",)  # PATCH / DELETE one comment
 # Non-GET under these prefixes need editor: review decisions, re-requests, cancels. Reviewer/requester checks are in the route.
 EDITOR_WRITE_PREFIXES = ("/api/drafts/", "/api/reviews/")
+_REVIEW_OWN_STATE = re.compile(r"^/api/reviews/[0-9a-f]{32}/(read|unread)$")  # a reviewer's own read flag
 
 
 def required_role(method: str, path: str) -> str:
@@ -50,6 +53,10 @@ def required_role(method: str, path: str) -> str:
         return "viewer"
     if path in VIEWER_POSTS or path in VIEWER_WRITES or path.startswith(VIEWER_WRITE_PREFIXES):
         return "viewer"
+    if _REVIEW_OWN_STATE.match(path):
+        return "viewer"
+    if method in ("PUT", "DELETE") and path.startswith("/api/rules/"):  # local rule files (ADR 0007)
+        return "editor"
     if path.startswith(EDITOR_WRITE_PREFIXES):  # PUT/DELETE a draft, review decisions; ownership checked in the route
         return "editor"
     return "editor" if path in EDITOR_POSTS else "admin"

@@ -23,6 +23,7 @@ from __future__ import annotations
 import hashlib
 import hmac
 import json
+import logging
 import re
 import secrets
 import sqlite3
@@ -168,6 +169,8 @@ class AuthStore:
         self._db.row_factory = sqlite3.Row
         self._lock = threading.RLock()
         self._failures: dict[tuple[str, str], tuple[int, float]] = {}
+        # called with a user id when that user's private data must go (logout, last session expired, removal); ADR 0007
+        self.on_user_done: list[Callable[[int], None]] = []
         with self._lock:
             self._db.execute("PRAGMA foreign_keys=ON")
             self._db.executescript(_SCHEMA)
@@ -257,8 +260,31 @@ class AuthStore:
         self._x("INSERT INTO sessions (token_hash, user_id, created_at, expires_at) VALUES (?,?,?,?)",
                 (_sha(token), user_id, now, now + self.cfg.session_days * 86400))
         self._x("UPDATE users SET last_login=? WHERE id=?", (now, user_id))
-        self._x("DELETE FROM sessions WHERE expires_at < ?", (now,))
+        self.sweep_expired()
         return token
+
+    def _done(self, user_id: int) -> None:
+        for hook in self.on_user_done:
+            try:
+                hook(user_id)
+            except Exception:  # noqa: BLE001 - a failing hook must not break logout/removal, but never silently
+                logging.getLogger("vitrix.auth").warning("cleanup hook failed for user %s", user_id, exc_info=True)
+
+    def active_user_ids(self) -> set[int]:
+        """Users with at least one unexpired session."""
+        return {r["user_id"] for r in self._q("SELECT DISTINCT user_id FROM sessions WHERE expires_at >= ?", (int(self._now()),))}
+
+    def sweep_expired(self) -> list[int]:
+        """Delete expired sessions; users left without any live session get the cleanup hooks (drafts purge)."""
+        now = int(self._now())
+        with self._lock:
+            gone = [r["user_id"] for r in self._db.execute(
+                "SELECT DISTINCT user_id FROM sessions WHERE expires_at < ? AND user_id NOT IN "
+                "(SELECT user_id FROM sessions WHERE expires_at >= ?)", (now, now)).fetchall()]
+            self._db.execute("DELETE FROM sessions WHERE expires_at < ?", (now,))
+        for uid in gone:
+            self._done(uid)
+        return gone
 
     def identify(self, token: str | None) -> Identity | None:
         if not token:
@@ -274,7 +300,10 @@ class AuthStore:
 
     def end_session(self, token: str | None) -> None:
         if token:
+            rows = self._q("SELECT user_id FROM sessions WHERE token_hash=?", (_sha(token),))
             self._x("DELETE FROM sessions WHERE token_hash=?", (_sha(token),))
+            if rows:  # logout wipes the user's private scratch on every device
+                self._done(rows[0]["user_id"])
 
     def revoke_sessions(self, user_id: int, keep_hash: str = "") -> None:
         self._x("DELETE FROM sessions WHERE user_id=? AND token_hash != ?", (user_id, keep_hash))
@@ -323,6 +352,7 @@ class AuthStore:
         if current == "owner" and (not actor.can("owner") or self._owners() <= 1):
             raise AuthError("Only an owner can remove an owner, and the last owner cannot be removed.", 409)
         self._x("DELETE FROM users WHERE id=?", (user_id,))  # cascades to membership and sessions
+        self._done(user_id)
 
     def rename_workspace(self, name: str) -> None:
         name = (name or "").strip()

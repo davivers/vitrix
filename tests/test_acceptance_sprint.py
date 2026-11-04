@@ -76,13 +76,14 @@ def test_g4_draft_ownership_admin_delete_and_removal(tmp_path):
     admin = join(owner, tmp_path, "adm@example.com", "admin")
     d = ed1.post("/api/drafts", json=DRAFT).json()
     assert d["mine"] is True
-    assert ed2.get(f"/api/drafts/{d['id']}").json()["mine"] is False
-    assert ed2.put(f"/api/drafts/{d['id']}", json={**DRAFT, "version": d["version"]}).status_code == 403
-    assert ed2.delete(f"/api/drafts/{d['id']}").status_code == 403
-    assert admin.put(f"/api/drafts/{d['id']}", json={**DRAFT, "version": 1}).status_code == 403  # nobody edits others' drafts
+    assert ed2.get(f"/api/drafts/{d['id']}").status_code == 404  # private scratch (ADR 0007)
+    assert ed2.put(f"/api/drafts/{d['id']}", json={**DRAFT, "version": d["version"]}).status_code == 404
+    assert ed2.delete(f"/api/drafts/{d['id']}").status_code == 404
+    assert admin.put(f"/api/drafts/{d['id']}", json={**DRAFT, "version": 1}).status_code == 404  # nobody edits others' drafts
     assert ed1.put(f"/api/drafts/{d['id']}", json={**DRAFT, "title": "v2", "version": 1}).json()["version"] == 2
     assert ed1.put(f"/api/drafts/{d['id']}", json={**DRAFT, "version": 1}).status_code == 409  # stale version
-    assert admin.delete(f"/api/drafts/{d['id']}").status_code == 204
+    assert admin.delete(f"/api/drafts/{d['id']}").status_code == 404  # not even admins see it
+    assert ed1.delete(f"/api/drafts/{d['id']}").status_code == 204
     assert ed1.get(f"/api/drafts/{d['id']}").status_code == 404
     # removal revokes the session
     assert owner.delete(f"/api/workspace/members/{uid_of(owner, 'ed1@example.com')}").status_code == 200
@@ -110,7 +111,7 @@ def test_g3_viewer_regex_timeout_is_still_enforced(tmp_path):
     register(owner)
     viewer = join(owner, tmp_path, "v@example.com", "viewer")
     t0 = time.monotonic()
-    r = viewer.post("/api/regex", json={"pattern": "(a+)+$", "samples": ["a" * 40 + "!"]})
+    r = viewer.post("/api/regex", json={"pattern": "(a|aa)+$", "samples": ["a" * 40 + "!"]})
     assert time.monotonic() - t0 < 15
     assert r.status_code == 200
     body = r.json()

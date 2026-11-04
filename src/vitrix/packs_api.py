@@ -1,11 +1,12 @@
-"""HTTP API of content packs (ADR 0004): SigmaHQ rules into local drafts, via a background job.
+"""HTTP API of content packs (ADR 0004, 0007): SigmaHQ rules into local rule files, via a background job.
 
     GET  /api/packs/sources      sources, cached archives, limits (viewer; `enabled:false` when off)
     POST /api/packs/jobs         start a `preview` or `import` job (editor; `refresh` needs admin)
     GET  /api/packs/jobs/{id}    job state for polling (viewer)
 
-Nothing is ever written to `rules/`: an import creates drafts (rows in drafts.db) and the only file
-writes are the cached archive under `<data_dir>/cache/packs/`. See packs.py for the archive guards.
+An import writes local rule files (`rules/<into>/...` + cases) through `local_rules.create` (same path
+guards as Save; an existing file is never overwritten) and the cached archive under
+`<data_dir>/cache/packs/`. See packs.py for the archive guards.
 """
 
 from __future__ import annotations
@@ -17,10 +18,8 @@ from typing import Literal
 from fastapi import APIRouter, HTTPException, Request
 from pydantic import BaseModel, Field
 
-from . import auth_api, packs
-from . import drafts as drafts_mod
+from . import auth_api, local_rules, packs
 from .config import Config
-from .drafts import DraftStore
 from .pack_jobs import Job, JobBusy, PackJobs
 from .service import ChangeError, normalize_rule_path
 
@@ -50,42 +49,42 @@ class JobRequest(BaseModel):
     owner: str | None = Field(default=None, max_length=100)
 
 
-def build_router(cfg: Config, *, drafts: DraftStore | None, off: Callable[[Request], str | None], auth_on: bool,
-                 jobs: PackJobs | None = None) -> APIRouter:
-    """`off(request)` is the drafts-availability rule (api.py); packs follow it exactly."""
+def build_router(cfg: Config, *, off: Callable[[Request], str | None], auth_on: bool,
+                 jobs: PackJobs | None = None, audit: Callable[[object, str, str], None] | None = None) -> APIRouter:
+    """`off(request)` is the local-rules availability rule (api.local_writes_off); packs follow it exactly."""
     router = APIRouter()
+    audited: set[str] = set()
     jobs = jobs or PackJobs()
     cache_dir = (cfg.data_dir / "cache" / "packs") if cfg.data_dir else None
 
-    def ready(request: Request) -> DraftStore:
+    def ready(request: Request) -> None:
         reason = off(request)
-        if reason or drafts is None or cache_dir is None:
+        if reason or cache_dir is None:
             raise HTTPException(status_code=403, detail=f"Content packs are off: {reason or 'no data directory'}")
-        return drafts
 
     def author_of(request: Request) -> dict | None:
         who = auth_api.who(request)
         return {"id": who.user_id, "email": who.email, "name": who.name} if who else None
 
-    def free_slots(db: DraftStore, author: dict | None) -> int:
-        uid = author["id"] if author else None
-        return drafts_mod.MAX_PER_AUTHOR - sum(1 for r in db.list() if r["author_id"] == uid)
+    def free_slots() -> int:
+        used = sum(1 for p in cfg.rules_dir.rglob("*") if p.suffix.lower() in (".yml", ".yaml")) if cfg.rules_dir.is_dir() else 0
+        return max(0, local_rules.MAX_FILES - used)
 
     @router.get("/api/packs/sources")
     def sources(request: Request) -> dict:
         reason = off(request)
-        base = {"enabled": False, "reason": reason or "no data directory", "sources": [], "limits": {"max_rules": MAX_RULES, "drafts_free": None}}
-        if reason or drafts is None or cache_dir is None:
+        base = {"enabled": False, "reason": reason or "no data directory", "sources": [], "limits": {"max_rules": MAX_RULES, "files_free": None}}
+        if reason or cache_dir is None:
             return base
         cached = packs.cached_refs(cache_dir)
         refs = ["master"] + [c["ref"] for c in cached if c["ref"] != "master"]
         return {"enabled": True, "reason": None,
                 "sources": [{"id": "sigmahq", "name": "SigmaHQ", "url": packs.SIGMAHQ_REPO, "license": "DRL 1.1", "refs": refs, "cached": cached}],
-                "limits": {"max_rules": MAX_RULES, "drafts_free": free_slots(drafts, author_of(request))}}
+                "limits": {"max_rules": MAX_RULES, "files_free": free_slots()}}
 
     @router.post("/api/packs/jobs", status_code=202)
     def start_job(req: JobRequest, request: Request) -> dict:
-        db = ready(request)
+        ready(request)
         author = author_of(request)
         who = auth_api.who(request)
         if req.refresh and auth_on and not (who and who.can("admin")):
@@ -99,12 +98,12 @@ def build_router(cfg: Config, *, drafts: DraftStore | None, off: Callable[[Reque
             paths = list(dict.fromkeys(req.paths))
             if not paths or any(len(p) > 300 for p in paths):
                 raise HTTPException(status_code=422, detail="paths must be 1..50 rule paths from a preview")
-        free = free_slots(db, author)
+        free = free_slots()
         if req.mode == "import" and (free <= 0 or (paths and len(paths) > free)):
-            raise HTTPException(status_code=409, detail=f"import would exceed your draft limit ({drafts_mod.MAX_PER_AUTHOR}): {max(free, 0)} free")
+            raise HTTPException(status_code=409, detail=f"too many rule files ({local_rules.MAX_FILES}): {free} free")
         batch = {"req": req, "paths": paths, "free": free}
         try:
-            job = jobs.start(req.mode, author, lambda j: _run(j, cfg, cache_dir, db, author, **batch))  # type: ignore[arg-type]
+            job = jobs.start(req.mode, author, lambda j: _run(j, cfg, cache_dir, author, **batch))  # type: ignore[arg-type]
         except JobBusy as exc:
             raise HTTPException(status_code=409, detail=str(exc)) from None
         return job.public()
@@ -115,12 +114,16 @@ def build_router(cfg: Config, *, drafts: DraftStore | None, off: Callable[[Reque
         job = jobs.get(job_id) if _JOB_ID.match(job_id) else None
         if job is None:
             raise HTTPException(status_code=404, detail="job not found")
+        if audit and isinstance(job.result, dict) and job.result.get("audit") and job_id not in audited:
+            audited.add(job_id)  # once per finished job, whoever polls first
+            starter = job.created_by or {}  # the user who started the import, not whoever polls
+            audit(starter.get("name") or starter.get("email") or "system", "packs.imported_local", job.result["audit"])
         return job.public()
 
     return router
 
 
-def _run(job: Job, cfg: Config, cache_dir, db: DraftStore, author: dict | None, *, req: JobRequest,  # noqa: ANN001
+def _run(job: Job, cfg: Config, cache_dir, author: dict | None, *, req: JobRequest,  # noqa: ANN001
          paths: list[str] | None, free: int) -> None:
     def on_bytes(done: int, total: int | None) -> None:
         job.progress["bytes"], job.progress["total"] = done, total
@@ -144,7 +147,7 @@ def _run(job: Job, cfg: Config, cache_dir, db: DraftStore, author: dict | None, 
         job.progress["matched"] = len(candidates)
 
     if req.mode == "preview":
-        job.result = {"matched": len(candidates), "items": [{**c.public(), "draft_id": None} for c in candidates[:MAX_PREVIEW_ITEMS]],
+        job.result = {"matched": len(candidates), "items": [{**c.public(), "rule": None} for c in candidates[:MAX_PREVIEW_ITEMS]],
                       "skipped": skipped[:MAX_SKIPPED]}
         return
 
@@ -160,12 +163,16 @@ def _run(job: Job, cfg: Config, cache_dir, db: DraftStore, author: dict | None, 
             chosen.append(c)
         else:
             skipped.append({"path": c.path, "reason": f"over the limit of {limit} rules for this import"})
-    items = [{"path": c.path, "title": c.title, "rule": packs.with_owner(c.text, req.owner),
-              "cases": packs.cases_text(c.cases) if c.cases else None,
-              "base_hash": drafts_mod.rule_hash(cfg.rules_dir, c.path),
-              "source": f"sigmahq@{req.ref}:rules/{c.rel}", "batch_id": job.id} for c in chosen]
-    ids = db.create_many(items, author=author) if items else []
-    job.progress["imported"] = len(ids)
+    written: list[tuple] = []
+    for c in chosen:
+        try:
+            made = local_rules.create(cfg, c.path, packs.with_owner(c.text, req.owner), packs.cases_text(c.cases) if c.cases else None)
+        except local_rules.LocalRuleError as exc:
+            skipped.append({"path": c.path, "reason": str(exc)})
+            continue
+        written.append((c, made["id"]))
+        job.progress["imported"] = len(written)
     job.result = {"matched": len(candidates),
-                  "items": [{**c.public(), "draft_id": did} for c, did in zip(chosen, ids, strict=True)],
-                  "skipped": skipped[:MAX_SKIPPED]}
+                  "items": [{**c.public(), "rule": rid} for c, rid in written],
+                  "skipped": skipped[:MAX_SKIPPED],
+                  "audit": f"{len(written)} rules into rules/{req.into}"}

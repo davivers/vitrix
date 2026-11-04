@@ -2,7 +2,7 @@
 
     GET  /api/reviews[?scope=&state=&kind=&ref=]   GET /api/reviews/counts   GET /api/reviews/reviewers
     GET  /api/reviews/{id}                          POST /api/reviews
-    POST /api/reviews/{id}/decision|rerequest|cancel
+    POST /api/reviews/{id}/decision|rerequest|cancel|read|unread      POST /api/reviews/read-all
     GET|POST /api/comments                          PATCH|DELETE /api/comments/{id}
 
 Needs accounts: without them the lists answer `enabled: false` and every other route 403s. Role
@@ -11,6 +11,7 @@ floors are in `auth_api.required_role`; who may act on a given review/comment is
 
 from __future__ import annotations
 
+import difflib
 import re
 from collections.abc import Iterator
 from contextlib import contextmanager
@@ -48,6 +49,10 @@ class VersionRequest(BaseModel):
     version: int = Field(ge=1)
 
 
+class RerequestRequest(VersionRequest):
+    note: str | None = Field(default=None, max_length=2000)
+
+
 class CommentRequest(BaseModel):
     target_kind: Literal["rule", "draft"]
     target_ref: str = Field(min_length=1, max_length=300)
@@ -69,6 +74,20 @@ def _errors() -> Iterator[None]:
 
 def _person(who: Identity) -> dict:
     return {"id": who.user_id, "email": who.email, "name": who.name or who.email}
+
+
+MAX_DIFF_LINES = 2000
+
+
+def _diff(base: str | None, current: str | None, name: str = "rule.yml") -> dict:
+    """Unified diff base -> current. `changed_lines` = added + removed; None when there is no baseline (old reviews)."""
+    if base is None or current is None:
+        return {"diff": None, "changed_lines": None, "added": None, "removed": None, "diff_too_large": False}
+    lines = list(difflib.unified_diff(base.splitlines(), current.splitlines(), f"{name} (at request)", f"{name} (now)", lineterm="", n=3))
+    added = sum(1 for ln in lines if ln.startswith("+") and not ln.startswith("+++"))
+    removed = sum(1 for ln in lines if ln.startswith("-") and not ln.startswith("---"))
+    too_big = len(lines) > MAX_DIFF_LINES
+    return {"diff": "" if too_big else "\n".join(lines), "changed_lines": added + removed, "added": added, "removed": removed, "diff_too_large": too_big}
 
 
 def _clean(text: str) -> str:
@@ -116,13 +135,7 @@ class Reviews:
             rel = service.normalize_rule_path(ref)
             return {"ref": rel, "title": drafts_mod.resolve_title(None, text, rel), "hash": drafts_mod.rule_hash(self.cfg.rules_dir, rel),
                     "version": None, "text": text}
-        if not _ID.match(ref) or self.drafts is None:
-            return None
-        try:
-            row = self.drafts.get(ref)
-        except drafts_mod.DraftError:
-            return None
-        return {"ref": ref, "title": row["title"], "hash": text_hash(row["rule"]), "version": row["version"], "text": row["rule"]}
+        return None  # drafts are private scratch (ADR 0007): legacy draft reviews/comments are closed and invisible to everyone
 
     def _need_target(self, kind: str, ref: str) -> dict:
         found = self._target(kind, ref)
@@ -140,12 +153,15 @@ class Reviews:
 
     # ------------------------------------------------------------------ payloads
 
-    def _review_json(self, row: dict, me_id: int, cache: dict | None = None) -> dict:
+    def _review_json(self, row: dict, me_id: int, cache: dict | None = None, unread: set[str] | None = None, detail: bool = False) -> dict:
         key = (row["target_kind"], row["target_ref"])
         cache = cache if cache is not None else {}
         if key not in cache:
             cache[key] = self._target(*key)
         current = cache[key]
+        if unread is None:
+            unread = self.store.unread_ids(me_id) if self.store else set()
+        d = _diff(row.get("base_text"), current["text"] if current else None)
         out = {
             "id": row["id"],
             "target": {"kind": row["target_kind"], "ref": row["target_ref"], "title": current["title"] if current else row["target_title"], "missing": current is None},
@@ -162,7 +178,14 @@ class Reviews:
             "mine_to_review": row["reviewer_id"] == me_id,
             "mine_requested": row["requester_id"] == me_id,
             "governance": self._governance(current["text"]) if current and row["target_kind"] == "rule" else None,
+            "unread": row["id"] in unread,
+            "snapshot": {"changed_lines": d["changed_lines"], "added": d["added"], "removed": d["removed"], "stale": current is not None and current["hash"] != row["target_hash"]},
         }
+        if detail:
+            out.update(diff=d["diff"], diff_too_large=d["diff_too_large"], snapshot_text=row.get("snapshot_text"), base_text=row.get("base_text"),
+                       current_text=current["text"] if current else None,
+                       events=[{"id": e["id"], "type": e["type"], "actor": {"id": e["actor_id"], "name": e["actor_name"]}, "text": e["text"],
+                                "at": drafts_mod.iso(e["at"])} for e in self.store.events(row["id"])] if self.store else [])
         return out
 
     def _comment_json(self, row: dict, me_id: int, cache: dict | None = None) -> dict:
@@ -230,15 +253,25 @@ class Reviews:
                 reviewer_id=who.user_id if scope == "to_review" else None,
                 requester_id=who.user_id if scope == "requested" else None,
                 states=_STATE_FILTERS[state], kind=kind, ref=ref)
+            rows = [r for r in rows if r["target_kind"] != "draft"]  # legacy draft reviews would expose private drafts
             cache: dict = {}
-            return {"enabled": True, "reason": None, "reviews": [outer._review_json(r, who.user_id, cache) for r in rows]}
+            unread = outer.store.unread_ids(who.user_id)  # type: ignore[union-attr]
+            return {"enabled": True, "reason": None, "reviews": [outer._review_json(r, who.user_id, cache, unread) for r in rows]}
 
         @router.get("/api/reviews/counts")
         def reviews_counts(request: Request) -> dict:
             reason = outer.off_reason()
             if reason:
-                return {"enabled": False, "reason": reason, "to_review": 0, "requested": 0}
-            return {"enabled": True, "reason": None, **outer.store.counts(identity(request).user_id)}  # type: ignore[union-attr]
+                return {"enabled": False, "reason": reason, "to_review": 0, "requested": 0, "unread": 0, "latest": []}
+            uid = identity(request).user_id
+            summary = outer.store.unread_summary(uid)  # type: ignore[union-attr]
+            latest = [{"id": r["id"], "title": r["title"], "requester": r["requester_name"], "actor": r["actor_name"] or r["requester_name"],
+                       "created_at": drafts_mod.iso(r["at"]), "kind": r["kind"], "state": r["state"]} for r in summary["latest"]]
+            return {"enabled": True, "reason": None, **outer.store.counts(uid), "unread": summary["unread"], "latest": latest}  # type: ignore[union-attr]
+
+        @router.post("/api/reviews/read-all")
+        def reviews_read_all(request: Request) -> dict:
+            return {"marked": outer.store.read_all(identity(request).user_id)}  # type: ignore[union-attr]
 
         @router.get("/api/reviews/reviewers")
         def reviews_reviewers(request: Request) -> list[dict]:
@@ -252,15 +285,19 @@ class Reviews:
             who = identity(request)
             with _errors():
                 row = outer.store.get(review_id)  # type: ignore[union-attr]
+                if row["target_kind"] == "draft":
+                    raise HTTPException(status_code=404, detail="review not found")
                 cache: dict = {}
                 comments = outer.store.comments(row["target_kind"], row["target_ref"], review_id)  # type: ignore[union-attr]
-            return {**outer._review_json(row, who.user_id, cache), "comments": [outer._comment_json(c, who.user_id, cache) for c in comments]}
+            return {**outer._review_json(row, who.user_id, cache, detail=True), "comments": [outer._comment_json(c, who.user_id, cache) for c in comments]}
 
         @router.post("/api/reviews", status_code=201)
         def reviews_create(req: ReviewRequest, request: Request) -> dict:
             who = identity(request)
             if req.reviewer_id == who.user_id:
                 raise HTTPException(status_code=422, detail="You cannot review your own request.")
+            if req.target_kind == "draft":  # drafts are private scratch, never reviewable (ADR 0007)
+                raise HTTPException(status_code=422, detail="Drafts are private; save the rule as a local rule to request a review.")
             reviewer = member(req.reviewer_id)
             if reviewer is None or auth.ROLE_LEVEL[reviewer["role"]] < auth.ROLE_LEVEL["editor"]:
                 raise HTTPException(status_code=422, detail="Reviewers need the editor role or higher.")
@@ -269,7 +306,7 @@ class Reviews:
                 row = outer.store.request(  # type: ignore[union-attr]
                     kind=req.target_kind, ref=target["ref"], title=target["title"], target_hash=target["hash"], target_version=target["version"],
                     requester=_person(who), reviewer={"id": reviewer["id"], "email": reviewer["email"], "name": reviewer["name"] or reviewer["email"]},
-                    note=req.note)
+                    note=req.note, snapshot_text=target["text"])
             audit(who, "review.requested", f"{req.target_kind} {target['ref']} → {reviewer['email']}")
             return outer._review_json(row, who.user_id)
 
@@ -291,7 +328,7 @@ class Reviews:
             return outer._review_json(done, who.user_id)
 
         @router.post("/api/reviews/{review_id}/rerequest")
-        def reviews_rerequest(review_id: str, req: VersionRequest, request: Request) -> dict:
+        def reviews_rerequest(review_id: str, req: RerequestRequest, request: Request) -> dict:
             who = identity(request)
             with _errors():
                 row = outer.store.get(review_id)  # type: ignore[union-attr]
@@ -299,9 +336,30 @@ class Reviews:
                     raise HTTPException(status_code=403, detail="Only the requester can ask for a new review.")
                 target = outer._need_target(row["target_kind"], row["target_ref"])
                 done = outer.store.rerequest(review_id, version=req.version, title=target["title"],  # type: ignore[union-attr]
-                                             target_hash=target["hash"], target_version=target["version"])
+                                             target_hash=target["hash"], target_version=target["version"],
+                                             snapshot_text=target["text"], note=req.note)
             audit(who, "review.rerequested", f"{row['target_kind']} {row['target_ref']}")
             return outer._review_json(done, who.user_id)
+
+        def participant(review_id: str, who: Identity) -> None:
+            row = outer.store.get(review_id)  # type: ignore[union-attr]
+            if who.user_id not in (row["reviewer_id"], row["requester_id"]):
+                raise HTTPException(status_code=403, detail="This review is not yours.")
+
+        @router.post("/api/reviews/{review_id}/read")
+        def reviews_read(review_id: str, request: Request) -> dict:
+            who = identity(request)
+            with _errors():
+                participant(review_id, who)
+                outer.store.mark_read(review_id, who.user_id)  # type: ignore[union-attr]
+            return {"id": review_id, "unread": False}
+
+        @router.post("/api/reviews/{review_id}/unread")
+        def reviews_unread(review_id: str, request: Request) -> dict:
+            who = identity(request)
+            with _errors():
+                outer.store.mark_unread(review_id, who.user_id)  # type: ignore[union-attr]
+            return {"id": review_id, "unread": True}
 
         @router.post("/api/reviews/{review_id}/cancel")
         def reviews_cancel(review_id: str, req: VersionRequest, request: Request) -> dict:
@@ -310,7 +368,7 @@ class Reviews:
                 row = outer.store.get(review_id)  # type: ignore[union-attr]
                 if row["requester_id"] != who.user_id and not who.can("admin"):
                     raise HTTPException(status_code=403, detail="Only the requester or an admin can cancel this review.")
-                done = outer.store.cancel(review_id, version=req.version)  # type: ignore[union-attr]
+                done = outer.store.cancel(review_id, version=req.version, actor=_person(who))  # type: ignore[union-attr]
             audit(who, "review.cancelled", f"{row['target_kind']} {row['target_ref']}")
             return outer._review_json(done, who.user_id)
 
@@ -322,6 +380,8 @@ class Reviews:
             who = identity(request)
             if kind is None or not ref or len(ref) > 300:
                 raise HTTPException(status_code=422, detail="kind and ref are required")
+            if kind == "draft":
+                return {"enabled": True, "reason": None, "comments": []}
             cache: dict = {}
             return {"enabled": True, "reason": None,
                     "comments": [outer._comment_json(c, who.user_id, cache) for c in outer.store.comments(kind, ref)]}  # type: ignore[union-attr]
@@ -329,6 +389,8 @@ class Reviews:
         @router.post("/api/comments", status_code=201)
         def comments_create(req: CommentRequest, request: Request) -> dict:
             who = identity(request)
+            if req.target_kind == "draft":
+                raise HTTPException(status_code=422, detail="Drafts are private and cannot be commented on.")
             target = outer._need_target(req.target_kind, req.target_ref)
             with _errors():
                 if req.review_id is not None:

@@ -23,7 +23,7 @@ from pathlib import Path
 import yaml
 
 from .config import Config
-from .history import HistoryError, _git, _read_blobs
+from .history import HistoryError, _git, _read_blobs, repo_state
 from .loader import RULE_SUFFIXES, RuleFile
 from .replay import ReplayError, dataset_files, dataset_name, load_events, replay
 from .service import _load_all, rule_id
@@ -40,10 +40,9 @@ class DriftError(Exception):
 
 
 def _require_repo(cfg: Config) -> None:
-    try:
-        _git(cfg, "rev-parse", "--is-inside-work-tree")
-    except (HistoryError, OSError) as exc:
-        raise DriftError(f"drift needs a Git repository with at least one commit: {exc}", 409) from exc
+    state = repo_state(cfg)
+    if state:
+        raise DriftError(state["message"], 409)
 
 
 def default_ref(cfg: Config) -> str:

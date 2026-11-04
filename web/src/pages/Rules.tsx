@@ -7,6 +7,7 @@ import { HintText } from "../components/Issues";
 import { DriftBadge, count, driftErrorMessage } from "../components/Drift";
 import { HealthMeter, StatTile, pct, timeAgo } from "../components/dash";
 import { FlowFunnel } from "../components/flow";
+import { PublicationBadge } from "./Editor";
 import { Card, ErrorBox, LevelTag, PageHeader, StateBadge, TargetChip, btnPrimary, btnSecondary, inputCls } from "../components/ui";
 import type { QualityReport, State } from "../types";
 import { t } from "../i18n";
@@ -263,6 +264,11 @@ export default function RulesPage() {
                       {r.title || r.id}
                     </Link>
                     <div className="font-mono text-xs text-subtle">{r.id}</div>
+                    {r.publication && r.publication.state !== "published" && r.publication.state !== "unknown" && (
+                      <div className="mt-1">
+                        <PublicationBadge pub={r.publication} isNew={false} />
+                      </div>
+                    )}
                     {r.logsource && <div className="text-xs text-subtle">{r.logsource}</div>}
                   </td>
                   <td className="px-4 py-3">

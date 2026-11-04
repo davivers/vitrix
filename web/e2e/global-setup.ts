@@ -86,13 +86,36 @@ function gitCommit(dir: string) {
   }
 }
 
-async function start(auth: boolean) {
+function git(dir: string, ...args: string[]) {
+  const r = spawnSync("git", ["-c", "user.email=e2e@example.com", "-c", "user.name=e2e", ...args], { cwd: dir, encoding: "utf8" });
+  if (r.status !== 0) throw new Error(`git ${args.join(" ")} failed: ${r.stderr}`);
+  return r.stdout.trim();
+}
+
+/** Makes `dir` a clone-like checkout of a new local bare repo (origin), so sync has a remote to fetch. */
+function attachBare(dir: string) {
+  const bare = mkdtempSync(path.join(tmpdir(), "vitrix-e2e-bare-")) + "/origin.git";
+  const branch = git(dir, "rev-parse", "--abbrev-ref", "HEAD");
+  git(tmpdir(), "init", "-q", "--bare", bare);
+  git(dir, "remote", "add", "origin", bare);
+  git(dir, "push", "-q", "origin", branch);
+  git(dir, "fetch", "-q", "origin");
+  git(dir, "branch", "--set-upstream-to", `origin/${branch}`, branch);
+  return { bare, branch };
+}
+
+async function start(auth: boolean, kind: "normal" | "bare" | "empty" = "normal") {
   const dir = mkdtempSync(path.join(tmpdir(), auth ? "vitrix-e2e-auth-" : "vitrix-e2e-local-"));
   const init = spawnSync(VITRIX, ["init", dir], { encoding: "utf8" });
   if (init.status !== 0) throw new Error(`vitrix init failed: ${init.stderr}${init.stdout}`);
   const yml = path.join(dir, "vitrix.yml");
   if (auth) writeFileSync(yml, readFileSync(yml, "utf8") + "\nauth:\n  enabled: true\n  workspace_name: E2E workspace\n", "utf8");
-  gitCommit(dir); // Drift and history need a repository with a commit
+  let bare: { bare: string; branch: string } | null = null;
+  if (kind === "empty") git(dir, "init", "-q"); // a repository without any commit
+  else {
+    gitCommit(dir); // Drift and history need a repository with a commit
+    if (kind === "bare") bare = attachBare(dir);
+  }
   seedPacksCache(dir);
   const port = await freePort();
   let out = "";
@@ -101,7 +124,7 @@ async function start(auth: boolean) {
   proc.stderr?.on("data", (d) => (out += d));
   const url = `http://127.0.0.1:${port}`;
   await waitHealth(url, proc, () => out);
-  return { url, proc };
+  return { url, proc, dir, bare };
 }
 
 function kill(proc: ChildProcess) {
@@ -112,12 +135,18 @@ function kill(proc: ChildProcess) {
 
 /** Starts two isolated servers on temp repos: E2E_AUTH_URL (accounts on) and E2E_LOCAL_URL (accounts off). */
 export default async function globalSetup() {
-  const [auth, local] = await Promise.all([start(true), start(false)]);
+  const [auth, local, empty] = await Promise.all([start(true, "bare"), start(false), start(false, "empty")]);
   process.env.E2E_AUTH_URL = auth.url;
   process.env.E2E_LOCAL_URL = local.url;
+  process.env.E2E_EMPTY_URL = empty.url;
+  process.env.E2E_AUTH_DIR = auth.dir;
+  process.env.E2E_AUTH_BARE = auth.bare!.bare;
+  process.env.E2E_AUTH_BRANCH = auth.bare!.branch;
+  process.env.E2E_LOCAL_DIR = local.dir;
   process.env.E2E_SETUP_TOKEN = SETUP_TOKEN;
   return async () => {
     kill(auth.proc);
     kill(local.proc);
+    kill(empty.proc);
   };
 }

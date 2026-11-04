@@ -290,7 +290,7 @@ def test_draft_routes_are_classified():
 
 def test_unclassified_writes_default_to_admin():
     assert auth_api.required_role("POST", "/api/something-new") == "admin"
-    assert auth_api.required_role("DELETE", "/api/rules/x") == "admin"
+    assert auth_api.required_role("PATCH", "/api/rules/x") == "admin"
     assert auth_api.required_role("GET", "/api/rules") == "viewer"
 
 

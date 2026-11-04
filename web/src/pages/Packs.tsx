@@ -1,7 +1,7 @@
 import { useMutation, useQuery } from "@tanstack/react-query";
 import { AlertTriangle, CheckCircle2, Download, ExternalLink, Loader2, PackageOpen, Rocket, Search, XCircle } from "lucide-react";
-import { useEffect, useState, type FormEvent } from "react";
-import { Link } from "react-router-dom";
+import { useEffect, useRef, useState, type FormEvent } from "react";
+import { Link, useSearchParams } from "react-router-dom";
 import { ApiError, DEMO, api } from "../api";
 import { can, useMe } from "../components/auth";
 import { Card, ErrorBox, LevelTag, PageHeader, btnPrimary, btnSecondary, inputCls } from "../components/ui";
@@ -20,6 +20,7 @@ function useJob(id: string | null) {
     queryFn: () => api.packJob(id!),
     enabled: id !== null,
     retry: false,
+    gcTime: 3_600_000,
     refetchInterval: (q) => (q.state.data && !ACTIVE.has(q.state.data.state) ? false : 1000),
   });
 }
@@ -39,6 +40,32 @@ function Progress({ job }: { job: PackJob }) {
   );
 }
 
+/** Page state survives leaving the tab: module-level store (filters also mirrored in the URL query). */
+interface PackUi {
+  ref: string;
+  f: { product: string; category: string; service: string; text: string };
+  statuses: string[];
+  limit: number;
+  untested: boolean;
+  previewId: string | null;
+  importId: string | null;
+  selected: string[];
+}
+let saved: PackUi = { ref: "", f: { product: "", category: "", service: "", text: "" }, statuses: ["stable", "test"], limit: 20, untested: false, previewId: null, importId: null, selected: [] };
+
+function initial(q: URLSearchParams): PackUi {
+  if (![...q.keys()].length) return saved;
+  const num = Number(q.get("limit"));
+  return {
+    ...saved,
+    ref: q.get("ref") ?? saved.ref,
+    f: { product: q.get("product") ?? "", category: q.get("category") ?? "", service: q.get("service") ?? "", text: q.get("q") ?? "" },
+    statuses: q.has("status") ? (q.get("status") ?? "").split(",").filter(Boolean) : saved.statuses,
+    limit: num > 0 ? num : saved.limit,
+    untested: q.get("untested") === "1",
+  };
+}
+
 export default function PacksPage() {
   const me = useMe();
   const editor = can(me, "editor") && !DEMO;
@@ -46,14 +73,30 @@ export default function PacksPage() {
   const src = sources.data?.sources[0];
   const max = sources.data?.limits.max_rules ?? 50;
 
-  const [ref, setRef] = useState("");
-  const [f, setF] = useState({ product: "", category: "", service: "", text: "" });
-  const [statuses, setStatuses] = useState<string[]>(["stable", "test"]);
-  const [limit, setLimit] = useState(20);
-  const [untested, setUntested] = useState(false);
-  const [previewId, setPreviewId] = useState<string | null>(null);
-  const [importId, setImportId] = useState<string | null>(null);
-  const [selected, setSelected] = useState<Set<string>>(new Set());
+  const [params, setParams] = useSearchParams();
+  const [init] = useState(() => initial(params));
+  const [ref, setRef] = useState(init.ref);
+  const [f, setF] = useState(init.f);
+  const [statuses, setStatuses] = useState<string[]>(init.statuses);
+  const [limit, setLimit] = useState(init.limit);
+  const [untested, setUntested] = useState(init.untested);
+  const [previewId, setPreviewId] = useState<string | null>(init.previewId);
+  const [importId, setImportId] = useState<string | null>(init.importId);
+  const [selected, setSelected] = useState<Set<string>>(new Set(init.selected));
+
+  useEffect(() => {
+    saved = { ref, f, statuses, limit, untested, previewId, importId, selected: [...selected] };
+    const q = new URLSearchParams();
+    if (ref) q.set("ref", ref);
+    if (f.product) q.set("product", f.product);
+    if (f.category) q.set("category", f.category);
+    if (f.service) q.set("service", f.service);
+    if (f.text) q.set("q", f.text);
+    q.set("status", statuses.join(","));
+    q.set("limit", String(limit));
+    if (untested) q.set("untested", "1");
+    setParams(q, { replace: true });
+  }, [ref, f, statuses, limit, untested, previewId, importId, selected, setParams]);
 
   const filters: PackFilters = {
     product: f.product.trim() || null,
@@ -83,8 +126,12 @@ export default function PacksPage() {
   const pickable = (i: PackItem) => i.state === "ready" || untested;
   // Seed the selection once a preview finishes: the first `limit` importable rules that are not in the repo yet.
   const previewDone = preview.data?.state === "done" ? preview.data.id : null;
+  const seeded = useRef<string | null>(init.previewId);
   useEffect(() => {
-    if (previewDone) setSelected(new Set(items.filter((i) => pickable(i) && !i.exists).slice(0, Math.min(limit, max)).map((i) => i.path)));
+    if (previewDone && seeded.current !== previewDone) {
+      seeded.current = previewDone;
+      setSelected(new Set(items.filter((i) => pickable(i) && !i.exists).slice(0, Math.min(limit, max)).map((i) => i.path)));
+    }
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [previewDone]);
 
@@ -95,7 +142,7 @@ export default function PacksPage() {
     setSelected(next);
   };
 
-  const created = (imported.data?.result?.items ?? []).filter((i) => i.draft_id);
+  const created = (imported.data?.result?.items ?? []).filter((i) => i.rule);
   const onPreview = (e: FormEvent) => {
     e.preventDefault();
     if (!startPreview.isPending) startPreview.mutate();
@@ -250,8 +297,8 @@ export default function PacksPage() {
                   <h2 className="text-[15px] font-semibold text-strong">{t("pk_created", { n: created.length })}</h2>
                   <ul className="divide-y divide-line text-[13px]">
                     {created.map((i) => (
-                      <li key={i.draft_id} className="flex flex-wrap items-center gap-x-3 gap-y-1 py-2">
-                        <Link to={`/editor?draft=${i.draft_id}`} className="font-medium text-text hover:text-accent">
+                      <li key={i.rule} className="flex flex-wrap items-center gap-x-3 gap-y-1 py-2">
+                        <Link to={`/editor/${i.rule}`} className="font-medium text-text hover:text-accent">
                           {i.title}
                         </Link>
                         <span className="font-mono text-xs text-subtle">{i.path}</span>
@@ -270,7 +317,7 @@ export default function PacksPage() {
                       </ul>
                     </div>
                   )}
-                  {created.length > 0 && <PublishBatch ids={created.map((i) => i.draft_id!)} titles={Object.fromEntries(created.map((i) => [i.draft_id!, i.title]))} />}
+                  {created.length > 0 && <PublishBatch ids={created.map((i) => i.rule!)} titles={Object.fromEntries(created.map((i) => [i.rule!, i.title]))} />}
                 </>
               )}
             </Card>
@@ -309,7 +356,7 @@ function Picker(props: { label: string; value: string; onChange: (v: string) => 
 
 function PublishBatch({ ids, titles }: { ids: string[]; titles: Record<string, string> }) {
   const [title, setTitle] = useState("");
-  const publish = useMutation({ mutationFn: () => api.submitDrafts({ draft_ids: ids, title: title.trim() || null }) });
+  const publish = useMutation({ mutationFn: () => api.submitLocalRules({ paths: ids, title: title.trim() || null }) });
   const blocked: BlockedDraft[] = publish.error instanceof ApiError && publish.error.status === 422 && Array.isArray(publish.error.body?.blocked) ? (publish.error.body.blocked as BlockedDraft[]) : [];
   const sub: Submission | undefined = publish.data;
   return (
@@ -325,7 +372,7 @@ function PublishBatch({ ids, titles }: { ids: string[]; titles: Record<string, s
         <ul className="space-y-2 text-[13px]">
           {blocked.map((b) => (
             <li key={b.id} className="rounded-[10px] border border-bad/30 bg-bad-soft p-3">
-              <Link to={`/editor?draft=${b.id}`} className="font-medium text-bad hover:underline">
+              <Link to={`/editor/${b.path ?? b.id}`} className="font-medium text-bad hover:underline">
                 {titles[b.id] ?? b.path ?? b.id}
               </Link>
               <ul className="mt-1 list-disc pl-5 text-bad">

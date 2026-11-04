@@ -1,9 +1,9 @@
 import { useQuery, useQueryClient } from "@tanstack/react-query";
 import CodeMirror from "@uiw/react-codemirror";
 import clsx from "clsx";
-import { AlertTriangle, Check, CheckCircle2, Copy, Download, Eye, FolderOpen, Loader2, Rocket, Save, ShieldCheck, XCircle } from "lucide-react";
+import { AlertTriangle, Check, CheckCircle2, ChevronDown, CircleDot, Copy, Download, Eye, FilePlus, FolderOpen, GitMerge, GitPullRequest, HardDrive, Loader2, Rocket, Save, ShieldCheck, XCircle } from "lucide-react";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
-import { useNavigate, useParams, useSearchParams } from "react-router-dom";
+import { Link, useNavigate, useParams, useSearchParams } from "react-router-dom";
 import { ApiError, DEMO, api } from "../api";
 import { useIsDark } from "../theme";
 import { can, useMe } from "../components/auth";
@@ -13,12 +13,12 @@ import { IssueList } from "../components/Issues";
 import { HealthMeter, formatDate, timeAgo } from "../components/dash";
 import { DraftsSheet } from "../components/DraftsSheet";
 import { DriftPanel } from "../components/Drift";
-import { CheckList, FlowStepper, GATE_LABELS, KindTag, fmt } from "../components/flow";
-import { PublishDialog } from "../components/PublishDialog";
+import { CheckList, FlowStepper, GATE_LABELS, fmt } from "../components/flow";
+import { PublishDialog, suggestPath } from "../components/PublishDialog";
 import { ReplayPanel } from "../components/ReplayPanel";
 import { ReviewPanel } from "../components/ReviewPanel";
-import { Card, ErrorBox, PageHeader, StateBadge, TargetSwatch, btnPrimary, btnSecondary } from "../components/ui";
-import type { Draft, DraftQuality, Impact, LintIssue, Validation } from "../types";
+import { Card, ErrorBox, LevelTag, StateBadge, TargetSwatch, btnPrimary, btnSecondary, inputCls } from "../components/ui";
+import type { Draft, DraftQuality, LintIssue, Publication, Validation } from "../types";
 import { locale, t, tn } from "../i18n";
 
 function newRuleTemplate(): string {
@@ -93,13 +93,23 @@ export default function EditorPage() {
       initialRule={d ? d.rule : (detail.data?.text ?? newRuleTemplate())}
       initialCases={d ? (d.cases ?? "") : detail.data ? (detail.data.tests.cases_text ?? "") : CASES_TEMPLATE}
       draft={d}
+      disk={!d && detail.data ? { sha: detail.data.sha ?? null, cases_sha: detail.data.cases_sha ?? null, publication: detail.data.publication ?? null } : null}
     />
   );
 }
 
-type Panel = "gate" | "replay" | "queries" | "tests" | "impact" | "history" | "drift" | "review";
+/** B3 issue codes after which the rule cannot be evaluated at all (anything else still lets replay run). */
+const REPLAY_BLOCKERS = new Set(["invalid-yaml", "not-a-mapping", "missing-condition", "no-selection", "unknown-selection", "pattern-no-match", "bad-logsource"]);
 
-function EditorWorkspace(props: { ruleId: string | null; file: string | null; initialRule: string; initialCases: string; draft: Draft | null }) {
+type Panel = "gate" | "replay" | "queries" | "history" | "drift" | "review";
+
+interface Disk {
+  sha: string | null;
+  cases_sha: string | null;
+  publication: Publication | null;
+}
+
+function EditorWorkspace(props: { ruleId: string | null; file: string | null; initialRule: string; initialCases: string; draft: Draft | null; disk: Disk | null }) {
   const { ruleId, file, initialRule, initialCases } = props;
   const me = useMe();
   const dark = useIsDark();
@@ -113,10 +123,16 @@ function EditorWorkspace(props: { ruleId: string | null; file: string | null; in
   const [result, setResult] = useState<Validation | null>(null);
   const [pending, setPending] = useState(true);
   const [error, setError] = useState<string | null>(null);
-  const [publishOpen, setPublishOpen] = useState(false);
+  const [publishOpen, setPublishOpen] = useState(() => isEditor && !DEMO && new URLSearchParams(window.location.search).get("publish") === "1");
+  const publishAfterSave = useRef(false);
   const [replayBroken, setReplayBroken] = useState<boolean | null>(null);
   const [draftsOpen, setDraftsOpen] = useState(false);
   const [offerDelete, setOfferDelete] = useState(false);
+  // The rule file on disk (U2): Save writes rules/<id>; `sha` guards against someone else changing it meanwhile.
+  const [disk, setDisk] = useState<Disk | null>(props.disk);
+  const [fileSave, setFileSave] = useState<{ busy: boolean; error: string | null; conflict: boolean; askPath: boolean; savedAt: Date | null }>({ busy: false, error: null, conflict: false, askPath: false, savedAt: null });
+  const [newPath, setNewPath] = useState(() => props.draft?.path ?? suggestPath(initialRule));
+  const fileDirty = disk ? rule !== initialRule || cases !== initialCases : false;
   // Local draft state: id + version of the loaded/saved draft, and what was last saved (for the "unsaved" dot).
   const [saved, setSaved] = useState<{ id: string; version: number; rule: string; cases: string; at: Date } | null>(
     // Only the author's own draft keeps its id (PUT); someone else's opens as a copy and Save creates a new draft.
@@ -184,9 +200,10 @@ function EditorWorkspace(props: { ruleId: string | null; file: string | null; in
     else setTab(target);
   };
   const quality = result?.quality;
+  const meta = useMemo(() => parseMeta(rule), [rule]);
   const localReady: boolean | null = pending || !result ? null : result.state !== "fail" && Boolean(quality?.ready);
 
-  const saveLocally = useCallback(async () => {
+  const saveDraft = useCallback(async () => {
     if (!isEditor || !draftsOn || saveState.busy) return;
     setSaveState({ busy: true, error: null, conflict: false });
     const body = { path: ruleId, title: null, rule, cases: cases.trim() ? cases : null };
@@ -201,17 +218,45 @@ function EditorWorkspace(props: { ruleId: string | null; file: string | null; in
     }
   }, [isEditor, draftsOn, saveState.busy, ruleId, rule, cases, saved, qc]);
 
-  // Ctrl/Cmd+S saves locally (never publishes).
+  /** Save = write the rule (and cases) into rules/ (ADR 0007). Returns the saved id/sha on success. */
+  const saveFile = useCallback(async (): Promise<{ id: string; sha: string; cases_sha: string | null } | null> => {
+    if (!isEditor || DEMO || fileSave.busy) return null;
+    if (!disk?.sha && !fileSave.askPath) {
+      setFileSave((f) => ({ ...f, askPath: true, error: null }));
+      return null;
+    }
+    setFileSave((f) => ({ ...f, busy: true, error: null, conflict: false }));
+    try {
+      const casesBody = cases.trim() ? cases : null;
+      const saved = ruleId && disk?.sha
+        ? await api.updateRule(ruleId, { rule, cases: casesBody, remove_cases: casesBody === null && disk.cases_sha !== null, sha: disk.sha, cases_sha: disk.cases_sha })
+        : await api.createRule({ path: newPath.trim(), rule, cases: casesBody });
+      setDisk({ sha: saved.sha ?? null, cases_sha: saved.cases_sha ?? null, publication: saved.publication ?? null });
+      setFileSave({ busy: false, error: null, conflict: false, askPath: false, savedAt: new Date() });
+      void qc.invalidateQueries({ queryKey: ["rules"] });
+      void qc.invalidateQueries({ queryKey: ["rule", saved.id] });
+      if (!disk?.sha) navigate(`/editor/${saved.id}${publishAfterSave.current ? "?publish=1" : ""}`, { replace: true });
+      else if (publishAfterSave.current) setPublishOpen(true);
+      publishAfterSave.current = false;
+      return { id: saved.id, sha: saved.sha ?? "", cases_sha: saved.cases_sha ?? null };
+    } catch (e) {
+      const status = e instanceof ApiError ? e.status : 0;
+      setFileSave((f) => ({ ...f, busy: false, error: (e as Error).message, conflict: status === 409 }));
+      return null;
+    }
+  }, [isEditor, fileSave.busy, fileSave.askPath, ruleId, disk, rule, cases, newPath, qc, navigate]);
+
+  // Ctrl/Cmd+S saves the rule file (never publishes).
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => {
       if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === "s") {
         e.preventDefault();
-        void saveLocally();
+        void saveFile();
       }
     };
     window.addEventListener("keydown", onKey);
     return () => window.removeEventListener("keydown", onKey);
-  }, [saveLocally]);
+  }, [saveFile]);
 
   const saveAsNew = () => {
     setSaved(null);
@@ -243,20 +288,21 @@ function EditorWorkspace(props: { ruleId: string | null; file: string | null; in
   };
 
   return (
-    <div className="flex h-full flex-col px-4 py-8 sm:px-8">
-      <PageHeader
-        title={file ?? t("l_new_rule")}
-        subtitle={t("ed_sub")}
+    <div className="flex h-full flex-col px-4 py-4 sm:px-8">
+      <RuleHeader
+        title={meta.title}
+        meta={meta}
+        file={file}
+        result={result}
+        publication={disk?.publication ?? null}
+        isNew={!disk}
+        dirty={disk ? fileDirty : dirty}
+        savedAt={fileSave.savedAt}
+        isEditor={isEditor}
         actions={
           <div className="flex flex-wrap items-center gap-2">
             {isEditor && (
-              <button
-                type="button"
-                onClick={() => setDraftsOpen(true)}
-                disabled={!draftsOn}
-                aria-describedby={draftsReason ? "drafts-off" : undefined}
-                className={btnSecondary}
-              >
+              <button type="button" onClick={() => setDraftsOpen(true)} disabled={!draftsOn} aria-describedby={draftsReason ? "drafts-off" : undefined} className={btnSecondary}>
                 <FolderOpen size={16} aria-hidden /> {t("drafts")}{draftsInfo.data ? ` (${draftsInfo.data.drafts.length})` : ""}
               </button>
             )}
@@ -265,18 +311,26 @@ function EditorWorkspace(props: { ruleId: string | null; file: string | null; in
             </button>
             <button
               type="button"
-              onClick={() => void saveLocally()}
-              aria-disabled={!isEditor || !draftsOn}
-              aria-describedby={!isEditor ? "viewer-save" : draftsReason ? "drafts-off" : undefined}
-              aria-busy={saveState.busy}
-              title={DEMO ? t("demo_disabled") : undefined}
-              className={clsx(btnSecondary, (!isEditor || !draftsOn) && "cursor-not-allowed opacity-50")}
+              onClick={() => void saveFile()}
+              aria-disabled={!isEditor || DEMO}
+              aria-describedby={!isEditor ? "viewer-save" : undefined}
+              aria-busy={fileSave.busy}
+              title={DEMO ? t("demo_disabled") : t("ed_save_tip")}
+              className={clsx(btnSecondary, (!isEditor || DEMO) && "cursor-not-allowed opacity-50")}
             >
-              {saveState.busy ? <Loader2 size={16} className="animate-spin" aria-hidden /> : <Save size={16} aria-hidden />} {t("ed_save_locally")}
+              {fileSave.busy ? <Loader2 size={16} className="animate-spin" aria-hidden /> : <Save size={16} aria-hidden />} {t("ed_save_locally")}
             </button>
             <button
               type="button"
-              onClick={() => isEditor && !DEMO && setPublishOpen(true)}
+              onClick={async () => {
+                if (!isEditor || DEMO) return;
+                if (!disk || fileDirty) {
+                  publishAfterSave.current = true;
+                  const ok = await saveFile();
+                  if (!ok) return;
+                }
+                setPublishOpen(true);
+              }}
               aria-disabled={!isEditor || DEMO}
               title={DEMO ? t("demo_disabled") : undefined}
               aria-describedby={!isEditor ? "viewer-publish" : undefined}
@@ -287,15 +341,49 @@ function EditorWorkspace(props: { ruleId: string | null; file: string | null; in
           </div>
         }
       />
-      <div className="-mt-3 mb-4 space-y-1 text-xs" aria-live="polite">
+      <div className="mb-3 space-y-1 text-xs" aria-live="polite">
+        {fileSave.askPath && !disk?.sha && (
+          <form
+            className="flex flex-wrap items-center gap-2"
+            onSubmit={(e) => {
+              e.preventDefault();
+              void saveFile();
+            }}
+          >
+            <label className="flex items-center gap-2 text-muted">
+              <span className="font-mono">rules/</span>
+              <input value={newPath} onChange={(e) => setNewPath(e.target.value)} aria-label={t("ed_save_path")} className={clsx(inputCls, "w-72 py-1 font-mono")} />
+            </label>
+            <button type="submit" className={btnPrimary} disabled={fileSave.busy || !newPath.trim()}>
+              {t("ed_save_here")}
+            </button>
+            <button type="button" className="text-muted hover:text-text" onClick={() => { publishAfterSave.current = false; setFileSave((f) => ({ ...f, askPath: false })); }}>
+              {t("cancel")}
+            </button>
+          </form>
+        )}
+        {fileSave.error && !fileSave.conflict && (
+          <p className="flex items-center gap-1.5 text-bad">
+            <XCircle size={13} aria-hidden /> {fileSave.error}
+          </p>
+        )}
+        {fileSave.conflict && (
+          <p className="flex flex-wrap items-center gap-2 text-warn">
+            <AlertTriangle size={13} aria-hidden /> {fileSave.error}
+            {disk?.sha && (
+              <button type="button" className="font-semibold text-accent hover:underline" onClick={() => window.location.reload()}>
+                {t("ed_reload_disk")}
+              </button>
+            )}
+          </p>
+        )}
         {isEditor && draftsOn && (
           <p className="text-muted">
-            {saved && !dirty ? t("ed_saved_at", { t: saved.at.toLocaleTimeString(locale(), { hour: "2-digit", minute: "2-digit" }) }) : ""}
-            {dirty && (
-              <span className="inline-flex items-center gap-1.5 text-text">
-                <span className="size-2 rounded-full bg-accent" aria-hidden /> {t("unsaved_changes")}
-              </span>
-            )}
+            <button type="button" title={t("ed_drafts_note")} className="font-semibold text-accent hover:underline" onClick={() => void saveDraft()} aria-busy={saveState.busy}>
+              {t("ed_keep_scratch")}
+            </button>
+            {saved && !dirty && ` · ${t("ed_saved_at", { t: saved.at.toLocaleTimeString(locale(), { hour: "2-digit", minute: "2-digit" }) })}`}
+            {fileSave.savedAt && !fileDirty && ` · ${t("ed_saved_at", { t: fileSave.savedAt.toLocaleTimeString(locale(), { hour: "2-digit", minute: "2-digit" }) })}`}
           </p>
         )}
         {draftsReason && (
@@ -351,7 +439,7 @@ function EditorWorkspace(props: { ruleId: string | null; file: string | null; in
       )}
       {publishOpen && isEditor && (
         <PublishDialog
-          mode={{ kind: "rule", ruleId, rule, cases, draftId: saved?.id ?? props.draft?.id ?? null }}
+          mode={{ kind: "rule", ruleId: ruleId ?? (disk ? newPath.trim() : null), rule, cases, draftId: saved?.id ?? props.draft?.id ?? null, file: disk?.sha ? { sha: disk.sha, cases_sha: disk.cases_sha } : undefined }}
           localReady={localReady}
           approval={quality ? t("ed_approved_by", { n: quality.score, req: quality.min_score ? t("ed_req_paren", { n: quality.min_score }) : "" }) : undefined}
           localDetail={quality && !quality.ready ? `Blocked: ${quality.blockers.join("; ")}` : result?.state === "fail" ? t("l_the_rule_has_lint_conversion_or_te") : undefined}
@@ -372,13 +460,13 @@ function EditorWorkspace(props: { ruleId: string | null; file: string | null; in
         />
       )}
 
-      <div className="grid min-h-0 flex-1 grid-cols-1 gap-4 xl:grid-cols-2">
-        <Card className="flex min-h-[420px] flex-col overflow-hidden">
+      <div className="grid min-h-0 flex-1 grid-cols-1 gap-4 xl:grid-cols-2 xl:grid-rows-[minmax(0,1fr)]">
+        <Card className="flex min-h-[420px] flex-col overflow-hidden xl:min-h-0">
           <div className="flex gap-1 border-b border-line px-3 pt-2" role="tablist">
             {(
               [
                 ["rule", t("l_sigma_rule")],
-                ["cases", t("l_test_cases")],
+                ["cases", t("ed_cases_file")],
               ] as const
             ).map(([key, label]) => (
               <button
@@ -402,7 +490,7 @@ function EditorWorkspace(props: { ruleId: string | null; file: string | null; in
           </div>
         </Card>
 
-        <div className="flex min-h-0 flex-col gap-4 overflow-auto">
+        <div className="flex min-h-0 flex-col gap-4">
           {error && <ErrorBox message={error} />}
           {!result && !error && (
             <Card className="flex items-center gap-2 p-5 text-sm text-muted">
@@ -411,16 +499,15 @@ function EditorWorkspace(props: { ruleId: string | null; file: string | null; in
           )}
           {result && (
             <>
+              <AboutBand ruleId={ruleId} rule={rule} />
               <StatusBar result={result} pending={pending} />
-              <Card className="overflow-hidden">
-                <div className="no-scrollbar flex gap-1 overflow-x-auto overflow-y-hidden border-b border-line px-3 pt-2" role="tablist" aria-label={t("rule_panels")}>
+              <Card className="flex flex-col overflow-hidden xl:min-h-0 xl:flex-1">
+                <div className="no-scrollbar flex shrink-0 gap-1 overflow-x-auto overflow-y-hidden border-b border-line px-3 pt-2" role="tablist" aria-label={t("rule_panels")}>
                   {(
                     [
                       ["gate", t("l_quality_gate")],
-                      ["replay", t("l_replay")],
+                      ["replay", t("ed_test_replay")],
                       ["queries", t("l_queries")],
-                      ["tests", t("l_tests")],
-                      ["impact", t("l_impact")],
                       ...(ruleId ? ([["history", t("l_history")]] as const) : []),
                       ...(ruleId ? ([["drift", t("dr_tab")]] as const) : []),
                       ...(DEMO ? [] : ([["review", t("rv_tab")]] as const)),
@@ -443,12 +530,15 @@ function EditorWorkspace(props: { ruleId: string | null; file: string | null; in
                     </button>
                   ))}
                 </div>
-                <div className="p-4">
+                <div className="p-4 xl:min-h-0 xl:flex-1 xl:overflow-y-auto" data-testid="editor-panel-body">
                   {panel === "gate" && quality && <GatePanel quality={quality} />}
-                  {panel === "replay" && <ReplayPanel rule={rule} ruleId={ruleId} invalid={result.state === "fail"} onBroken={setReplayBroken} />}
+                  {panel === "replay" && (
+                    <div className="space-y-5">
+                      <ProblemsPanel result={result} onJump={jumpTo} />
+                      <ReplayPanel rule={rule} cases={cases} ruleId={ruleId} invalid={result.lint.some((i) => i.severity === "error" && REPLAY_BLOCKERS.has(i.code ?? ""))} onBroken={setReplayBroken} />
+                    </div>
+                  )}
                   {panel === "queries" && <QueriesPanel result={result} />}
-                  {panel === "tests" && <TestsPanel result={result} onJump={jumpTo} />}
-                  {panel === "impact" && <ImpactPanel rule={rule} ruleId={ruleId} />}
                   {panel === "history" && ruleId && <HistoryPanel ruleId={ruleId} />}
                   {panel === "drift" && ruleId && <DriftPanel ruleId={ruleId} />}
                   {panel === "review" && <ReviewPanel kind={props.draft ? "draft" : "rule"} target={props.draft ? (saved?.id ?? props.draft.id) : ruleId} ruleText={rule} />}
@@ -642,113 +732,14 @@ function QueriesPanel({ result }: { result: Validation }) {
   );
 }
 
-function TestsPanel({ result, onJump }: { result: Validation; onJump: (issue: LintIssue) => void }) {
+/** Lint and case-file problems with jump links (the case results live in the Test & Replay table). */
+function ProblemsPanel({ result, onJump }: { result: Validation; onJump: (issue: LintIssue) => void }) {
   const issues = [...result.lint, ...(result.tests?.problems ?? [])];
+  if (issues.length === 0) return null;
   return (
-    <div className="space-y-4">
-      {result.tests === null ? (
-        <p className="text-sm text-muted">{t("no_test_cases_add_them_in_the_test_cas")}</p>
-      ) : result.tests.results.length === 0 ? (
-        <p className="text-sm text-muted">{t("no_valid_case_found")}</p>
-      ) : (
-        <ul className="space-y-1.5 text-sm">
-          {result.tests.results.map((r, n) => (
-            <li key={n} className="flex items-start gap-2">
-              {r.passed ? <CheckCircle2 size={16} className="mt-0.5 shrink-0 text-good" aria-hidden /> : <XCircle size={16} className="mt-0.5 shrink-0 text-bad" aria-hidden />}
-              <span>
-                {r.name} <KindTag kind={r.kind} />
-                {r.exercises_filter && <span className="ml-1.5 text-xs text-subtle">{t("proves_the_exclusion")}</span>}
-                {!r.passed && <span className="block text-xs text-bad">{r.error ?? `expected ${r.expect}, got ${r.got}`}</span>}
-              </span>
-            </li>
-          ))}
-        </ul>
-      )}
-      {issues.length > 0 && (
-        <div>
-          <h3 className="mb-1.5 text-[11px] font-semibold uppercase tracking-wider text-subtle">{t("problems")}</h3>
-          <IssueList issues={issues} onJump={onJump} />
-        </div>
-      )}
-    </div>
-  );
-}
-
-/** Impact analysis: how many events the edited rule matches vs. the saved one, per dataset. */
-function ImpactPanel({ rule, ruleId }: { rule: string; ruleId: string | null }) {
-  const [data, setData] = useState<Impact | null>(null);
-  const [error, setError] = useState<string | null>(null);
-
-  useEffect(() => {
-    const ctrl = new AbortController();
-    const timer = setTimeout(() => {
-      api
-        .impact(rule, ruleId, ctrl.signal)
-        .then((r) => {
-          setData(r);
-          setError(null);
-        })
-        .catch((e: Error) => {
-          if (e.name !== "AbortError") setError(e.message);
-        });
-    }, 600);
-    return () => {
-      clearTimeout(timer);
-      ctrl.abort();
-    };
-  }, [rule, ruleId]);
-
-  if (error) return <ErrorBox message={error} />;
-  if (!data) return <p className="flex items-center gap-2 text-sm text-muted"><Loader2 size={14} className="animate-spin" aria-hidden /> {t("replaying_datasets")}</p>;
-  if (data.datasets.length === 0) {
-    return (
-      <p className="text-sm text-muted">
-        {t("no_dataset_in")} <span className="font-mono">datasets/</span>{t("add_logs_there_to_see_how_a_change_mov")}
-      </p>
-    );
-  }
-  return (
-    <div className="space-y-3">
-      <p className="text-[13px] text-muted">
-        {data.saved ? t("l_edited_version_vs_the_version_save") : "New rule: events each dataset would match."}
-        {data.saved && !data.changed && " No event changes its result."}
-      </p>
-      <ul className="space-y-3">
-        {data.datasets.map((d) => (
-          <li key={d.dataset} className="rounded-[10px] border border-line bg-surface p-3 text-[13px]">
-            <p className="font-mono text-xs text-subtle">{d.dataset}</p>
-            {d.error ? (
-              <p className="text-bad">{d.error}</p>
-            ) : (
-              <>
-                <p className="mt-1 text-text">
-                  {d.before !== null && d.before !== undefined && (
-                    <>
-                      <span className="tabular-nums">{d.before}</span> → <b className="tabular-nums text-strong">{d.after}</b> {t("matches_2")}
-                    </>
-                  )}
-                  {(d.before === null || d.before === undefined) && (
-                    <>
-                      <b className="tabular-nums text-strong">{d.after}</b> {t("rp_of_events_match", { n: d.events ?? 0 })}
-                    </>
-                  )}
-                </p>
-                {(d.added?.length ?? 0) > 0 && <p className="text-xs text-muted">{t("now_matching_events")} {d.added!.map((i) => `#${i}`).join(", ")}</p>}
-                {(d.removed?.length ?? 0) > 0 && <p className="text-xs text-muted">{t("no_longer_matching_events")} {d.removed!.map((i) => `#${i}`).join(", ")}</p>}
-                {d.meets_expectation !== null && d.meets_expectation !== undefined && (
-                  <p className="mt-1 flex items-center gap-1.5 text-xs">
-                    {d.meets_expectation ? <CheckCircle2 size={13} className="text-good" aria-hidden /> : <XCircle size={13} className="text-bad" aria-hidden />}
-                    <span className={d.meets_expectation ? "text-muted" : "text-bad"}>
-                      {d.meets_expectation ? t("l_meets") : t("l_breaks")} the dataset expectation
-                      {d.expected && ` (${d.expected.max === d.expected.min ? `exactly ${d.expected.min}` : `${d.expected.min}–${d.expected.max ?? "∞"}`})`}
-                    </span>
-                  </p>
-                )}
-              </>
-            )}
-          </li>
-        ))}
-      </ul>
+    <div>
+      <h3 className="mb-1.5 text-[11px] font-semibold uppercase tracking-wider text-subtle">{t("problems")}</h3>
+      <IssueList issues={issues} onJump={onJump} />
     </div>
   );
 }
@@ -758,7 +749,7 @@ function HistoryPanel({ ruleId }: { ruleId: string }) {
   const { data, error, isLoading } = useQuery({ queryKey: ["rule-history", ruleId], queryFn: () => api.ruleHistory(ruleId) });
   if (isLoading) return <p className="text-sm text-muted">{t("reading_git_history")}</p>;
   if (error) return <ErrorBox message={(error as Error).message} />;
-  if (!data || !data.available) return <p className="text-sm text-muted">{t("no_git_history_2")} {data && !data.available ? data.reason : "unavailable"}.</p>;
+  if (!data || !data.available) return <p className="text-sm text-muted">{data && !data.available ? (data.message ?? `${t("no_git_history_2")} ${data.reason}.`) : t("no_git_history_2")}</p>;
   if (!data.tracked) return <p className="text-sm text-muted">{t("this_rule_is_not_committed_yet")}</p>;
   return (
     <div className="space-y-3">
@@ -787,5 +778,202 @@ function HistoryPanel({ ruleId }: { ruleId: string }) {
         ))}
       </ul>
     </div>
+  );
+}
+
+
+interface RuleMeta {
+  title: string | null;
+  status: string | null;
+  level: string | null;
+  author: string | null;
+  logsource: string | null;
+}
+
+/** Cheap read of the top-level scalar fields for the header (the server validates the real thing). */
+function parseMeta(rule: string): RuleMeta {
+  const top = (k: string) => {
+    const m = new RegExp("^" + k + ":[ \t]*(.+?)[ \t]*$", "m").exec(rule);
+    return m ? m[1].replace(/^['"]|['"]$/g, "") : null;
+  };
+  const ls = /^logsource:[ \t]*\r?\n((?:[ \t]+.*(?:\r?\n|$))+)/m.exec(rule)?.[1] ?? "";
+  const part = (k: string) => new RegExp("^[ \t]+" + k + ":[ \t]*(.+?)[ \t]*$", "m").exec(ls)?.[1] ?? null;
+  const parts = [part("product"), part("category"), part("service")].filter(Boolean);
+  return { title: top("title"), status: top("status"), level: top("level"), author: top("author"), logsource: parts.length ? parts.join("/") : null };
+}
+
+const PUB: Record<string, { Icon: typeof HardDrive; cls: string; key: "ed_pub_local" | "ed_pub_pushed" | "ed_pub_pr" | "ed_pub_merged" | "ed_pub_unknown" }> = {
+  local: { Icon: HardDrive, cls: "bg-warn-soft text-warn", key: "ed_pub_local" },
+  pushed: { Icon: GitPullRequest, cls: "bg-accent-soft text-accent", key: "ed_pub_pushed" },
+  in_pr: { Icon: GitPullRequest, cls: "bg-accent-soft text-accent", key: "ed_pub_pr" },
+  published: { Icon: GitMerge, cls: "bg-good-soft text-good", key: "ed_pub_merged" },
+  unknown: { Icon: CircleDot, cls: "bg-surface-2 text-muted", key: "ed_pub_unknown" },
+};
+
+/** Publication state of a rule: icon + text (never colour alone). */
+export function PublicationBadge({ pub, isNew }: { pub: Publication | null; isNew: boolean }) {
+  if (!isNew && !pub) return null;
+  if (isNew || !pub) {
+    return (
+      <span className="inline-flex items-center gap-1.5 rounded-full bg-surface-2 px-2.5 py-1 text-xs font-semibold text-muted">
+        <FilePlus size={13} aria-hidden /> {t("ed_pub_new")}
+      </span>
+    );
+  }
+  const v = PUB[pub.state] ?? PUB.unknown;
+  const label = pub.state === "in_pr" && pub.pr ? t("ed_pub_pr_n", { n: pub.pr.number }) : t(v.key);
+  const body = (
+    <>
+      <v.Icon size={13} aria-hidden /> {label}
+    </>
+  );
+  const cls = clsx("inline-flex items-center gap-1.5 rounded-full px-2.5 py-1 text-xs font-semibold", v.cls);
+  const tip = pub.state === "local" ? t("ed_pub_local_tip") : (pub.reason ?? undefined);
+  return pub.pr && /^https:/.test(pub.pr.url) ? (
+    <a href={pub.pr.url} target="_blank" rel="noreferrer" className={cls} title={tip}>
+      {body}
+    </a>
+  ) : (
+    <span className={cls} title={tip}>
+      {body}
+    </span>
+  );
+}
+
+function RuleHeader(props: { title: string | null; meta: RuleMeta; file: string | null; result: Validation | null; publication: Publication | null; isNew: boolean; dirty: boolean; savedAt: Date | null; isEditor: boolean; actions: React.ReactNode }) {
+  const { title, meta, file, result, publication, isNew, dirty, savedAt, actions } = props;
+  const finals = result?.targets ?? [];
+  const others = Object.keys(result?.conversions ?? {}).filter((n) => !finals.includes(n));
+  return (
+    <header className="mb-3 flex flex-wrap items-start justify-between gap-3" data-testid="rule-header">
+      <div className="min-w-0 flex-1 space-y-1.5">
+        <h1 className="flex flex-wrap items-center gap-x-3 gap-y-1 text-[22px] font-bold tracking-[-0.02em] text-strong">
+          <span className="truncate" title={title ?? undefined}>
+            {title ?? t("l_new_rule")}
+          </span>
+          <PublicationBadge pub={publication} isNew={isNew} />
+          {meta?.level && <LevelTag level={meta.level} />}
+          {dirty && (
+            <span className="inline-flex items-center gap-1.5 text-xs font-normal text-text">
+              <span className="size-2 rounded-full bg-accent" aria-hidden /> {t("unsaved_changes")}
+            </span>
+          )}
+        </h1>
+        <p className="flex flex-wrap items-center gap-x-3 gap-y-1 text-xs text-muted">
+          {meta?.status && <span>{meta.status}</span>}
+          <span>{meta?.author ? t("ed_by", { a: meta.author }) : t("ed_no_author")}</span>
+          {meta?.logsource && <span className="font-mono">{meta.logsource}</span>}
+          {finals.length > 0 && (
+            <span className="inline-flex items-center gap-1.5">
+              {t("ed_final_lang")} {finals.map((n) => <TargetSwatch key={n} target={n} />)} {finals.map((n) => result?.conversions[n]?.label ?? n).join(", ")}
+              {others.length > 0 && <span className="text-subtle">+{others.length}</span>}
+            </span>
+          )}
+          <span className="font-mono">{file ?? t("ed_not_saved")}</span>
+          {savedAt && <span>{t("ed_saved_at", { t: savedAt.toLocaleTimeString(locale(), { hour: "2-digit", minute: "2-digit" }) })}</span>}
+        </p>
+      </div>
+      {actions}
+    </header>
+  );
+}
+
+/** Collapsible "About this rule": what the panels mean, related rules, last changes. Remembered per browser. */
+function AboutBand({ ruleId, rule }: { ruleId: string | null; rule: string }) {
+  const [open, setOpen] = useState(() => {
+    try {
+      return localStorage.getItem("vitrix.editor.about") === "open";
+    } catch {
+      return false;
+    }
+  });
+  const [all, setAll] = useState(false);
+  const related = useQuery({
+    queryKey: ["related", ruleId],
+    queryFn: () => (ruleId ? api.related(ruleId, 20) : api.relatedDraft(rule)),
+    enabled: open && ruleId !== null,
+    retry: false,
+  });
+  const history = useQuery({ queryKey: ["rule-history", ruleId], queryFn: () => api.ruleHistory(ruleId!), enabled: open && ruleId !== null, retry: false });
+  const rows = related.data ?? [];
+  const shown = all ? rows : rows.slice(0, 3);
+  return (
+    <details
+      open={open}
+      onToggle={(e) => {
+        const o = (e.currentTarget as HTMLDetailsElement).open;
+        setOpen(o);
+        try {
+          localStorage.setItem("vitrix.editor.about", o ? "open" : "closed");
+        } catch {
+          /* storage unavailable */
+        }
+      }}
+      className="rounded-[12px] border border-line bg-surface text-[13px]"
+    >
+      <summary className="flex cursor-pointer items-center gap-2 px-4 py-2.5 font-semibold text-strong">
+        <ChevronDown size={14} className="text-muted" aria-hidden /> {t("ed_about")}
+      </summary>
+      <div className="space-y-4 border-t border-line px-4 py-3">
+        <div>
+          <h3 className="mb-1 text-[11px] font-semibold uppercase tracking-wider text-subtle">{t("ed_panels_mean")}</h3>
+          <dl className="grid grid-cols-[8.5rem_1fr] gap-y-0.5 text-muted">
+            <dt className="text-text">{t("l_quality_gate")}</dt>
+            <dd>{t("ed_help_gate")}</dd>
+            <dt className="text-text">{t("ed_test_replay")}</dt>
+            <dd>{t("ed_help_replay")}</dd>
+            <dt className="text-text">{t("l_queries")}</dt>
+            <dd>{t("ed_help_queries")}</dd>
+          </dl>
+        </div>
+        <div>
+          <h3 className="mb-1 text-[11px] font-semibold uppercase tracking-wider text-subtle">{t("ed_related")}</h3>
+          {ruleId === null ? (
+            <p className="text-muted">{t("ed_related_unsaved")}</p>
+          ) : related.isLoading ? (
+            <p className="text-muted">{t("loading")}</p>
+          ) : related.error ? (
+            <p className="text-muted">{t("ed_related_none")}</p>
+          ) : rows.length === 0 ? (
+            <p className="text-muted">{t("ed_related_none")}</p>
+          ) : (
+            <ul className="divide-y divide-line">
+              {shown.map((r) => (
+                <li key={r.id} className="flex flex-wrap items-baseline gap-x-3 py-1.5">
+                  <Link to={`/editor/${r.id}`} className="font-medium text-text hover:text-accent">
+                    {r.title}
+                  </Link>
+                  <span className="font-mono text-xs text-subtle">{r.logsource}</span>
+                  {r.shared_fields.length > 0 && <span className="text-xs text-muted">{t("ed_shares")} {r.shared_fields.join(", ")}</span>}
+                </li>
+              ))}
+            </ul>
+          )}
+          {rows.length > 3 && (
+            <button type="button" className="mt-1 text-xs font-medium text-accent hover:underline" onClick={() => setAll(!all)}>
+              {all ? t("ed_show_less") : t("ed_show_all", { n: rows.length - 3 })}
+            </button>
+          )}
+        </div>
+        <div>
+          <h3 className="mb-1 text-[11px] font-semibold uppercase tracking-wider text-subtle">{t("ed_last_changes")}</h3>
+          {ruleId === null ? (
+            <p className="text-muted">{t("ed_history_unsaved")}</p>
+          ) : history.data && !history.data.available ? (
+            <p className="text-muted">{history.data.message ?? history.data.reason}</p>
+          ) : history.data?.available && history.data.log && history.data.log.length > 0 ? (
+            <ul className="space-y-0.5">
+              {history.data.log.slice(0, 3).map((e) => (
+                <li key={e.sha}>
+                  <span className="font-mono text-xs text-accent">{e.sha}</span> <span className="text-text">{e.subject}</span> <span className="text-xs text-subtle">{e.author} · {timeAgo(e.date)}</span>
+                </li>
+              ))}
+            </ul>
+          ) : (
+            <p className="text-muted">{history.isLoading ? t("loading") : t("this_rule_is_not_committed_yet")}</p>
+          )}
+        </div>
+      </div>
+    </details>
   );
 }

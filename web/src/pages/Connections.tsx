@@ -1,11 +1,13 @@
 import { useQuery } from "@tanstack/react-query";
 import clsx from "clsx";
 import { AlertTriangle, CheckCircle2, CircleDashed, ExternalLink, GitBranch, RefreshCw, XCircle } from "lucide-react";
+import { Link } from "react-router-dom";
 import { api } from "../api";
+import { useSync } from "../components/SyncChip";
 import { Section, safeHref, timeAgo } from "../components/dash";
 import { ErrorBox, PageHeader, TARGET_CODE, TargetSwatch, btnSecondary } from "../components/ui";
 import type { Activity, GitHubStatus } from "../types";
-import { t } from "../i18n";
+import { t, tn } from "../i18n";
 
 type Tone = "ok" | "warn" | "fail" | "off";
 const TONE: Record<Tone, { cls: string; Icon: typeof CheckCircle2 }> = {
@@ -42,6 +44,7 @@ function GitHubCard() {
   const activity = useQuery({ queryKey: ["activity"], queryFn: () => api.activity(), enabled: Boolean(status.data?.configured && status.data.token) });
   const test = useQuery({ queryKey: ["activity-refresh"], queryFn: () => api.activity(true), enabled: false });
   const act = test.data ?? activity.data;
+  const sync = useSync().data;
   const [tone, label] = githubState(status.data, act);
 
   return (
@@ -78,6 +81,19 @@ function GitHubCard() {
                 {status.data.token ? <CheckCircle2 size={14} className="text-good" aria-hidden /> : <XCircle size={14} className="text-bad" aria-hidden />}
                 {status.data.token ? t("cn_from", { src: status.data.token_source ?? "" }) : t("cn_missing")}
               </dd>
+              {sync && (
+                <>
+                  <dt className="text-subtle">{t("cn_sync")}</dt>
+                  <dd className="text-text">
+                    {sync.state === "synced" && <span className="inline-flex items-center gap-1.5"><CheckCircle2 size={14} className="text-good" aria-hidden /> {t("cn_in_sync", { b: sync.base ?? "" })}</span>}
+                    {sync.state === "behind" && <span className="inline-flex items-center gap-1.5"><AlertTriangle size={14} className="text-warn" aria-hidden /> {t("cn_behind", { b: sync.base ?? "", n: sync.behind })}</span>}
+                    {sync.state === "ahead" && <span className="inline-flex items-center gap-1.5"><AlertTriangle size={14} className="text-warn" aria-hidden /> {t("cn_ahead", { b: sync.base ?? "", n: sync.ahead })}</span>}
+                    {sync.state === "diverged" && <span className="inline-flex items-center gap-1.5"><XCircle size={14} className="text-bad" aria-hidden /> {t("cn_diverged", { b: sync.base ?? "" })}</span>}
+                    {!["synced", "behind", "ahead", "diverged"].includes(sync.state) && <span className="text-muted">{sync.reason ?? sync.last_error ?? sync.state}</span>}
+                    {sync.last_fetch && <span className="text-muted"> · {t("sync_last", { v: timeAgo(sync.last_fetch) })}</span>}
+                  </dd>
+                </>
+              )}
               {act?.available && (
                 <>
                   <dt className="text-subtle">HEAD</dt>
@@ -99,6 +115,7 @@ function GitHubCard() {
               <RefreshCw size={14} className={test.isFetching ? "animate-spin" : undefined} aria-hidden /> {t("test_connection")}
             </button>
           )}
+          <p className="text-xs text-muted">{t("cn_publishing")}</p>
           <p className="text-xs text-subtle">
             {t("fine_grained_token_limited_to_the_repo")}{" "}
             <span className="font-mono">vitrix/**</span> {t("branches")}
@@ -109,41 +126,78 @@ function GitHubCard() {
   );
 }
 
-function SiemTargets() {
+const FLAVOR: Record<string, string> = { splunk: "PCRE", kql: "RE2", kusto: "RE2", "elastic-lucene": "Lucene regex", "elastic-eql": "Java regex" };
+
+function Languages() {
   const targets = useQuery({ queryKey: ["targets"], queryFn: api.targets });
+  const list = targets.data ?? [];
   return (
-    <Section title="SIEMs" aside={t("cn_local_conv")}>
-      {targets.error && <ErrorBox message={(targets.error as Error).message} />}
-      <ul className="grid gap-3 sm:grid-cols-2">
-        {(targets.data ?? []).map((tg) => (
-          <li key={tg.name} className="rounded-[12px] border border-line bg-surface p-4">
-            <div className="mb-2 flex items-center justify-between gap-2">
-              <span className="flex items-center gap-2 font-semibold text-strong">
-                <TargetSwatch target={tg.name} />
-                {tg.label}
-              </span>
-              <Pill tone={tg.active ? "ok" : "off"}>{tg.active ? t("l_active") : t("l_available")}</Pill>
-            </div>
-            <dl className="grid grid-cols-[6rem_1fr] gap-y-1 text-[12.5px]">
-              <dt className="text-subtle">{t("target")}</dt>
-              <dd className="font-mono text-text">
-                {tg.name} · {TARGET_CODE[tg.name] ?? tg.extension.toUpperCase()}
-              </dd>
-              <dt className="text-subtle">{t("conversion")}</dt>
-              <dd className="flex items-center gap-1.5 text-text">
-                <CheckCircle2 size={13} className="text-good" aria-hidden /> {t("local_no_siem_access")}
-              </dd>
-              <dt className="text-subtle">{t("deploy")}</dt>
-              <dd className="flex items-center gap-1.5 text-muted">
-                <CircleDashed size={13} aria-hidden /> {t("not_available_yet")}
-              </dd>
-            </dl>
-          </li>
-        ))}
-      </ul>
+    <Section title={t("cn_languages")} aside={t("cn_local_conv")}>
+      {targets.error && (
+        <div className="space-y-2">
+          <ErrorBox message={(targets.error as Error).message} />
+          <button type="button" className={btnSecondary} onClick={() => targets.refetch()}>
+            {t("try_again")}
+          </button>
+        </div>
+      )}
+      {targets.data && list.length === 0 && <p className="text-sm text-muted">{t("cn_none")}</p>}
+      {list.length > 0 && (
+        <div className="-mx-2 overflow-x-auto">
+          <table className="w-full min-w-[34rem] text-left text-[13px]">
+            <caption className="sr-only">{t("cn_languages")}</caption>
+            <thead className="border-b border-line text-[11.5px] uppercase tracking-wide text-subtle">
+              <tr>
+                <th className="px-2 py-2 font-medium">{t("cn_col_lang")}</th>
+                <th className="px-2 py-2 font-medium">{t("cn_col_backend")}</th>
+                <th className="px-2 py-2 font-medium">{t("cn_col_flavor")}</th>
+                <th className="px-2 py-2 font-medium">{t("cn_col_final")}</th>
+                <th className="px-2 py-2 font-medium">{t("state")}</th>
+              </tr>
+            </thead>
+            <tbody>
+              {list.map((tg) => (
+                <tr key={tg.name} className="border-b border-line last:border-0">
+                  <td className="px-2 py-2.5">
+                    <span className="flex flex-wrap items-center gap-2 font-medium text-strong">
+                      <TargetSwatch target={tg.name} />
+                      {tg.label}
+                      <span className="rounded bg-surface-2 px-1.5 py-0.5 font-mono text-[10.5px] text-muted">{TARGET_CODE[tg.name] ?? tg.extension.toUpperCase()}</span>
+                      {tg.default && <span className="rounded bg-accent-soft px-1.5 py-0.5 text-[10.5px] font-semibold text-accent">{t("cn_default")}</span>}
+                      {!tg.active && <span className="text-xs font-normal text-muted">{t("cn_not_enabled")}</span>}
+                    </span>
+                  </td>
+                  <td className="px-2 py-2.5">
+                    <span className="block font-mono text-xs text-text">{tg.backend ?? tg.name}</span>
+                    {tg.plugin && <span className="block font-mono text-[11px] text-subtle">{tg.plugin}</span>}
+                  </td>
+                  <td className="px-2 py-2.5 text-muted">{FLAVOR[tg.name] ?? "-"}</td>
+                  <td className="px-2 py-2.5">
+                    {tg.used_by === undefined ? (
+                      "-"
+                    ) : (
+                      <Link to={`/rules?target=${encodeURIComponent(tg.name)}`} className="text-accent hover:underline">
+                        {tn("n_rules", tg.used_by)}
+                      </Link>
+                    )}
+                  </td>
+                  <td className="px-2 py-2.5">
+                    {tg.status === "missing_plugin" ? (
+                      <span className="inline-flex items-center gap-1 text-warn"><AlertTriangle size={13} aria-hidden /> {t("cn_plugin_missing")}</span>
+                    ) : tg.status === "error" ? (
+                      <span className="inline-flex items-center gap-1 text-bad"><XCircle size={13} aria-hidden /> {tg.message ?? t("cn_error")}</span>
+                    ) : (
+                      <span className="inline-flex items-center gap-1 text-good"><CheckCircle2 size={13} aria-hidden /> {t("cn_ready")}</span>
+                    )}
+                  </td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        </div>
+      )}
       <p className="mt-4 text-xs text-subtle">
-        {t("turn_targets_on_or_off_in")} <span className="font-mono">targets</span> {t("of_vitrix_yml_settings_other_siems_com")}{" "}
-        <span className="font-mono">vitrix.targets</span> {t("entry_point_the_conversion_output_is_t")} <span className="font-mono">dist/</span> {t("built_by_ci")}
+        {t("cn_choose")} <Link to="/settings" className="font-medium text-accent hover:underline">{t("cn_open_settings")}</Link>
       </p>
     </Section>
   );
@@ -155,7 +209,7 @@ export default function ConnectionsPage() {
       <PageHeader title={t("connections")} subtitle={t("integrations_with_the_git_repository_a")} />
       <div className="grid gap-5">
         <GitHubCard />
-        <SiemTargets />
+        <Languages />
       </div>
     </div>
   );

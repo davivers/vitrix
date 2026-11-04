@@ -5,6 +5,7 @@ import { Link } from "react-router-dom";
 import { api } from "../api";
 import { BarList, ConnectorNotice, HealthMeter, RunBadge, Section, formatDuration, formatHours, pct, safeHref, timeAgo } from "../components/dash";
 import { FlowFunnel } from "../components/flow";
+import ExportMenu from "../components/ExportMenu";
 import { Card, ErrorBox, PageHeader, btnPrimary, btnSecondary } from "../components/ui";
 import type { Activity, History, QualityRule, RuleSummary, Stats } from "../types";
 import { t, tn } from "../i18n";
@@ -157,10 +158,10 @@ function CiRuns({ activity }: { activity: Activity | undefined }) {
 
 function OpenPulls({ activity }: { activity: Activity | undefined }) {
   return (
-    <Section title={t("open_pull_requests")} aside={activity?.available && activity.merge.median_hours !== null ? t("db_median", { v: formatHours(activity.merge.median_hours) }) : undefined}>
+    <Section title={t("open_pull_requests")} aside={activity?.available && activity.merge.sample > 0 ? t("db_median", { v: formatHours(activity.merge.median_hours) }) : t("db_median", { v: "—" })}>
       <ConnectorNotice activity={activity} />
       {activity?.available &&
-        (activity.pulls.items.length === 0 ? (
+        (activity.pulls.open === 0 ? (
           <p className="text-sm text-subtle">{t("no_open_pr_against")} {activity.repo.base}.</p>
         ) : (
           <ul className="-mx-2 divide-y divide-line">
@@ -171,6 +172,7 @@ function OpenPulls({ activity }: { activity: Activity | undefined }) {
                   <span className="min-w-0 flex-1">
                     <span className="block truncate text-text">
                       #{pr.number} {pr.title}
+                      {pr.against_base === false && pr.base && <span className="ml-2 rounded bg-surface-2 px-1.5 py-0.5 font-mono text-[10px] text-subtle">{pr.base}</span>}
                       {pr.draft && <span className="ml-2 rounded bg-surface-2 px-1.5 py-0.5 text-[10px] uppercase text-subtle">{t("draft")}</span>}
                     </span>
                     <span className="block text-xs text-subtle">
@@ -193,7 +195,7 @@ function RecentChanges({ history }: { history: History | undefined }) {
   return (
     <Section title={t("recent_changes")} aside={history?.available ? t("db_commits_on", { x: tn("n_commits", history.commits) }) : undefined}>
       {!history && <p className="text-sm text-muted">{t("reading_git_history")}</p>}
-      {history && !history.available && <p className="text-sm text-subtle">{t("no_git_history")}{history.reason}).</p>}
+      {history && !history.available && <p className="text-sm text-subtle">{history.message ?? `${t("no_git_history")}${history.reason}).`}</p>}
       {history?.available && history.activity.length === 0 && <p className="text-sm text-subtle">{t("no_commit_touches_rules_yet")}</p>}
       {history?.available && (
         <ul className="-mx-2 divide-y divide-line">
@@ -238,6 +240,17 @@ export default function DashboardPage() {
         }
         actions={
           <div className="flex flex-wrap gap-2">
+            <ExportMenu
+              page="operational"
+              title={t("operational")}
+              disabled={!stats.data}
+              facts={stats.data ? [["Rules", stats.data.rules.total], ["Lint errors", stats.data.lint.errors], ["Lint warnings", stats.data.lint.warnings], ["Open pull requests", act?.available ? act.pulls.open : "-"]] : []}
+              tables={[
+                { name: "open-pull-requests", label: t("open_pull_requests"), columns: ["number", "title", "author", "age_hours", "ci"], rows: act?.available ? act.pulls.items.map((p) => [p.number, p.title, p.author, p.age_hours, p.ci]) : [] },
+                { name: "recent-runs", label: t("ci_runs"), columns: ["id", "state"], rows: act?.available ? act.ci.runs.map((r) => [r.id, r.state]) : [] },
+                { name: "rules-needing-attention", label: t("ex_tbl_attention"), columns: ["rule_id", "title", "level"], rows: (rules.data ?? []).filter((r) => r.state !== "ok").map((r) => [r.id, r.title, r.level]) },
+              ]}
+            />
             {act?.available && (
               <button type="button" onClick={() => refresh.refetch()} className={btnSecondary}>
                 <RefreshCw size={15} className={refresh.isFetching ? "animate-spin" : undefined} aria-hidden /> {t("refresh")}

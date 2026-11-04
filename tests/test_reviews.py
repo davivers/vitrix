@@ -130,7 +130,8 @@ def test_full_review_flow_on_a_rule(tmp_path):
     rev = r.json()
     assert rev["state"] == "pending" and rev["mine_requested"] and not rev["mine_to_review"] and rev["stale"] is False
     assert rev["target"]["kind"] == "rule" and rev["target"]["missing"] is False and rev["governance"]["owner"] is None
-    assert t["ed2"].get("/api/reviews/counts").json() == {"enabled": True, "reason": None, "to_review": 1, "requested": 0}
+    counts = t["ed2"].get("/api/reviews/counts").json()
+    assert (counts["enabled"], counts["to_review"], counts["requested"], counts["unread"]) == (True, 1, 0, 1)
     assert t["ed1"].get("/api/reviews/counts").json()["requested"] == 1
     assert [x["id"] for x in t["ed2"].get("/api/reviews").json()["reviews"]] == [rev["id"]]
     assert t["ed1"].get("/api/reviews").json()["reviews"] == []
@@ -164,7 +165,7 @@ def test_cannot_request_own_review_or_a_viewer_and_duplicates(tmp_path):
     assert request_review(t["ed1"], ids).status_code == 409
     assert request_review(t["ed1"], ids, ref="missing.yml").status_code == 404
     assert request_review(t["ed1"], ids, ref="../etc/passwd").status_code == 404
-    assert request_review(t["ed1"], ids, kind="draft", ref="a" * 32).status_code == 404
+    assert request_review(t["ed1"], ids, kind="draft", ref="a" * 32).status_code == 422  # drafts are private (ADR 0007)
     assert t["view"].post("/api/reviews", json={"target_kind": "rule", "target_ref": RULE_ID, "reviewer_id": ids["ed2"]}).status_code == 403
 
 
@@ -180,18 +181,11 @@ def test_decision_on_a_changed_rule_is_409_then_rerequest_refreshes(tmp_path):
     assert t["ed2"].post(f"/api/reviews/{rev['id']}/decision", json={"decision": "approved", "version": fresh["version"]}).status_code == 200
 
 
-def test_draft_reviews_cancel_and_missing_target(tmp_path):
+def test_drafts_cannot_be_review_targets(tmp_path):
     t, ids = team(tmp_path)
     d = new_draft(t["ed1"])
-    rev = request_review(t["ed1"], ids, kind="draft", ref=d["id"]).json()
-    assert rev["target"]["title"] == d["title"] and rev["governance"] is None
-    assert t["ed2"].post(f"/api/reviews/{rev['id']}/cancel", json={"version": 1}).status_code == 403
-    t["ed1"].delete(f"/api/drafts/{d['id']}")
-    j = t["ed2"].get(f"/api/reviews/{rev['id']}").json()
-    assert j["target"]["missing"] is True and j["state"] == "pending"
-    assert t["owner"].post(f"/api/reviews/{rev['id']}/cancel", json={"version": 1}).status_code == 200  # admin+
-    assert t["ed2"].get("/api/reviews").json()["reviews"] == []  # the default "open" filter hides cancelled
-    assert len(t["ed2"].get("/api/reviews?state=cancelled").json()["reviews"]) == 1
+    r = request_review(t["ed1"], ids, kind="draft", ref=d["id"])
+    assert r.status_code == 422 and "private" in r.json()["detail"]
 
 
 def test_validation(tmp_path):
@@ -254,3 +248,70 @@ def test_crlf_and_bom_do_not_make_a_review_stale(tmp_path):
     (tmp_path / "rules" / "r.yml").write_bytes(b"\xef\xbb\xbf" + RULE_OK.replace("\n", "\r\n").encode())
     assert t["ed1"].get(f"/api/reviews/{rev['id']}").json()["stale"] is False
     assert t["ed2"].post(f"/api/reviews/{rev['id']}/decision", json={"decision": "approved", "version": 1}).status_code == 200
+
+
+# --------------------------------------------------------------------------- sprint 4: snapshot, diff, events, unread
+
+
+def norm(text):
+    return text.replace(chr(13), "")
+
+
+def test_snapshot_diff_events_and_unread_flow(tmp_path):
+    t, ids = team(tmp_path)
+    rev = request_review(t["ed1"], ids, note="check FP").json()
+    assert rev["unread"] is False and rev["snapshot"]["changed_lines"] == 0
+    # the reviewer is notified, the requester is not
+    c = t["ed2"].get("/api/reviews/counts").json()
+    assert c["unread"] == 1 and c["latest"][0]["id"] == rev["id"] and c["latest"][0]["requester"] and c["latest"][0]["kind"] == "assigned"
+    assert t["ed1"].get("/api/reviews/counts").json()["unread"] == 0
+    assert t["ed2"].get("/api/reviews").json()["reviews"][0]["unread"] is True
+    assert t["owner"].post(f"/api/reviews/{rev['id']}/read", json={}).status_code == 403  # not a participant
+    assert t["ed2"].post(f"/api/reviews/{rev['id']}/read", json={}).json() == {"id": rev["id"], "unread": False}
+    assert t["ed2"].get("/api/reviews/counts").json()["unread"] == 0
+    assert t["ed2"].post(f"/api/reviews/{rev['id']}/unread", json={}).json()["unread"] is True
+    assert t["ed2"].post("/api/reviews/read-all", json={}).json() == {"marked": 1}
+    # the rule is edited after the request: the diff shows it
+    edit_rule(tmp_path)
+    d = t["ed2"].get(f"/api/reviews/{rev['id']}").json()
+    assert d["stale"] and d["snapshot"]["added"] == 2 and "+# edited" in d["diff"] and norm(d["snapshot_text"]) == norm(RULE_OK)
+    assert [e["type"] for e in d["events"]] == ["requested"] and "check FP" in d["events"][0]["text"]
+    # author re-requests after editing (previous snapshot becomes the diff baseline), then the reviewer decides
+    assert t["ed1"].post(f"/api/reviews/{rev['id']}/rerequest", json={"version": 1, "note": "done"}).status_code == 200
+    d = t["ed2"].get(f"/api/reviews/{rev['id']}").json()
+    assert norm(d["base_text"]) == norm(RULE_OK) and d["snapshot_text"].rstrip().endswith("# edited") and d["note"] == "done" and not d["stale"]
+    assert t["ed2"].get("/api/reviews/counts").json()["unread"] == 1
+    t["ed2"].post(f"/api/reviews/{rev['id']}/decision", json={"decision": "changes_requested", "note": "fix", "version": 2})
+    c = t["ed1"].get("/api/reviews/counts").json()
+    assert c["unread"] == 1 and c["latest"][0]["kind"] == "decided" and c["latest"][0]["state"] == "changes_requested"
+    d = t["ed1"].get(f"/api/reviews/{rev['id']}").json()
+    assert [e["type"] for e in d["events"]] == ["requested", "rerequested", "changes_requested"]
+
+
+def test_old_review_rows_without_snapshot_still_load(tmp_path):
+    s = ReviewStore(tmp_path / "reviews.db")
+    r = store_request(s)  # no snapshot_text
+    assert r["snapshot_text"] is None and s.events(r["id"])[0]["type"] == "requested"
+
+
+def test_legacy_draft_reviews_and_comments_are_invisible(tmp_path):
+    from vitrix.reviews import ReviewStore
+
+    t, ids = team(tmp_path)
+    d = new_draft(t["ed1"])
+    legacy = ReviewStore(tmp_path / ".vitrix" / "reviews.db")  # a review created before drafts became private
+    row = legacy.request(kind="draft", ref=d["id"], title="t", target_hash="h", target_version=1,
+                         requester={"id": ids["ed1"], "email": "ed1@example.com", "name": "Ed1"},
+                         reviewer={"id": ids["ed2"], "email": "ed2@example.com", "name": "Ed2"}, note=None, snapshot_text="SECRET-DRAFT")
+    legacy._conn(create=True).execute("INSERT OR REPLACE INTO review_unread (review_id, user_id, kind, actor_name, at) VALUES (?,?,?,?,?)",
+                                      (row["id"], ids["ed2"], "assigned", "Ed1", 1.0))
+    counts = t["ed2"].get("/api/reviews/counts").json()
+    assert counts["to_review"] == 0 and counts["unread"] == 0 and counts["latest"] == []
+    for who in ("view", "ed1", "ed2", "owner"):  # even the author: legacy draft reviews are closed
+        c = t[who]
+        assert c.get("/api/reviews?scope=all&state=open").json()["reviews"] == [], who
+        assert c.get(f"/api/reviews/{row['id']}").status_code == 404, who
+        assert "SECRET-DRAFT" not in c.get("/api/reviews?scope=all&state=open&kind=draft").text, who
+        assert c.post("/api/comments", json={"target_kind": "draft", "target_ref": d["id"], "body": "x"}).status_code == 422, who
+        assert c.get(f"/api/comments?kind=draft&ref={d['id']}").json()["comments"] == [], who
+        assert c.post(f"/api/reviews/{row['id']}/decision", json={"decision": "approved", "version": 1}).status_code in (403, 404, 409), who

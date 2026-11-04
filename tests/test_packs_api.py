@@ -127,11 +127,11 @@ def start(c: TestClient, **over):
 # --------------------------------------------------------------------------- happy path
 
 
-def test_sources_then_preview_then_import_creates_drafts(tmp_path, monkeypatch, net):
+def test_sources_then_preview_then_import_writes_local_rule_files(tmp_path, monkeypatch, net):
     c = local(tmp_path, monkeypatch)
     src = c.get("/api/packs/sources").json()
     assert src["enabled"] and src["sources"][0]["id"] == "sigmahq" and src["sources"][0]["cached"] == []
-    assert src["limits"] == {"max_rules": 50, "drafts_free": 100}
+    assert src["limits"] == {"max_rules": 50, "files_free": 4999}
 
     r = start(c)
     assert r.status_code == 202
@@ -143,8 +143,8 @@ def test_sources_then_preview_then_import_creates_drafts(tmp_path, monkeypatch, 
     assert by_path["sigmahq/windows/process_creation/a.yml"]["state"] == "ready"
     assert by_path["sigmahq/windows/process_creation/a.yml"]["cases"] == 2
     assert by_path["sigmahq/windows/process_creation/regex.yml"]["state"] == "untested"
-    assert all(i["draft_id"] is None for i in res["items"])
-    assert c.get("/api/drafts").json()["drafts"] == []  # preview creates nothing
+    assert all(i["rule"] is None for i in res["items"])
+    assert not (tmp_path / "rules" / "sigmahq").exists()  # preview writes nothing
     assert net["calls"] == ["https://github.com/SigmaHQ/sigma/archive/refs/heads/master.zip"]
 
     cached = c.get("/api/packs/sources").json()["sources"][0]["cached"]
@@ -155,12 +155,13 @@ def test_sources_then_preview_then_import_creates_drafts(tmp_path, monkeypatch, 
     assert job["state"] == "done" and job["progress"]["imported"] == 2
     assert [i["path"] for i in job["result"]["items"]] == ["sigmahq/windows/process_creation/a.yml", "sigmahq/windows/process_creation/b.yml"]
     assert any("regex.yml" in s["path"] for s in job["result"]["skipped"])
-    drafts = c.get(f"/api/drafts?batch={job['id']}").json()["drafts"]
-    assert len(drafts) == 2
-    d = c.get(f"/api/drafts/{drafts[0]['id']}").json()
-    assert d["source"].startswith("sigmahq@master:rules/windows/process_creation/") and d["batch_id"] == job["id"]
-    assert d["cases"].startswith(packs.HEADER) and "expect: match" in d["cases"]
-    assert not (tmp_path / "rules" / "sigmahq").exists()  # drafts never write rules/
+    ids = [i["rule"] for i in job["result"]["items"]]
+    assert ids == ["sigmahq/windows/process_creation/a.yml", "sigmahq/windows/process_creation/b.yml"]
+    rule_a = c.get("/api/rules/" + ids[0]).json()
+    assert rule_a["publication"]["state"] in ("local", "unknown") and rule_a["sha"] and rule_a["cases_sha"]
+    cases = (tmp_path / "cases" / ids[0]).read_text(encoding="utf-8")
+    assert cases.startswith(packs.HEADER) and "expect: match" in cases
+    assert job["result"]["audit"] == "2 rules into rules/sigmahq"
 
 
 def test_import_selected_paths_and_owner(tmp_path, monkeypatch, net):
@@ -168,8 +169,7 @@ def test_import_selected_paths_and_owner(tmp_path, monkeypatch, net):
     sel = ["sigmahq/windows/process_creation/b.yml"]
     job = wait(c, start(c, mode="import", paths=sel, owner="team-blue").json())
     assert [i["path"] for i in job["result"]["items"]] == sel
-    d = c.get(f"/api/drafts/{job['result']['items'][0]['draft_id']}").json()
-    assert "owner: team-blue" in d["rule"]
+    assert "owner: team-blue" in (tmp_path / "rules" / sel[0]).read_text(encoding="utf-8")
 
 
 def test_import_skips_existing_rule_unless_selected(tmp_path, monkeypatch, net):
@@ -181,8 +181,10 @@ def test_import_skips_existing_rule_unless_selected(tmp_path, monkeypatch, net):
     assert {i["path"]: i["exists"] for i in pre["result"]["items"]}["sigmahq/windows/process_creation/a.yml"] is True
     job = wait(c, start(c, mode="import").json())
     assert job["progress"]["imported"] == 1
+    # an existing file is never overwritten, even when selected explicitly
     again = wait(c, start(c, mode="import", paths=["sigmahq/windows/process_creation/a.yml"]).json())
-    assert again["progress"]["imported"] == 1
+    assert again["progress"].get("imported", 0) == 0 and "already exists" in again["result"]["skipped"][0]["reason"]
+    assert (dest / "a.yml").read_text(encoding="utf-8") == "title: mine\n"
 
 
 def test_tag_ref_url_and_cache_forever(tmp_path, monkeypatch, net):
@@ -239,17 +241,13 @@ def test_unknown_job_is_404(tmp_path, monkeypatch, net):
     assert c.get("/api/packs/jobs/not-an-id").status_code == 404
 
 
-def test_draft_quota_is_checked_before_any_draft(tmp_path, monkeypatch, net):
+def test_file_quota_is_checked_before_any_write(tmp_path, monkeypatch, net):
+    from vitrix import local_rules
+
+    monkeypatch.setattr(local_rules, "MAX_FILES", 1)
     c = local(tmp_path, monkeypatch)
-    for i in range(99):
-        assert c.post("/api/drafts", json={"rule": f"title: t{i}\n"}).status_code == 201
     r = start(c, mode="import", paths=["sigmahq/windows/process_creation/a.yml", "sigmahq/windows/process_creation/b.yml"])
-    assert r.status_code == 409 and r.json()["detail"] == "import would exceed your draft limit (100): 1 free"
-    assert len(c.get("/api/drafts").json()["drafts"]) == 99 and net["calls"] == []
-    job = wait(c, start(c, mode="import").json())  # no explicit paths: capped by the free slots
-    assert job["progress"]["imported"] == 1
-    assert any("over the limit" in s["reason"] for s in job["result"]["skipped"])
-    assert c.get("/api/packs/sources").json()["limits"]["drafts_free"] == 0
+    assert r.status_code == 409 and r.json()["detail"] == "too many rule files (1): 0 free" and net["calls"] == []
 
 
 def test_more_than_50_rules_are_capped(tmp_path, monkeypatch, net):
@@ -298,8 +296,8 @@ def test_job_regex_rules_use_the_regex_budget(tmp_path, monkeypatch, net):
 # --------------------------------------------------------------------------- availability and roles
 
 
-def test_off_when_drafts_are_off(tmp_path, monkeypatch, net):
-    c = local(tmp_path, monkeypatch, extra="drafts:\n  enabled: false\n")
+def test_off_when_local_rules_are_off(tmp_path, monkeypatch, net):
+    c = local(tmp_path, monkeypatch, extra="local_rules:\n  enabled: false\n")
     src = c.get("/api/packs/sources").json()
     assert src["enabled"] is False and src["reason"]
     r = start(c)
@@ -327,9 +325,8 @@ def test_roles_viewer_reads_editor_imports_admin_refreshes(tmp_path, monkeypatch
     wait(t["owner"], forced.json())
     anon = TestClient(t["owner"].app, base_url=BASE)
     assert anon.get("/api/packs/sources").status_code == 401 and start(anon).status_code == 401
-    # drafts of the batch belong to the importer, not to the others
-    mine = t["ed1"].get(f"/api/drafts?batch={job['id']}").json()["drafts"]
-    assert len(mine) == 2 and all(d["mine"] for d in mine)
+    assert [i["rule"] for i in job["result"]["items"]] == ["sigmahq/windows/process_creation/a.yml", "sigmahq/windows/process_creation/b.yml"]
+    assert (tmp_path / "rules" / "sigmahq" / "windows" / "process_creation" / "a.yml").is_file()
     assert AUTH_ON  # (config used by team())
 
 

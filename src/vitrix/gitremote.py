@@ -22,7 +22,7 @@ from pathlib import Path
 
 from .github import TOKEN_ENVS, GitHubConfig
 
-_REMOTE = re.compile(r"^(?:https://(?:[^@/]+@)?github\.com/|ssh://git@github\.com/|git@github\.com:)"
+_REMOTE = re.compile(r"^(?:https?://(?:[^@/]+@)?(?:www\.)?github\.com/|git://github\.com/|ssh://(?:[^@/]+@)?github\.com(?::\d+)?/|[^@/\s]+@github\.com:)"
                      r"(?P<repo>[A-Za-z0-9-]+/[A-Za-z0-9._-]+?)(?:\.git)?/?$")
 _CACHE_TTL = 30.0
 _cache: dict[str, tuple[float, GitHubConfig | None]] = {}
@@ -72,7 +72,11 @@ def _detect(root: Path) -> GitHubConfig | None:
             path = ""
         path = "" if path == "." else path
     head = git(root, "symbolic-ref", "--short", "refs/remotes/origin/HEAD")  # e.g. origin/main
-    base = head.split("/", 1)[1] if head and "/" in head else (git(root, "branch", "--show-current") or "main")
+    if head and "/" in head:
+        base = head.split("/", 1)[1]
+    else:  # no origin/HEAD (remote added by hand): prefer main/master on origin over a feature branch
+        base = next((b for b in ("main", "master") if git(root, "rev-parse", "--verify", "--quiet", f"refs/remotes/origin/{b}")),
+                    None) or git(root, "branch", "--show-current") or "main"
     workflow = "vitrix" if top and (Path(top) / ".github" / "workflows" / "vitrix.yml").is_file() else None
     return GitHubConfig(repo=repo, base=base, path=path, workflow=workflow)
 

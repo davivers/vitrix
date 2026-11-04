@@ -1,10 +1,10 @@
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
-import { AlertTriangle, Loader2, Search, X } from "lucide-react";
+import { AlertTriangle, CheckCircle2, FilePen, Loader2, Minus, Search, Trash2, X, XCircle } from "lucide-react";
 import { useEffect, useRef, useState } from "react";
 import { api } from "../api";
 import type { DraftSummary } from "../types";
 import { timeAgo } from "./dash";
-import { ErrorBox, btnSecondary, inputCls } from "./ui";
+import { ErrorBox, LevelTag, btnPrimary, btnSecondary, inputCls } from "./ui";
 import { t } from "../i18n";
 
 /** Local drafts (SQLite on this machine): search, open, delete. A modal dialog, so Esc closes it. */
@@ -36,14 +36,30 @@ export function DraftsSheet(props: { dirty: boolean; isAdmin: boolean; currentId
   const row = (d: DraftSummary) => {
     const canDelete = d.mine || isAdmin;
     return (
-      <li key={d.id} className="space-y-1.5 py-3">
+      <li key={d.id} className={`space-y-1.5 rounded-xl border border-line p-3 ${d.id === currentId ? "bg-accent-soft" : "bg-surface hover:bg-surface-2"}`}>
         <div className="flex flex-wrap items-start justify-between gap-2">
           <div className="min-w-0">
-            <p className="truncate text-[13.5px] font-semibold text-strong">{d.title}</p>
+            <h3 className="flex flex-wrap items-center gap-2 truncate text-[14px] font-semibold text-strong">
+              {d.title || t("dr_untitled")}
+              {d.id === currentId && <span className="rounded bg-accent px-1.5 py-0.5 text-[10.5px] font-semibold uppercase text-on-brand">{t("dr_current")}</span>}
+            </h3>
             <p className="text-xs text-subtle">
-              {d.path && <span className="font-mono">{d.path} · </span>}
+              {d.path ? <span className="font-mono">{d.path} · </span> : <span>{t("dr_no_file")} · </span>}
               <span title={new Date(d.updated_at).toLocaleString()}>{t("updated")} {timeAgo(d.updated_at)}</span>
               {!d.mine && d.author && ` · by ${d.author.name || d.author.email}`}
+            </p>
+            <p className="mt-1 flex flex-wrap items-center gap-2 text-xs">
+              {d.quality ? (
+                d.quality.ready ? (
+                  <span className="inline-flex items-center gap-1 text-good"><CheckCircle2 size={12} aria-hidden /> {t("dr_gate_ready")}</span>
+                ) : (
+                  <span className="inline-flex items-center gap-1 text-bad"><XCircle size={12} aria-hidden /> {t("dr_blockers", { n: d.quality.blockers })}</span>
+                )
+              ) : (
+                <span className="inline-flex items-center gap-1 text-muted"><Minus size={12} aria-hidden /> {t("dr_not_checked")}</span>
+              )}
+              {d.level && <LevelTag level={d.level} />}
+              {d.target && <span className="rounded bg-surface-2 px-1.5 py-0.5 font-mono text-[10.5px] text-muted">{d.target}</span>}
             </p>
             {d.stale && (
               <p className="mt-0.5 flex items-center gap-1 text-xs text-warn">
@@ -67,7 +83,7 @@ export function DraftsSheet(props: { dirty: boolean; isAdmin: boolean; currentId
               onClick={() => canDelete && setConfirmDelete(d.id)}
               style={canDelete ? undefined : { opacity: 0.5, cursor: "not-allowed" }}
             >
-              Delete
+              <Trash2 size={13} aria-hidden /> {t("dr_discard")}
             </button>
           </div>
         </div>
@@ -107,7 +123,7 @@ export function DraftsSheet(props: { dirty: boolean; isAdmin: boolean; currentId
       ref={ref}
       onClose={onClose}
       aria-labelledby="drafts-title"
-      className="glass m-auto w-[min(560px,calc(100vw-32px))] rounded-2xl bg-surface p-0 text-text backdrop:bg-black/50"
+      className="glass m-auto w-[min(720px,calc(100vw-32px))] rounded-2xl bg-surface p-0 text-text backdrop:bg-black/50"
     >
       <div className="space-y-4 p-6">
         <div className="flex items-start justify-between gap-4">
@@ -118,6 +134,7 @@ export function DraftsSheet(props: { dirty: boolean; isAdmin: boolean; currentId
             <X size={18} aria-hidden />
           </button>
         </div>
+        <p className="text-sm text-muted">{t("dr_intro")}</p>
         <label className="relative block">
           <span className="sr-only">{t("search_drafts")}</span>
           <Search size={15} className="absolute left-3 top-1/2 -translate-y-1/2 text-subtle" aria-hidden />
@@ -132,9 +149,20 @@ export function DraftsSheet(props: { dirty: boolean; isAdmin: boolean; currentId
         {del.error && <ErrorBox message={(del.error as Error).message} />}
         {list.data && !list.data.enabled && <p className="text-sm text-muted">{list.data.reason ?? t("l_local_drafts_are_off")}</p>}
         {list.data?.enabled && rows.length === 0 && (
-          <p className="text-sm text-muted">{list.data.drafts.length ? t("l_no_draft_matches_the_search") : t("l_no_local_drafts_yet_use_save_local")}</p>
+          list.data.drafts.length ? (
+            <p className="text-sm text-muted">{t("l_no_draft_matches_the_search")}</p>
+          ) : (
+            <div className="flex flex-col items-center gap-2 py-6 text-center">
+              <FilePen size={26} className="text-subtle" aria-hidden />
+              <p className="font-medium text-text">{t("dr_empty")}</p>
+              <p className="max-w-sm text-sm text-muted">{t("dr_empty_sub")}</p>
+              <button type="button" className={btnPrimary} onClick={onClose}>
+                {t("new_rule")}
+              </button>
+            </div>
+          )
         )}
-        <ul className="max-h-[50vh] divide-y divide-line overflow-auto">{rows.map(row)}</ul>
+        <ul aria-label={`${t("drafts")}, ${rows.length}`} className="max-h-[55vh] space-y-2 overflow-auto">{rows.map(row)}</ul>
       </div>
     </dialog>
   );

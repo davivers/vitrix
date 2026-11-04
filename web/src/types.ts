@@ -40,6 +40,7 @@ export interface RuleSummary {
   issues: LintIssue[]; // up to 3 problems, errors first
   lint: { errors: number; warnings: number };
   tests: { total: number; passed: number };
+  publication?: Publication;
 }
 
 export interface Conversion {
@@ -90,6 +91,9 @@ export interface RuleDetail {
   lint: LintIssue[];
   conversions: Record<string, Conversion>;
   tests: TestReport & { cases_file: string | null; cases_text: string | null };
+  sha?: string;
+  cases_sha?: string | null;
+  publication?: Publication;
 }
 
 export interface Tactic {
@@ -148,6 +152,9 @@ export interface OpenPull {
   age_hours: number | null;
   ci: RunState | null;
   from_vitrix: boolean;
+  base?: string;
+  against_base?: boolean;
+  fork?: boolean;
 }
 
 /** GitHub connector data. Without a connection, `available: false` and no numbers. */
@@ -158,7 +165,7 @@ export type Activity =
       fetched_at: string;
       repo: { name: string; url: string; default_branch: string; private: boolean; base: string };
       head: { sha: string; message: string; author: string | null; date: string | null; url: string };
-      pulls: { open: number; failing: number; from_vitrix: number; items: OpenPull[] };
+      pulls: { open: number; failing: number; from_vitrix: number; against_base?: number; items: OpenPull[] };
       merge: { sample: number; median_hours: number | null; p90_hours: number | null };
       ci: { runs: CiRun[]; sample: number; success_rate: number | null; last: CiRun | null };
     };
@@ -210,6 +217,12 @@ export interface Target {
   label: string;
   extension: string;
   active: boolean;
+  backend?: string;
+  plugin?: string;
+  status?: "ok" | "missing_plugin" | "error";
+  message?: string | null;
+  used_by?: number;
+  default?: boolean;
 }
 
 export interface ConfigView {
@@ -436,7 +449,7 @@ export interface RuleHistoryInfo {
 }
 
 export type History =
-  | { available: false; reason: string }
+  | { available: false; reason: string; state?: "no_commits" | "not_a_repo" | "git_missing" | "error"; message?: string }
   | {
       available: true;
       head: string;
@@ -449,7 +462,7 @@ export type History =
       authors: { name: string; commits: number; rules_created?: number; rules_changed?: number; rules_deleted?: number }[];
     };
 
-export type RuleHistory = { available: false; reason: string } | ({ available: true; tracked: boolean } & Partial<RuleHistoryInfo>);
+export type RuleHistory = { available: false; reason: string; state?: string; message?: string } | ({ available: true; tracked: boolean } & Partial<RuleHistoryInfo>);
 
 // ---------------------------------------------------------------- accounts and workspace
 
@@ -542,9 +555,39 @@ export interface DraftReplayDataset {
   expectation: { min: number; max: number | null } | null;
   passed: boolean | null;
   message: string | null;
-  error: string | null;
+  error: ReplayError | null;
+  error_text?: string | null;
   truncated: boolean;
   sample: { index: number; event: Record<string, unknown> }[];
+  before?: number | null;
+  added?: { index: number; event: Record<string, unknown> }[];
+  removed?: { index: number; event: Record<string, unknown> }[];
+}
+
+export interface ReplayError {
+  code: string;
+  message: string;
+  hint?: string | null;
+  dataset?: string;
+}
+
+export interface ReplaySelection {
+  name: string;
+  exclusion: boolean;
+  matched: boolean;
+  fields: { field: string; expected: unknown; actual: unknown; present: boolean; matched: boolean }[];
+}
+
+export interface ReplayCase {
+  name: string;
+  kind: string;
+  expected: string;
+  matched: boolean | null;
+  passed: boolean;
+  hint?: string | null;
+  event?: Record<string, unknown> | null;
+  error: ReplayError | null;
+  selections?: ReplaySelection[];
 }
 
 export interface DraftReplay {
@@ -552,6 +595,10 @@ export interface DraftReplay {
   duration_ms: number;
   passed: boolean;
   errors: number;
+  saved?: boolean | null;
+  cases?: ReplayCase[];
+  cases_passed?: boolean | null;
+  case_problems?: { severity: string; code?: string; message: string; hint?: string | null; line?: number | null }[];
   datasets: DraftReplayDataset[];
 }
 
@@ -566,6 +613,9 @@ export interface DraftSummary {
   version: number;
   stale: boolean;
   mine: boolean;
+  quality?: { ready: boolean; blockers: number; score: number | null } | null;
+  level?: string | null;
+  target?: string | null;
 }
 
 export interface Draft extends DraftSummary {
@@ -646,7 +696,8 @@ export interface PackItem {
   state: "ready" | "untested";
   reason: string | null;
   exists: boolean;
-  draft_id: string | null;
+  rule?: string | null;
+  draft_id?: string | null;
 }
 
 export type PackJobState = "queued" | "downloading" | "scanning" | "importing" | "done" | "failed";
@@ -692,6 +743,14 @@ export interface Review {
   mine_to_review: boolean;
   mine_requested: boolean;
   governance: { owner: string | null; review_by: string | null; review_state: string | null } | null;
+  /** U10 (backend, provisional until posted): unread mark, request snapshot and timeline. */
+  unread?: boolean;
+  snapshot?: { changed_lines: number | null; added: number; removed: number; stale: boolean } | null;
+  snapshot_text?: string | null;
+  base_text?: string | null;
+  current_text?: string | null;
+  diff_too_large?: boolean;
+  events?: { id?: number; type: string; actor?: { id: number; name: string } | null; text?: string | null; at: string }[];
 }
 
 export interface ReviewComment {
@@ -723,6 +782,8 @@ export interface ReviewCounts {
   enabled: boolean;
   to_review: number;
   requested: number;
+  unread?: number;
+  latest?: { id: string; title: string; requester?: string; actor?: string; kind?: "assigned" | "decided"; state?: string }[];
 }
 
 export interface Reviewer {
@@ -730,4 +791,51 @@ export interface Reviewer {
   email: string;
   name: string;
   role: Role;
+}
+
+// ---------------------------------------------------------------- GitHub sync (ADR 0006)
+
+export interface SyncStatus {
+  enabled: boolean;
+  reason: string | null;
+  state: "synced" | "behind" | "ahead" | "diverged" | "no_remote" | "no_commits" | "not_a_repo" | "disabled" | "error";
+  branch: string | null;
+  base: string | null;
+  on_base: boolean;
+  head: string | null;
+  remote_head: string | null;
+  behind: number;
+  ahead: number;
+  fetching: boolean;
+  last_fetch: string | null;
+  last_attempt: string | null;
+  next_fetch_in: number;
+  last_error: string | null;
+  blocked: string | null;
+  conflicts: { path: string; rule: string | null; reason: string }[];
+  incoming_rules: { rule: string; change: "added" | "modified" | "deleted" }[];
+  changed_rules: { rule: string; change: "added" | "modified" | "deleted" }[];
+  last_pull: string | null;
+  config_changed: boolean;
+}
+
+/** `publication` on rule rows (ADR 0007). */
+export interface Publication {
+  state: "published" | "local" | "pushed" | "in_pr" | "unknown";
+  change: "added" | "modified" | null;
+  git: "untracked" | "modified" | "committed" | "clean" | null;
+  branch: string | null;
+  pr: { number: number; url: string } | null;
+  base_ref: string | null;
+  reason: string | null;
+}
+
+export interface RelatedRule {
+  id: string;
+  title: string;
+  file: string;
+  logsource: string | null;
+  shared_fields: string[];
+  same_logsource: boolean;
+  level: string | null;
 }

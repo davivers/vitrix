@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import pytest
-from test_auth import PW, invite_token, register
+from test_auth import invite_token, register
 from test_engine import CASES_OK, RULE_OK, make_project
 from test_github import GITHUB_CFG, FakeGitHub
 
@@ -88,36 +88,6 @@ def test_without_github_nothing_is_sent(tmp_path, monkeypatch):
     assert client.post("/api/ci/drafts", json={"draft_ids": [i]}).status_code == 503
 
 
-def test_reviewed_by_trailer_for_approved_reviews(tmp_path, monkeypatch):
-    monkeypatch.delenv("VITRIX_ALLOWED_HOSTS", raising=False)
-    fake = FakeGitHub()
-    monkeypatch.setattr(service, "GitHubClient", lambda gh: GitHubClient(gh, transport=fake))
-    monkeypatch.setenv("VITRIX_GITHUB_TOKEN", "test-secret")
-    owner = TestClient(create_app(make_project(tmp_path, extra_cfg=GITHUB_CFG + "auth:\n  enabled: true\n")), base_url=BASE)
-    assert register(owner).status_code == 201
-    rev = TestClient(owner.app, base_url=BASE)
-    assert register(rev, email="rev@example.com", name="Rita Reviewer", invite=invite_token(owner, "rev@example.com")).status_code == 201
-    rev_id = next(m["id"] for m in owner.get("/api/workspace").json()["members"] if m["email"] == "rev@example.com")
-    a = save(owner, "windows/a.yml", n=1)
-    b = save(owner, "windows/b.yml", n=2)
-    r = owner.post("/api/reviews", json={"target_kind": "draft", "target_ref": a, "reviewer_id": rev_id})
-    assert r.status_code == 201, r.text
-    rid, ver = r.json()["id"], r.json()["version"]
-    assert rev.post(f"/api/reviews/{rid}/decision", json={"decision": "approved", "version": ver}).status_code == 200
-    assert owner.post("/api/ci/drafts", json={"draft_ids": [a, b]}).status_code == 201
-    message = fake.body_of("/git/commits")["message"]
-    assert message.count("Reviewed-by: Rita Reviewer <rev@example.com>") == 1
-    assert "Submitted-by: Olivia Owner" in message
-
-    # changing the draft after approval drops the trailer
-    d = owner.get(f"/api/drafts/{a}").json()
-    owner.put(f"/api/drafts/{a}", json={"path": d["path"], "rule": d["rule"] + "\n# edited\n", "cases": d["cases"], "version": d["version"]})
-    fake.calls.clear()
-    assert owner.post("/api/ci/drafts", json={"draft_ids": [a]}).status_code == 201
-    assert "Reviewed-by" not in fake.body_of("/git/commits")["message"]
-    assert PW  # keep the shared import used
-
-
 def _team_with_github(tmp_path, monkeypatch):
     monkeypatch.delenv("VITRIX_ALLOWED_HOSTS", raising=False)
     fake = FakeGitHub()
@@ -135,30 +105,10 @@ def _team_with_github(tmp_path, monkeypatch):
     return out, ids, fake
 
 
-def test_co_authored_by_other_draft_authors_only_when_github_linked(tmp_path, monkeypatch):
-    from vitrix.auth import AuthStore
-    from vitrix.config import load_config
-
-    t, ids, fake = _team_with_github(tmp_path, monkeypatch)
+def test_drafts_of_another_author_cannot_be_submitted(tmp_path, monkeypatch):
+    t, ids, fake = _team_with_github(tmp_path, monkeypatch)  # drafts are private (ADR 0007): no cross-author batches
     a = save(t["ed1"], "windows/a.yml", n=1)
     b = save(t["ed2"], "windows/b.yml", n=2)
-    c = save(t["owner"], "windows/c.yml", n=3)
-    cfg = load_config(str(tmp_path / "vitrix.yml"))
-    AuthStore(cfg.data_dir / "vitrix.db", cfg.auth).link_github(ids["ed1"], {"id": 4242, "login": "ed1-gh"})
-    assert t["owner"].post("/api/ci/drafts", json={"draft_ids": [a, b, c]}).status_code == 201
-    msg = fake.body_of("/git/commits")["message"]
-    assert msg.count("Co-authored-by:") == 1 and "<4242+ed1-gh@users.noreply.github.com>" in msg  # ed2 is unlinked: no trailer
-    assert "ed2@example.com" not in msg.replace("Submitted-by", "")
-
-
-def test_rules_publish_keeps_draft_review_trailer(tmp_path, monkeypatch):
-    t, ids, fake = _team_with_github(tmp_path, monkeypatch)
-    d = save(t["ed1"], "windows/a.yml", n=1)
-    r = t["ed1"].post("/api/reviews", json={"target_kind": "draft", "target_ref": d, "reviewer_id": ids["ed2"]}).json()
-    assert t["ed2"].post(f"/api/reviews/{r['id']}/decision", json={"decision": "approved", "version": r["version"]}).status_code == 200
-    body = {"path": "windows/a.yml", "rule": rule(1), "cases": CASES_OK}
-    assert t["ed1"].post("/api/ci/rules", json=body).status_code == 201
-    assert "Reviewed-by" not in fake.body_of("/git/commits")["message"]
-    fake.calls.clear()
-    assert t["ed1"].post("/api/ci/rules", json={**body, "draft_id": d}).status_code == 201
-    assert "Reviewed-by: ed2 <ed2@example.com>" in fake.body_of("/git/commits")["message"]
+    assert t["owner"].post("/api/ci/drafts", json={"draft_ids": [a, b]}).status_code == 404
+    assert t["ed1"].post("/api/ci/drafts", json={"draft_ids": [a, b]}).status_code == 404
+    assert t["ed1"].post("/api/ci/drafts", json={"draft_ids": [a]}).status_code == 201

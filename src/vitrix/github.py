@@ -235,6 +235,22 @@ class GitHubClient:
 
     # ----------------------------------------------------------------------- read-only connector
 
+    @staticmethod
+    def _list(payload: object, what: str) -> list:
+        """A GitHub list endpoint must answer with a JSON array; anything else is an error, never 'empty'."""
+        if not isinstance(payload, list):
+            raise GitHubError(f"GitHub returned an unexpected answer for {what}", status=502)
+        return payload
+
+    def _paged(self, path: str, max_pages: int = 5) -> list:
+        items: list = []
+        for page in range(1, max_pages + 1):
+            chunk = self._list(self._call("GET", f"{path}&page={page}"), "open pull requests")
+            items += chunk
+            if len(chunk) < 100:
+                break
+        return items
+
     def activity(self, now: datetime | None = None) -> dict:
         """Repository state on GitHub: base HEAD, open PRs, time to merge and CI.
 
@@ -244,8 +260,10 @@ class GitHubClient:
         base = quote(self.cfg.base, safe="")
         repo = self._call("GET", "")
         head = self._call("GET", f"/commits/{base}")
-        open_prs = self._call("GET", f"/pulls?state=open&base={base}&per_page=50") or []
-        closed = self._call("GET", f"/pulls?state=closed&base={base}&sort=updated&direction=desc&per_page=50") or []
+        # every open PR of the repository (not only those against `base`): a wrongly detected base
+        # must not hide them. Each item says its own base and whether it targets the configured one.
+        open_prs = self._paged("/pulls?state=open&per_page=100")
+        closed = self._list(self._call("GET", f"/pulls?state=closed&base={base}&sort=updated&direction=desc&per_page=50"), "closed pull requests")
         base_runs = (self._call("GET", f"/actions/runs?branch={base}&per_page=20") or {}).get("workflow_runs", [])
         pr_runs = (self._call("GET", "/actions/runs?event=pull_request&per_page=50") or {}).get("workflow_runs", [])
 
@@ -258,8 +276,12 @@ class GitHubClient:
         for pr in open_prs:
             branch = (pr.get("head") or {}).get("ref") or ""
             created = _parse_time(pr.get("created_at"))
+            pr_base = (pr.get("base") or {}).get("ref") or self.cfg.base
             pulls.append({
                 "number": pr.get("number"),
+                "base": pr_base,
+                "against_base": pr_base == self.cfg.base,
+                "fork": bool(((pr.get("head") or {}).get("repo") or {}).get("fork")),
                 "title": pr.get("title") or "",
                 "author": (pr.get("user") or {}).get("login"),
                 "url": pr.get("html_url"),
@@ -286,6 +308,7 @@ class GitHubClient:
                      "date": (commit.get("author") or {}).get("date"), "url": head.get("html_url")},
             "pulls": {
                 "open": len(pulls),
+                "against_base": sum(p["against_base"] for p in pulls),
                 "failing": sum(p["ci"] == "failure" for p in pulls),
                 "from_vitrix": sum(p["from_vitrix"] for p in pulls),
                 "items": pulls,
