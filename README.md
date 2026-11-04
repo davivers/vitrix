@@ -40,7 +40,7 @@ flowchart LR
     E -. blocked .-> A
 ```
 
-Not ready to publish? **Save locally** keeps a private draft (stored in `.vitrix/`, never in `rules/`) that you can reopen later from the Editor.
+Not ready to publish? **Save locally** writes the rule into `rules/` like any other rule, flagged **"Local · not in Git yet"** until you publish it. Unsaved scratch work can be kept as a private draft, cleared when you sign out.
 
 ## Quickstart
 
@@ -135,16 +135,19 @@ vitrix serve
 
 | Feature | What it gives you |
 |---|---|
-| **Editor** | One rule, everything live: validation, queries per SIEM, test cases, quality gate, **Replay** on local datasets (matches vs expectations, matched events, timing) and impact vs the saved rule |
+| **Editor** | One rule, everything live: validation with the exact line and a fix hint, the **final language** chosen from a menu (or "Sigma, no conversion"), queries per language with inline fixes (e.g. pick the KQL table), **Test & Replay** (cases and datasets in one table, field-level diff, compare with the saved version) and the quality gate |
 | **Quality gate** | Blocking checks plus a 0-100 health score; a rule is approved only with no blocker and a score at or above `min_score` (default 80) |
 | **Test cases** | Typed cases (positive, negative, false positive, edge) run by a local evaluator; exclusions are proven |
 | **Log replay** | Run rules on JSON/JSONL/YAML logs with `<dataset>.expect.yml` regression expectations |
 | **MITRE ATT&CK coverage** | Matrix of tactics and techniques from your rule tags, drill-down to rules, ATT&CK Navigator export |
 | **CI-first publishing** | Pushes a `vitrix/*` branch; the pull request opens only after the real CI passed for that exact commit (checked again server-side) |
-| **Local drafts** | "Save locally" keeps work in progress in `.vitrix/drafts.db`; list, reopen, delete from the Editor |
-| **Multi-SIEM output** | Splunk SPL, Microsoft KQL, Elastic EQL and more via pySigma; the final language is chosen per rule |
-| **Regex Workbench** | Test regexes safely (subprocess + timeout); open to every role |
-| **Dashboards and reports** | Operational and Executive views, Git-history trends, Markdown/JSON reports |
+| **Save locally** | Rules are saved as files in `rules/`; the Rules tab shows every rule not yet in Git, with a filter and Publish per rule or in batch |
+| **GitHub sync** | On load and on focus the app fetches GitHub and fast-forwards the base branch when safe; local changes are never overwritten |
+| **Reviews** | Request a review from a teammate, comments, approve or request changes, unread badge and notifications |
+| **Content packs** | Import SigmaHQ rules by product/category/service as local rules with generated test cases |
+| **Multi-SIEM output** | Splunk SPL, Microsoft KQL, Elastic EQL and more via pySigma, or keep the rule in Sigma; KQL tables and column names are mapped from the Editor (saved in `mappings.yml`) |
+| **Regex Workbench** | Test regexes on the engine you choose (Python regex, Python re, RE2, PCRE2, JavaScript), safely isolated with a timeout; open to every role |
+| **Dashboards** | Operational and Executive views with Git-history trends; export to PDF (print), Markdown or CSV; `vitrix report` for the full report |
 | **Team and audit** | Roles, invites, audit log; light and dark themes (choose in the user menu) |
 
 ### Screenshots
@@ -162,7 +165,7 @@ Accounts are **on by default**: the first screen creates the owner. Opt out with
 | Role | Can do |
 |---|---|
 | `viewer` | Read everything; use pure-compute tools (Regex Workbench, validate, replay, impact); open the Editor read-only (Save and Publish are disabled) |
-| `editor` | Everything a viewer can, plus save local drafts and publish rules through CI |
+| `editor` | Everything a viewer can, plus save rules locally, edit query mappings and publish through CI |
 | `admin` | Plus Settings, Connections and inviting people |
 | `owner` | Plus managing admins and the workspace |
 
@@ -217,7 +220,8 @@ Your detections repository (created by `vitrix init`):
 vitrix.yml          configuration           rules/      Sigma rules (source of truth)
 cases/              test cases (same path)  datasets/   replay logs + <name>.expect.yml
 dist/               compiled queries (CI)   .github/    the CI workflow
-.vitrix/            accounts and drafts (git-ignored)
+mappings.yml        KQL tables/columns and final-language defaults (edited from the app)
+.vitrix/            accounts, drafts, reviews, pack cache (git-ignored)
 ```
 
 This repository (the product): `src/vitrix/` engine, API, compiled UI and project template; `web/` UI source (React, TypeScript, Tailwind); `tests/`; `brand/`; `Dockerfile`, `docker-compose.yml`, `scripts/`.
@@ -276,7 +280,7 @@ If the rule has an exclusion (`filter_*`, or a selection negated in the conditio
 | Replay | logs in `datasets/` against every rule, with time per rule and expected counts (regression) |
 | Analyze | false-positive case, exclusion tested, ATT&CK technique, documented `falsepositives`, periodic review (age from Git) |
 | Quality gate | every blocking check passes: "is the rule ready to be published?" |
-| Deploy | validated by the real CI and merged; the CI builds `dist/` (direct push to a SIEM does not exist yet) |
+| Merged PR | validated by the real CI and merged; the CI builds `dist/`. Deploying to a SIEM is your own CI's job, never the app's |
 
 Each rule gets a **health score** (0–100): applicable checks that pass, blocking ones weigh 3, recommendations 1. A blocked rule never scores above 69. A rule is **approved** when nothing blocks it *and* its score reaches `min_score`; the Editor shows the score against the required minimum and only approved rules can be published.
 
@@ -309,11 +313,11 @@ The example repository ships `datasets/windows_attack_simulation.jsonl`: an atta
 
 ### Regex Workbench
 
-A lab to write and optimise regex with the same engine as the local tests: match highlighting, groups, time per sample, tips (nested quantifier, needless `.*`, unescaped Windows path backslash, when `contains` is enough) and the snippet ready for the Sigma rule. Every run is a separate process with a timeout.
+A lab to write and optimise regex on the engine you pick: **Python regex** (the engine of the local tests, default), **Python re**, **RE2**, **PCRE2** (server side, separate process with a timeout) or **JavaScript** (in the browser, in a worker stopped after 1 s). It shows match highlighting, groups, time per sample, tips (nested quantifier, needless `.*`, unescaped Windows path backslash, when `contains` is enough) and the snippet ready for the Sigma rule.
 
 ## Final language of each rule
 
-Each rule ships in one SIEM language. The engine decides, from the most specific to the most general:
+Each rule ships in one language: a SIEM query or **Sigma itself (no conversion)**. Choose it in the **Editor header** (this rule, or "use for all rules in this folder") or in **Settings → Final language** (workspace default); the app writes the choice for you. The engine decides, from the most specific to the most general:
 
 1. **In the rule itself**, with `vitrix.target` (a name or a list):
 
@@ -322,7 +326,8 @@ Each rule ships in one SIEM language. The engine decides, from the most specific
      target: kql
    ```
 
-2. **By route** in `vitrix.yml`: the first whose `match` fits the path inside `rules/` (`*` also crosses folders).
+2. **Folder default**, then **workspace default** in `mappings.yml` (set from the app).
+3. Legacy: **by route** in `vitrix.yml`, the first whose `match` fits the path inside `rules/` (`*` also crosses folders).
 
    ```yaml
    routes:
@@ -330,8 +335,10 @@ Each rule ships in one SIEM language. The engine decides, from the most specific
        target: kql
    ```
 
-3. **`default_target`** in `vitrix.yml`.
+   Then **`default_target`** in `vitrix.yml`.
 4. Otherwise the rule is converted for every active target.
+
+A rule kept in Sigma is copied to `dist/sigma/`. KQL needs a table name: when the logsource has no known table the Editor asks for it inline (for this rule or for every rule with that logsource) and stores it in `mappings.yml`, together with column mappings for custom tables.
 
 `vitrix convert -t NAME` ignores all of this and forces one target. `dist/manifest.json` records, per rule, the targets and where the choice came from (`target_source`). The lint reports unknown targets and malformed `vitrix` blocks. A rule whose final-language conversion fails shows as failing; the preview in other SIEMs in the Editor never fails a rule.
 
@@ -361,9 +368,14 @@ my-siem = "my_package.target:target"
 | `GET /api/tests`, `/api/coverage`, `/api/coverage/navigator` | Test suites by kind; ATT&CK matrix and data sources; an ATT&CK Navigator layer. |
 | `GET /api/history[/{id}]` | Git history: coverage over time, activity, audit trail per rule. |
 | `GET /api/datasets`, `/api/datasets/{name}/replay`, `POST /api/replay` | Replay of datasets or pasted events. |
-| `POST /api/regex` | Regex Workbench. |
+| `POST /api/regex` | Regex Workbench (`engine`: python-regex, python-re, re2, pcre2). |
 | `GET /api/regex/engines` | Regex engines the Workbench can run (python-regex, python-re, re2, pcre2). |
 | `GET /api/report?format=md\|json` | Consolidated report. |
+| `POST /api/rules`, `PUT`/`DELETE /api/rules/{id}` | Save a rule (and its cases) as files in the repository; `sha` guards concurrent edits. |
+| `GET`/`PUT /api/mappings`, `POST /api/ci/mappings` | KQL tables/columns and final-language defaults (`mappings.yml`). |
+| `GET`/`POST /api/sync` | GitHub sync state; fetch and safe fast-forward. |
+| `/api/reviews/*`, `/api/comments` | Review requests, decisions, unread state and comments. |
+| `/api/packs/*` | Content pack sources and import jobs. |
 | `GET /api/config`, `POST /api/config/validate` | Effective configuration and validation of an edited `vitrix.yml`. |
 | `GET /api/github`, `/api/github/activity` | Configuration and token status (never the token); open PRs, CI runs, time to merge (60 s cache). |
 | `POST /api/ci/rules`, `POST /api/ci/config` | Step 1: push a branch so the real CI validates the change. |
@@ -380,6 +392,6 @@ API limits:
 
 - **Syntax validation per target:** pySigma conversion is the validation. The engine does not check the query with each SIEM's parser yet.
 - **Local evaluator:** covers a subset of Sigma (see the header of `src/vitrix/evaluator.py`). Modifiers such as `windash`, `base64`, `cidr` and aggregation conditions **fail explicitly**, never silently. The lint warns when a rule is outside that subset.
-- **ATT&CK validation** checks the format of tactics and techniques, not their existence in MITRE's data.
-- **Deploy:** there are no adapters to push rules to a SIEM yet. The result is the `dist/` built by CI.
+- **ATT&CK validation** checks tags against a bundled Enterprise ATT&CK catalogue (refresh with `scripts/update_attack_catalog.py`); unknown ids are warnings.
+- **Deploy** is the merged pull request; the CI builds `dist/`. Pushing to a SIEM belongs in your own CI workflow, by design.
 
