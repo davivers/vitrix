@@ -139,7 +139,7 @@ class RegexRequest(BaseModel):
     pattern: str = Field(max_length=2_000)
     flags: str = Field(default="", max_length=3, description="i, m and/or s (Sigma's |re|i|m|s)")
     samples: list[str] = Field(default_factory=list, max_length=50)
-    targets: list[str] | None = Field(default=None, max_length=10, description="targets to check flavors for; default: the configured ones")
+    engine: str = Field(default="python-regex", max_length=20, description="python-regex (default, the evaluator's), python-re, re2, pcre2; see GET /api/regex/engines")
 
 
 class ConfigTextRequest(BaseModel):
@@ -561,10 +561,14 @@ def create_app(config_path: str | None = None) -> FastAPI:
         except ReplayError as exc:  # structured: {code, message, hint}
             raise HTTPException(status_code=422, detail=exc.payload()) from None
 
+    @app.get("/api/regex/engines")
+    def regex_engines() -> list[dict]:
+        return regex_lab.list_engines()
+
     @app.post("/api/regex")
     def regex(req: RegexRequest) -> dict:
         try:
-            return regex_lab.analyze(req.pattern, req.flags, req.samples, targets=req.targets if req.targets is not None else list(cfg.targets))
+            return regex_lab.analyze(req.pattern, req.flags, req.samples, engine=req.engine)
         except regex_lab.RegexLabError as exc:
             raise HTTPException(status_code=422, detail=str(exc)) from None
 

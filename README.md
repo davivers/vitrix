@@ -362,6 +362,7 @@ my-siem = "my_package.target:target"
 | `GET /api/history[/{id}]` | Git history: coverage over time, activity, audit trail per rule. |
 | `GET /api/datasets`, `/api/datasets/{name}/replay`, `POST /api/replay` | Replay of datasets or pasted events. |
 | `POST /api/regex` | Regex Workbench. |
+| `GET /api/regex/engines` | Regex engines the Workbench can run (python-regex, python-re, re2, pcre2). |
 | `GET /api/report?format=md\|json` | Consolidated report. |
 | `GET /api/config`, `POST /api/config/validate` | Effective configuration and validation of an edited `vitrix.yml`. |
 | `GET /api/github`, `/api/github/activity` | Configuration and token status (never the token); open PRs, CI runs, time to merge (60 s cache). |

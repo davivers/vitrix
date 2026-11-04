@@ -15,6 +15,8 @@ test("a viewer can use the regex workbench", async ({ browser, baseURL }) => {
   await page.getByRole("textbox", { name: "Sample 1" }).fill("my password123 here");
   const resp = await done; // the viewer is allowed to call it (G3)
   expect(resp.status()).toBe(200);
+  expect(JSON.parse(resp.request().postData()!).engine).toBe("python-regex"); // the default engine
+  await expect(page.getByLabel("Regex engine")).toBeVisible();
   await expect(page.getByText(/matched/i).first()).toBeVisible();
   await expect(page.getByText("Invalid regex")).toHaveCount(0);
   await owner.ctx.close();

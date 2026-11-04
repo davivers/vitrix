@@ -1,7 +1,9 @@
 import clsx from "clsx";
 import { AlertTriangle, Check, Cpu, CheckCircle2, Copy, Info, Loader2, Plus, Timer, Trash2, XCircle } from "lucide-react";
-import { useEffect, useState } from "react";
+import { useEffect, useMemo, useState } from "react";
+import { useQuery } from "@tanstack/react-query";
 import { request } from "../api";
+import { JS_ENGINE_ID, runJs } from "../regexJs";
 import { Card, ErrorBox, PageHeader } from "../components/ui";
 import { t } from "../i18n";
 
@@ -25,20 +27,40 @@ interface RegexResult {
   sigma: string | null;
   elapsed_ms?: number;
   /** Same engine as Replay and the evaluator (telemetry contract). */
-  engine?: { name: string; version?: string; timeout_ms?: number };
-  flavor_warnings?: ({ target?: string; message?: string; construct?: string } | string)[];
+  engine?: { id?: string; name: string; version?: string | null; timeout_ms?: number };
 }
 
-/** Static scan for constructs some SIEM regex flavors lack (spec regex-workbench-label.md). */
-const FLAVOR_CHECKS: { re: RegExp; key: "rx_w_look" | "rx_w_backref" | "rx_w_atomic" | "rx_w_short" | "rx_w_inline" | "rx_w_nested" | "rx_w_prop"; langs: string[] }[] = [
-  { re: /\(\?<?[=!]/, key: "rx_w_look", langs: ["KQL", "Lucene"] },
-  { re: /\\[1-9]|\\k</, key: "rx_w_backref", langs: ["KQL"] },
-  { re: /\(\?>|[*+?}]\+/, key: "rx_w_atomic", langs: ["KQL", "Lucene"] },
-  { re: /\\[dwsb]/i, key: "rx_w_short", langs: ["Lucene"] },
-  { re: /\(\?[a-z]+[:)]/i, key: "rx_w_inline", langs: ["Lucene"] },
-  { re: /\([^)]*[+*]\)[+*]/, key: "rx_w_nested", langs: ["SPL", "Replay"] },
-  { re: /\\[pP]\{/, key: "rx_w_prop", langs: ["Lucene"] },
-];
+interface EngineInfo {
+  id: string;
+  label: string;
+  version?: string | null;
+  available: boolean;
+  hint?: string | null;
+  /** Flags the engine supports (i, m, s). */
+  flags?: string[];
+}
+
+const ENGINE_KEY = "vitrix.regex.engine";
+const JS_ENGINE: EngineInfo = { id: JS_ENGINE_ID, label: "JavaScript (ECMAScript)", version: "browser", available: true, flags: ["i", "m", "s"] };
+const FALLBACK_ENGINES: EngineInfo[] = [{ id: "python-regex", label: "Python regex (Vitrix evaluator)", available: true }];
+
+/** GET /api/regex/engines -> [{id, name, version, available, notes, flags_supported}] (default python-regex). */
+async function loadEngines(): Promise<{ list: EngineInfo[]; def: string }> {
+  try {
+    const raw = await request<Record<string, unknown>[]>("/api/regex/engines");
+    const list = raw.map((e) => ({
+      id: String(e.id),
+      label: String(e.name ?? e.id),
+      version: (e.version as string | null | undefined) ?? null,
+      available: e.available !== false,
+      hint: (e.notes as string | null | undefined) ?? null,
+      flags: (e.flags_supported as string[] | undefined) ?? ["i", "m", "s"],
+    }));
+    return { list: list.length ? list : FALLBACK_ENGINES, def: "python-regex" };
+  } catch {
+    return { list: FALLBACK_ENGINES, def: "python-regex" };
+  }
+}
 
 const START_SAMPLES = [
   "powershell.exe -nop -w hidden -enc SQBFAFgAIAAoAE4AZQB3AC0ATwBiAGoA",
@@ -85,15 +107,42 @@ export default function RegexLabPage() {
   const [pending, setPending] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [copied, setCopied] = useState(false);
+  const engines = useQuery({ queryKey: ["regex-engines"], queryFn: loadEngines, retry: false, staleTime: 300_000 });
+  const all = useMemo(() => [...(engines.data?.list ?? FALLBACK_ENGINES), JS_ENGINE], [engines.data]);
+  const [chosen, setChosen] = useState<string | null>(() => {
+    try {
+      return localStorage.getItem(ENGINE_KEY);
+    } catch {
+      return null;
+    }
+  });
+  const engine = all.find((e) => e.id === chosen && e.available)?.id ?? engines.data?.def ?? "python-regex";
+  const pick = (id: string) => {
+    setChosen(id);
+    try {
+      localStorage.setItem(ENGINE_KEY, id);
+    } catch {
+      /* storage unavailable */
+    }
+  };
 
   useEffect(() => {
     const ctrl = new AbortController();
     setPending(true);
     const timer = setTimeout(() => {
+      if (engine === JS_ENGINE_ID) {
+        void runJs(pattern, flags, samples).then((res) => {
+          if (ctrl.signal.aborted) return;
+          setResult(res as RegexResult);
+          setError(null);
+          setPending(false);
+        });
+        return;
+      }
       request<RegexResult>("/api/regex", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ pattern, flags, samples }),
+        body: JSON.stringify({ pattern, flags, samples, engine }),
         signal: ctrl.signal,
       })
         .then((r) => {
@@ -111,7 +160,7 @@ export default function RegexLabPage() {
       clearTimeout(timer);
       ctrl.abort();
     };
-  }, [pattern, flags, samples]);
+  }, [pattern, flags, samples, engine]);
 
   const toggle = (f: string) => setFlags((cur) => (cur.includes(f) ? cur.replace(f, "") : [...cur, f].sort().join("")));
   const hits = result?.results?.filter((r) => r.matched).length ?? 0;
@@ -150,60 +199,31 @@ export default function RegexLabPage() {
             <span className="grid place-items-center px-3 font-mono text-subtle">/{flags}</span>
           </span>
         </label>
-        <p
-          className={clsx("mt-2 inline-flex items-center gap-1.5 rounded-md px-2 py-1 font-mono text-xs", result?.engine ? "bg-surface-2 text-text" : "bg-warn-soft text-warn")}
-          title={result?.engine ? t("rx_engine_tip") : undefined}
-          data-testid="regex-engine"
-        >
-          {result?.engine ? <Cpu size={12} aria-hidden /> : <AlertTriangle size={12} aria-hidden />}{" "}
-          {result?.engine
-            ? t("rx_engine", { e: `${result.engine.name === "regex" ? "Python regex" : result.engine.name}${result.engine.version ? ` ${result.engine.version}` : ""}${result.engine.timeout_ms ? ` · ${t("rx_timeout", { ms: result.engine.timeout_ms })}` : ""}` })
-            : t("rx_engine_unknown")}
-        </p>
-        <ul className="mt-3 space-y-1" aria-live="polite" aria-label={t("rx_compat")} data-testid="regex-flavor-scan">
-          {FLAVOR_CHECKS.filter((c) => c.re.test(pattern)).map((c) => (
-            <li key={c.key} className="flex items-start gap-2 text-[13px] text-warn">
-              <AlertTriangle size={14} className="mt-0.5 shrink-0" aria-hidden />
-              <span>
-                {t(c.key)} <span className="font-mono text-xs">[{c.langs.join(", ")}]</span>
-              </span>
-            </li>
-          ))}
-          {!FLAVOR_CHECKS.some((c) => c.re.test(pattern)) && (
-            <li className="flex items-start gap-2 text-[13px] text-muted">
-              <CheckCircle2 size={14} className="mt-0.5 shrink-0 text-good" aria-hidden /> {t("rx_w_none")}
-            </li>
-          )}
-        </ul>
-        <details className="mt-2 text-[13px] text-muted">
-          <summary className="cursor-pointer">{t("rx_flavors")}</summary>
-          <table className="mt-2 w-full text-left text-xs">
-            <tbody>
-              {[["Splunk SPL", "PCRE"], ["Microsoft KQL", "RE2"], ["Elastic Lucene", "Lucene regex"], ["Elastic EQL", "Java regex"]].map(([l, f]) => (
-                <tr key={l} className="border-t border-line">
-                  <th scope="row" className="py-1 pr-3 font-medium text-text">{l}</th>
-                  <td className="py-1">{f}</td>
-                </tr>
+        <div className="mt-2 flex flex-wrap items-center gap-3">
+          <label className="flex items-center gap-2 text-[13px] text-muted">
+            {t("rx_engine_label")}
+            <select value={engine} onChange={(e) => pick(e.target.value)} className="rounded-[10px] border border-line bg-surface px-2.5 py-1.5 text-[13px] text-text">
+              {all.map((e) => (
+                <option key={e.id} value={e.id} disabled={!e.available} title={e.hint ?? undefined}>
+                  {e.label}
+                  {e.version ? ` ${e.version}` : ""}
+                  {!e.available ? ` (${t("rx_unavailable")})` : ""}
+                </option>
               ))}
-            </tbody>
-          </table>
-        </details>
-        {(result?.flavor_warnings?.length ?? 0) > 0 && (
-          <ul className="mt-3 space-y-1" aria-label={t("rx_flavor_title")} data-testid="regex-flavor-warnings">
-            {result!.flavor_warnings!.map((w, i) => (
-              <li key={i} className="flex items-start gap-2 text-[13px] text-warn">
-                <AlertTriangle size={14} className="mt-0.5 shrink-0" aria-hidden />
-                <span>
-                  {typeof w === "string" ? w : (<><span className="font-semibold">{w.target}</span>{w.target ? ": " : ""}{w.message ?? w.construct}</>)}
-                </span>
-              </li>
-            ))}
-          </ul>
-        )}
+            </select>
+          </label>
+          <p className="inline-flex items-center gap-1.5 rounded-md bg-surface-2 px-2 py-1 font-mono text-xs text-text" title={t("rx_engine_tip")} data-testid="regex-engine">
+            <Cpu size={12} aria-hidden />{" "}
+            {result?.engine
+              ? t("rx_engine", { e: `${result.engine.name === "regex" ? "Python regex" : result.engine.name}${result.engine.version ? ` ${result.engine.version}` : ""}${result.engine.timeout_ms ? ` \u00b7 ${t("rx_timeout", { ms: result.engine.timeout_ms })}` : ""}` })
+              : t("rx_engine", { e: all.find((e) => e.id === engine)?.label ?? engine })}
+          </p>
+          {all.find((e) => e.id === engine)?.hint && <p className="basis-full text-xs text-muted">{all.find((e) => e.id === engine)?.hint}</p>}
+        </div>
         <div className="mt-3 flex flex-wrap items-center gap-2">
           {FLAG_INFO.map(([f, label]) => (
             <label key={f} className={clsx("flex cursor-pointer items-center gap-1.5 rounded-md border px-2.5 py-1 text-[12.5px]", flags.includes(f) ? "border-accent/50 bg-accent-soft text-strong" : "border-line text-muted")}>
-              <input type="checkbox" className="sr-only" checked={flags.includes(f)} onChange={() => toggle(f)} />
+              <input type="checkbox" className="sr-only" checked={flags.includes(f)} disabled={!(all.find((e) => e.id === engine)?.flags ?? ["i", "m", "s"]).includes(f)} onChange={() => toggle(f)} />
               <span className="font-mono">{f}</span> {label}
             </label>
           ))}
@@ -227,7 +247,7 @@ export default function RegexLabPage() {
             ) : null}
           </span>
         </div>
-        {result && !result.ok && <div className="mt-3"><ErrorBox message={result.error + (result.position !== undefined ? ` (position ${result.position})` : "")} /></div>}
+        {result && !result.ok && <div className="mt-3"><ErrorBox message={result.error + (typeof result.position === "number" ? ` (position ${result.position})` : "")} /></div>}
         {error && <div className="mt-3"><ErrorBox message={error} /></div>}
       </Card>
 

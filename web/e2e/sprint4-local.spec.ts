@@ -177,17 +177,6 @@ test("Exports: Executive and Operational offer Markdown and CSV downloads; /repo
   }
 });
 
-test("Regex workbench shows the engine badge and a KQL flavor warning for a lookahead", async ({ page }) => {
-  await page.goto("/regex");
-  await page.locator("input.font-mono").first().fill("foo(?=bar)");
-  await page.getByRole("textbox", { name: "Sample 1" }).fill("foobar");
-  await expect(page.getByTestId("regex-engine")).toContainText(/Engine: Python regex/);
-  const warnings = page.getByTestId("regex-flavor-warnings");
-  await expect(warnings).toBeVisible();
-  await expect(warnings).toContainText(/KQL/);
-  await expect(warnings).toContainText(/lookaround|lookahead/i);
-});
-
 test("Connections lists the supported query languages and no SIEM deploy blocks", async ({ page }) => {
   await page.goto("/connections");
   await expect(page.getByRole("heading", { name: "Supported query languages" })).toBeVisible();

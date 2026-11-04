@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import pytest
 
-from vitrix.regex_lab import RegexLabError, analyze, lint_pattern
+from vitrix.regex_lab import RegexLabError, analyze, lint_pattern, list_engines
 
 BS = chr(92)
 
@@ -61,59 +61,96 @@ def test_api_regex(monkeypatch):
     assert client.post("/api/regex", json={"pattern": "a", "flags": "q"}).status_code == 422
 
 
-# ---- U6: same engine as the evaluator + target flavor warnings -----------------------------
+
+# ---- U6: choose the regex engine -------------------------------------------------------------
+
+ENGINE_IDS = ["python-regex", "python-re", "re2", "pcre2"]
 
 
-def test_engine_is_the_evaluators_regex_package():
+def test_engine_list_has_versions_and_notes():
     import regex
 
+    engines = {e["id"]: e for e in list_engines()}
+    assert list(engines) == ENGINE_IDS
+    assert engines["python-regex"]["version"] == regex.__version__ and engines["python-regex"]["name"] == "Python regex (Vitrix evaluator)"
+    for e in engines.values():
+        assert set(e) == {"id", "name", "version", "available", "notes", "flags_supported"}
+        assert e["available"] is True and e["version"] and e["notes"] and e["flags_supported"] == ["i", "m", "s"]
+
+
+def test_default_engine_is_the_evaluators():
     out = analyze("abc", "", ["abc"])
-    assert out["engine"] == {"name": "Python regex (Vitrix evaluator)", "version": regex.__version__, "timeout_ms": 2000}
-    # regex-only syntax (possessive quantifier / atomic group) compiles here exactly as in the evaluator
-    assert analyze("a++b", "", ["aaab"])["results"][0]["matched"] is True
-    assert analyze(r"\p{Lu}+", "", ["ABc"])["results"][0]["matches"][0]["text"] == "AB"
+    assert out["engine"]["id"] == "python-regex" and out["engine"]["name"] == "Python regex (Vitrix evaluator)"
+    assert out["engine"]["timeout_ms"] == 2000 and out["engine"]["version"]
+    assert "flavor_warnings" not in out
+    assert analyze("a++b", "", ["aaab"])["results"][0]["matched"] is True  # regex-only syntax, as in the evaluator
 
 
-def _warn(pattern, targets, flags=""):
-    return analyze(pattern, flags, ["x"], targets=targets)["flavor_warnings"]
+@pytest.mark.parametrize("engine", ENGINE_IDS)
+def test_every_engine_matches_groups_and_flags(engine):
+    out = analyze(r"-(enc|x)\s+(?P<payload>\S+)", "i", ["powershell -ENC SQBF", "powershell -File"], engine=engine)
+    assert out["ok"] is True and out["engine"]["id"] == engine
+    first, second = out["results"]
+    assert first["matched"] is True and second["matched"] is False
+    m = first["matches"][0]
+    assert (m["start"], m["end"], m["text"]) == (11, 20, "-ENC SQBF")
+    assert m["groups"] == ["ENC", "SQBF"] and m["named"] == {"payload": "SQBF"}
+    assert out["names"] == ["payload"] and out["groups"] == 2
+    ml = analyze("^b$", "m", ["a\nb\nc"], engine=engine)
+    assert ml["results"][0]["matched"] is True
+    dot = analyze("a.b", "s", ["a\nb"], engine=engine)
+    assert dot["results"][0]["matched"] is True
+    assert analyze("a.b", "", ["a\nb"], engine=engine)["results"][0]["matched"] is False
 
 
-def test_flavor_warnings_per_target():
-    w = _warn(r"(?<=a)b(?!c)(\w)\1", ["splunk", "kql", "elastic-eql"])
-    assert not [x for x in w if x["target"] == "splunk"]
-    kql = [x for x in w if x["target"] == "kql"]
-    assert {x["flavor"] for x in kql} == {"RE2 (Kusto)"}
-    assert any("lookahead" in x["message"] for x in kql) and any("backreferences" in x["message"] for x in kql)
-    assert any(x["target"] == "elastic-eql" and "lookahead" in x["message"] for x in w)
-    assert any("atomic" in x["message"] for x in _warn("(?>a+)b", ["kql"]))
-    assert any("possessive" in x["message"] for x in _warn("a++b", ["kql"]))
-    assert any(r"\Z" in x["message"] for x in _warn(r"abc\Z", ["kql"]))
-    assert any("fixed length" in x["message"] for x in _warn(r"(?<=a+)b", ["splunk"]))
+@pytest.mark.parametrize("engine", ENGINE_IDS)
+def test_invalid_regex_is_the_engines_own_error(engine):
+    out = analyze("abc(", "", ["x"], engine=engine)
+    assert out["ok"] is False and out["error"] and out["engine"]["id"] == engine
+    if engine != "re2":  # RE2 reports no position
+        assert isinstance(out["position"], int)
 
 
-def test_flavor_warnings_clean_and_lucene_semantics():
-    assert _warn(r"^(?:cmd|powershell)\.exe$", ["splunk", "kql"]) == []
-    assert _warn("abc", []) == []
-    lucene = _warn(r"^cmd\d+$", ["elastic-lucene"])
-    assert any("anchors" in x["message"] for x in lucene) and any("shorthand" in x["message"] for x in lucene)
-    assert any("implicitly anchored" in x["message"] for x in _warn("cmd", ["elastic-eql"]))
-    assert not any("implicitly" in x["message"] for x in _warn(".*cmd.*", ["elastic-eql"]))
-    assert _warn("a", ["nosuchtarget"]) == []
-    assert _warn(r"C:\\1", ["kql"]) == []  # an escaped backslash followed by 1 is not a backreference
-    assert any("backreferences" in x["message"] for x in _warn(r"(a)\1", ["kql"]))
+def test_re2_rejects_lookaround_and_backreferences_with_its_own_message():
+    look = analyze("(?<=a)b", "", ["ab"], engine="re2")
+    assert look["ok"] is False and "invalid perl operator" in look["error"]
+    back = analyze(r"(a)\1", "", ["aa"], engine="re2")
+    assert back["ok"] is False and "invalid escape sequence" in back["error"]
+    # the backtracking engines accept both
+    for engine in ("python-regex", "python-re", "pcre2"):
+        assert analyze("(?<=a)b", "", ["ab"], engine=engine)["results"][0]["matched"] is True
+        assert analyze(r"(a)\1", "", ["aa"], engine=engine)["results"][0]["matched"] is True
 
 
-def test_regex_endpoint_defaults_to_configured_targets(tmp_path, monkeypatch):
+@pytest.mark.parametrize("engine", ["python-regex", "python-re", "pcre2"])
+def test_catastrophic_backtracking_times_out_per_engine(engine):
+    out = analyze("(a|aa)+$", "", ["a" * 60 + "!"], timeout=1.0, engine=engine)
+    assert out["timeout"] is True and out["ok"] is False and out["engine"]["id"] == engine
+
+
+def test_re2_is_linear_on_the_same_pattern():
+    out = analyze("(a|aa)+$", "", ["a" * 5000 + "!"], timeout=5.0, engine="re2")
+    assert out["ok"] is True and out["timeout"] is False and out["results"][0]["matched"] is False
+
+
+def test_unknown_engine_and_unknown_flag_are_rejected():
+    with pytest.raises(RegexLabError):
+        analyze("a", "", [], engine="perl5")
+    with pytest.raises(RegexLabError):
+        analyze("a", "x", [], engine="re2")
+
+
+def test_engines_endpoint_and_engine_parameter(tmp_path, monkeypatch):
     from fastapi.testclient import TestClient
     from test_engine import make_project
 
     from vitrix.api import create_app
 
-    cfg_path = make_project(tmp_path)
     monkeypatch.setenv("VITRIX_AUTH", "off")
-    client = TestClient(create_app(cfg_path))
-    body = client.post("/api/regex", json={"pattern": "(?=a)a", "samples": ["a"]}).json()
-    assert body["engine"]["name"].startswith("Python regex")
-    assert {x["target"] for x in body["flavor_warnings"]} >= {"kql"}
-    only = client.post("/api/regex", json={"pattern": "(?=a)a", "targets": ["splunk"]}).json()
-    assert only["flavor_warnings"] == []
+    client = TestClient(create_app(make_project(tmp_path)))
+    engines = client.get("/api/regex/engines").json()
+    assert [e["id"] for e in engines] == ENGINE_IDS and all(e["available"] for e in engines)
+    body = client.post("/api/regex", json={"pattern": "(?=a)a", "samples": ["a"], "engine": "re2"}).json()
+    assert body["ok"] is False and body["engine"]["id"] == "re2"
+    assert client.post("/api/regex", json={"pattern": "a", "engine": "nope"}).status_code == 422
+    assert client.post("/api/regex", json={"pattern": "a", "samples": ["a"]}).json()["engine"]["id"] == "python-regex"
