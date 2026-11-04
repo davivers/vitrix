@@ -256,7 +256,10 @@ def _inside(root: Path, key: str, value: str) -> str:
         (root / value).resolve().relative_to(root.resolve())
     except (ValueError, OSError):
         raise ConfigError(f"'{key}' must be a folder inside the project, not {value!r}") from None
-    if Path(value).is_absolute() or Path(value).drive:
+    # Checked the same way on every OS: vitrix.yml is shared between Windows and Linux machines/CI, and on
+    # Linux "C:/x" or "\\\\server\\share" would otherwise pass as ordinary relative folder names.
+    windows_absolute = re.match(r"^[A-Za-z]:", value) or value.startswith(("\\", "/"))
+    if Path(value).is_absolute() or Path(value).drive or windows_absolute:
         raise ConfigError(f"'{key}' must be a relative folder inside the project, not {value!r}")
     return value
 
