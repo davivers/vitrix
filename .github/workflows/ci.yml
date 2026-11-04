@@ -88,7 +88,12 @@ jobs:
           vitrix serve --port 8123 &
           for i in $(seq 1 30); do curl -sf http://127.0.0.1:8123/api/health && break; sleep 1; done
           curl -sf http://127.0.0.1:8123/ | grep -q '<div id="root">'
-          curl -sf http://127.0.0.1:8123/api/quality | grep -q '"ready":true'
+          # Accounts are on by default: anonymous calls are refused, the first (loopback) account becomes the owner.
+          test "$(curl -s -o /dev/null -w '%{http_code}' http://127.0.0.1:8123/api/quality)" = 401
+          curl -sf -c jar -H 'Content-Type: application/json' \
+            -d '{"email":"owner@example.com","name":"CI owner","password":"ci-owner-password-123"}' \
+            http://127.0.0.1:8123/api/auth/register > /dev/null
+          curl -sf -b jar http://127.0.0.1:8123/api/quality | grep -q '"ready":true'
 
   # The Docker image: builds from the committed UI, then runs the lifecycle inside the container
   # exactly as a user with a mounted detections repository would.
