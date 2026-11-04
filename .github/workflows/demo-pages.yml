@@ -27,7 +27,7 @@ jobs:
           node-version: 22
           cache: npm
           cache-dependency-path: web/package-lock.json
-      - run: pip install -e ".[api]"
+      - run: pip install -e ".[api]" "httpx>=0.27" "httpx2>=2.16"
       - name: Capture fixtures from the real app
         run: python scripts/capture_demo_fixtures.py
       - name: Build the demo UI

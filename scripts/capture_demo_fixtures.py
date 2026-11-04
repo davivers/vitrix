@@ -16,6 +16,7 @@ import argparse
 import hashlib
 import json
 import os
+import re
 import shutil
 import subprocess
 import sys
@@ -58,6 +59,37 @@ def seg(path: str) -> str:
     return "/".join(quote(p, safe="") for p in path.split("/"))  # same as api.ts `path()`
 
 
+HIDDEN_QUERY = "-- converted queries are not shown in the public demo --"
+_EMAIL = re.compile(r"[\w.+-]+@[\w-]+(\.[\w-]+)+")
+
+
+def scrub(value: object, tmp: Path) -> object:
+    """Strip anything environment-specific or query-like before it reaches the public demo:
+    converted queries, the vitrix.yml text, absolute paths of the capture machine and e-mail addresses."""
+    roots = {str(tmp), str(tmp.resolve()), str(tmp).replace("\\", "/"), str(tmp.resolve()).replace("\\", "/")}
+    if isinstance(value, dict):
+        out = {}
+        for k, v in value.items():
+            if k in ("query", "queries") and isinstance(v, str):
+                out[k] = HIDDEN_QUERY
+            elif k == "text" and isinstance(v, str) and "schema_version" in v:  # the vitrix.yml shown in Settings
+                out[k] = "# vitrix.yml is not shown in the public demo\n"
+            elif k == "file" and isinstance(v, str) and Path(v).is_absolute():
+                out[k] = "vitrix.yml"
+            elif k == "publication" and isinstance(v, dict):  # the sample rules stand for a repo already on GitHub
+                out[k] = {**{kk: None for kk in v}, "state": "published"}
+            else:
+                out[k] = scrub(v, tmp)
+        return out
+    if isinstance(value, list):
+        return [scrub(v, tmp) for v in value]
+    if isinstance(value, str):
+        for root in roots:
+            value = value.replace(root, "<repo>")
+        return _EMAIL.sub("someone@example.com", value)
+    return value
+
+
 def main_() -> int:
     ap = argparse.ArgumentParser()
     ap.add_argument("--out", type=Path, default=DEFAULT_OUT)
@@ -85,6 +117,7 @@ def main_() -> int:
 
         def save(key: str, body: object) -> None:
             name = f"{len(routes) + 1:04d}.json"
+            body = scrub(body, tmp)  # public demo: no queries, paths, identities or config text
             (out / name).write_text(json.dumps(body, ensure_ascii=False), encoding="utf-8")
             routes[key] = name
 
@@ -100,9 +133,15 @@ def main_() -> int:
 
         readonly = {"enabled": False, "reason": DEMO_REASON}
         for url in ("/api/auth/config", "/api/health", "/api/config", "/api/targets", "/api/stats", "/api/quality",
-                    "/api/tests", "/api/coverage", "/api/history", "/api/datasets", "/api/replay/datasets",
-                    "/api/github", "/api/github/activity", "/api/drift"):
+                    "/api/tests", "/api/coverage", "/api/datasets", "/api/replay/datasets"):
             get(url)
+        # Environment-specific data never goes into the public demo: Git history (names, e-mails), GitHub
+        # connection state and drift (git refs) are replaced by an explicit "not in the demo" state.
+        hidden = {"available": False, "state": "demo", "message": DEMO_REASON, "reason": DEMO_REASON}
+        get("/api/history", lambda _b: {**hidden, "rules": [], "commits": [], "contributors": [], "coverage": []}, required=False)
+        get("/api/github", lambda _b: {"configured": False, "reason": DEMO_REASON}, required=False)
+        get("/api/github/activity", lambda _b: {"configured": False, "reason": DEMO_REASON}, required=False)
+        get("/api/drift", lambda _b: {**hidden, "rules": [], "datasets": [], "summary": {}}, required=False)
         get("/api/drafts", lambda _b: {**readonly, "drafts": []})
         # Sprint 2 routes that may not exist yet: optional, always rewritten to disabled.
         get("/api/reviews", lambda _b: {**readonly, "reviews": []}, required=False)
