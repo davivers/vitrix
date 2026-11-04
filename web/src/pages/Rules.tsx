@@ -3,6 +3,7 @@ import { CheckCircle2, ChevronDown, Download, GitCompare, Plus, Search, XCircle 
 import { useEffect, useMemo, useRef, useState } from "react";
 import { Link, useNavigate, useSearchParams } from "react-router-dom";
 import { DEMO, api } from "../api";
+import { HintText } from "../components/Issues";
 import { DriftBadge, count, driftErrorMessage } from "../components/Drift";
 import { HealthMeter, StatTile, pct, timeAgo } from "../components/dash";
 import { FlowFunnel } from "../components/flow";
@@ -292,6 +293,11 @@ export default function RulesPage() {
                   <td className="px-4 py-3 text-xs text-muted">{g?.age_days !== null && g?.age_days !== undefined ? timeAgo(new Date(Date.now() - g.age_days * 86400000).toISOString()) : "—"}</td>
                   <td className="px-4 py-3">
                     <StateBadge state={r.state} />
+                    {r.state !== "ok" && r.issues[0] && (
+                      <span className="mt-1 block max-w-[240px] text-xs text-muted" title={r.issues.map((i) => `${i.message}${i.hint ? ` — ${i.hint}` : ""}`).join(" | ")}>
+                        {r.issues[0].hint ? <HintText text={r.issues[0].hint} /> : r.issues[0].message}
+                      </span>
+                    )}
                   </td>
                   {driftOn && (
                     <td className="whitespace-nowrap px-4 py-3">

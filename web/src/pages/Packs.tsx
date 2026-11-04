@@ -120,22 +120,8 @@ export default function PacksPage() {
           <Card className="mb-5 p-5">
             <form onSubmit={onPreview} className="space-y-4">
               <div className="grid gap-4 sm:grid-cols-3">
-                <label className="block space-y-1">
-                  <span className="text-[13px] font-medium text-strong">{t("pk_source")}</span>
-                  <select className={inputCls} disabled aria-label={t("pk_source")} value={src?.id ?? "sigmahq"} onChange={() => undefined}>
-                    <option value={src?.id ?? "sigmahq"}>{src ? `${src.name} (${src.license})` : "SigmaHQ"}</option>
-                  </select>
-                </label>
-                <label className="block space-y-1">
-                  <span className="text-[13px] font-medium text-strong">{t("pk_ref")}</span>
-                  <select className={inputCls} value={ref} onChange={(e) => setRef(e.target.value)}>
-                    {(src?.refs ?? ["master"]).map((r) => (
-                      <option key={r} value={r}>
-                        {r}
-                      </option>
-                    ))}
-                  </select>
-                </label>
+                <Picker label={t("pk_source")} value={src?.id ?? "sigmahq"} onChange={() => undefined} options={(sources.data?.sources ?? []).map((x) => [x.id, `${x.name} (${x.license})`] as const)} fallback="SigmaHQ" />
+                <Picker label={t("pk_ref")} value={ref || (src?.refs[0] ?? "master")} onChange={setRef} options={(src?.refs ?? ["master"]).map((r) => [r, r] as const)} fallback="master" />
                 <label className="block space-y-1">
                   <span className="text-[13px] font-medium text-strong">{t("pk_limit")}</span>
                   <input type="number" min={1} max={max} value={limit} onChange={(e) => setLimit(Math.max(1, Math.min(max, Number(e.target.value) || 1)))} className={inputCls} />
@@ -289,6 +275,32 @@ export default function PacksPage() {
               )}
             </Card>
           )}
+        </>
+      )}
+    </div>
+  );
+}
+
+/** A real <select> only when there is a choice; a single option is plain text (no dead dropdown arrow). */
+function Picker(props: { label: string; value: string; onChange: (v: string) => void; options: (readonly [string, string])[]; fallback: string }) {
+  const { label, value, onChange, options, fallback } = props;
+  return (
+    <div className="block space-y-1">
+      {options.length > 1 ? (
+        <label className="block space-y-1">
+          <span className="text-[13px] font-medium text-strong">{label}</span>
+          <select className={inputCls} value={value} onChange={(e) => onChange(e.target.value)}>
+            {options.map(([v, text]) => (
+              <option key={v} value={v}>
+                {text}
+              </option>
+            ))}
+          </select>
+        </label>
+      ) : (
+        <>
+          <span className="block text-[13px] font-medium text-strong">{label}</span>
+          <p className="py-2 text-sm text-text">{options[0]?.[1] ?? fallback}</p>
         </>
       )}
     </div>

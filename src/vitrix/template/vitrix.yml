@@ -34,7 +34,7 @@ require_cases: true
 quality_gate:
   min_positive: 1
   min_negative: 1
-  false_positive_levels: [high, critical]   # these levels require a kind: false_positive case
+  # false_positive_levels: [critical]      # opt-in: these levels require a kind: false_positive case (off by default)
   require_filter_test: true                 # a rule with filter_* needs a case proving the exclusion
   require_mitre: true
   allow_warnings: true                      # false: any lint warning blocks
@@ -56,15 +56,29 @@ quality_gate:
 # The token is NEVER read from this file: `gh auth login`, or VITRIX_GITHUB_TOKEN in the environment.
 
 # Accounts: several people in one workspace (one workspace = this repository).
-# Off by default (single local user). The first account to register becomes the owner;
-# after that people can join ONLY by invitation (no open sign-up).
+# ON by default: the first screen asks you to create the owner; after that people can join ONLY by
+# invitation (no open sign-up). To run without accounts (single local user) set `enabled: false`
+# or start the server with VITRIX_AUTH=off. Served on a non-local address (--host 0.0.0.0), the
+# first account also needs a setup token, printed in the server log.
 # GitHub sign-in needs a GitHub OAuth app: set VITRIX_GITHUB_CLIENT_ID and
 # VITRIX_GITHUB_CLIENT_SECRET (callback: <public url>/api/auth/github/callback).
 # auth:
-#   enabled: true
+#   enabled: true      # false = no accounts (localhost only)
 #   session_days: 14
 #   github_login: true
 #   workspace_name: Detection workspace
+
+# KQL needs a table. The Kusto backend infers it from the logsource category or the EventID; for
+# rules it cannot place (e.g. product: windows, service: system) Vitrix uses, in this order:
+#   1. the rule's own `vitrix: {kql_table: Event}`
+#   2. the mapping below, keyed `product/service` or `product/category`
+#   3. built-in defaults (windows/security -> SecurityEvent, windows/system|application|powershell -> Event, linux/* -> Syslog, ...)
+#   4. default_table
+# With none of these, KQL fails only for rules whose final language is KQL (others show a preview warning).
+# kql:
+#   tables:
+#     windows/system: Event
+#   default_table: Event
 
 # Local drafts: "Save draft" in the Editor keeps unfinished rules in .vitrix/drafts.db (never in
 # rules/). Without accounts they work only for a browser on this machine with a localhost-only server.

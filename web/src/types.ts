@@ -6,9 +6,18 @@ export type State = "ok" | "warn" | "fail";
 // How the final language was chosen: in the rule, a vitrix.yml route, default_target or "all targets".
 export type TargetSource = "rule" | "route" | "default" | "all" | "override";
 
+/** Contract B3: where (path/line/column) and how to fix (hint, snippet). All new fields are optional. */
 export interface LintIssue {
   severity: "error" | "warning";
   message: string;
+  rule?: string;
+  file?: string | null; // "rule" | "cases": which editor tab the line refers to
+  code?: string;
+  path?: string | null;
+  line?: number | null; // 1-based
+  column?: number | null; // 1-based
+  hint?: string | null;
+  fix?: { replace_path?: string; snippet?: string } | null;
 }
 
 export interface RuleSummary {
@@ -35,6 +44,7 @@ export interface RuleSummary {
 
 export interface Conversion {
   ok: boolean;
+  issues?: LintIssue[];
   label: string;
   extension?: string;
   query?: string;
@@ -204,6 +214,10 @@ export interface Target {
 
 export interface ConfigView {
   path: string | null;
+  file?: string | null; // absolute path of the vitrix.yml in use (B4)
+  loaded_at?: string | number | null; // hot reload (B4)
+  reload_error?: string | null; // the last reload failed; the previous config stays active
+  restart_required?: string[]; // changed keys that only apply after a restart
   text: string;
   targets: string[];
   default_target: string | null;

@@ -15,11 +15,11 @@ from pathlib import Path
 import yaml
 
 from . import routing
-from .backends import available_targets, convert_text, load_extra_pipelines
+from .backends import ConversionError, available_targets, convert_text, load_extra_pipelines
 from .cases import CaseResult, cases_path, parse_cases, run_cases, run_rule_cases
 from .config import Config, ConfigError, parse_config_text
 from .github import GitHubClient, GitHubConfig, GitHubError, branch_slug
-from .lint import Issue, lint_doc, lint_files
+from .lint import Issue, Locator, lint_doc, lint_files
 from .loader import RULE_SUFFIXES, RuleFile, RuleLoadError, find_rule_files, load_rule
 
 # MITRE ATT&CK tactics with the slug used in Sigma tags (attack.<slug>).
@@ -57,12 +57,21 @@ class ServiceError(Exception):
 
 
 def _issue(i: Issue) -> dict:
-    return {"severity": i.severity, "message": i.message}
+    return i.to_dict()
+
+
+def yaml_error_issue(exc: yaml.YAMLError, rel: str = "<editor>") -> Issue:
+    """The Issue for a YAML syntax error, located at the parser's mark."""
+    mark = getattr(exc, "problem_mark", None)
+    problem = getattr(exc, "problem", None) or str(exc)
+    return Issue("error", rel, f"invalid YAML: {exc}", "invalid-yaml", None, mark.line + 1 if mark else None, mark.column + 1 if mark else None,
+                 f"The YAML cannot be parsed ({problem}). Check indentation (spaces, no tabs), a `:` after each key, and quote values that "
+                 "contain `: `, `#` or start with `*`, `&`, `%` or `@` (single quotes keep backslashes literal, e.g. `'C:\\Windows'`).")
 
 
 def _case(r: CaseResult) -> dict:
     return {"name": r.name, "expect": r.expect, "got": r.got, "passed": r.passed, "error": r.error,
-            "kind": r.kind, "exercises_filter": r.exercises_filter, "event": r.event}
+            "kind": r.kind, "exercises_filter": r.exercises_filter, "event": r.event, "hint": r.hint}
 
 
 def _state(issues: list[Issue], results: list[CaseResult], conversion_failed: bool = False) -> str:
@@ -123,7 +132,7 @@ def resolve_rule(cfg: Config, rid: str) -> Path | None:
     return candidate
 
 
-def convert_all(text: str, target_names: list[str], extra: list) -> dict:
+def convert_all(text: str, target_names: list[str], extra: list, kql: object = None) -> dict:
     registry = available_targets()
     out: dict[str, dict] = {}
     for name in target_names:
@@ -133,7 +142,9 @@ def convert_all(text: str, target_names: list[str], extra: list) -> dict:
             continue
         try:
             out[name] = {"ok": True, "label": target.label, "extension": target.extension,
-                         "query": convert_text(text, target, extra)}
+                         "query": convert_text(text, target, extra, kql)}
+        except ConversionError as exc:  # actionable: what is missing, where, and the YAML to add
+            out[name] = {"ok": False, "label": target.label, "error": str(exc), **exc.details()}
         except Exception as exc:  # pySigma and third-party plugin errors
             message = " ".join(str(exc).split()) or type(exc).__name__
             out[name] = {"ok": False, "label": target.label, "error": f"{type(exc).__name__}: {message}"}
@@ -156,11 +167,12 @@ def _top_issues(issues: list[Issue], problems: list[Issue], results: list[CaseRe
     found: list[dict] = []
     for c in conv.values():
         if not c["ok"]:
-            found.append({"severity": "error", "message": f"conversion failed ({c['label']}): {c.get('error', '')}"})
+            found.append({"severity": "error", "message": f"conversion failed ({c['label']}): {c.get('error', '')}",
+                          "code": c.get("code") or "conversion-failed", "hint": c.get("hint")})
     for r in results:
         if not r.passed:
             detail = r.error or f"expected {r.expect}, got {r.got}"
-            found.append({"severity": "error", "message": f"case “{r.name}”: {detail}"})
+            found.append({"severity": "error", "message": f"case “{r.name}”: {detail}", "code": "case-failed", "hint": r.hint})
     found.extend(_issue(i) for i in [*issues, *problems])
     found.sort(key=lambda i: i["severity"] != "error")
     return found[:limit]
@@ -185,7 +197,7 @@ def list_rules(cfg: Config) -> list[dict]:
         results, problems = run_rule_cases(cfg, rf)
         doc = routing.first_detection(rf.docs)
         chosen = routing.resolve(cfg, rule_id(cfg, rf.path), doc)
-        conv = convert_all(rf.text, chosen.targets, extra)
+        conv = convert_all(rf.text, chosen.targets, extra, cfg.kql)
         ls = doc.get("logsource") if isinstance(doc, dict) and isinstance(doc.get("logsource"), dict) else {}
         out.append({
             "issues": _top_issues(issues, problems, results, conv),
@@ -207,7 +219,7 @@ def list_rules(cfg: Config) -> list[dict]:
         out.append({
             "id": rel, "file": rel, "sigma_id": "", "title": rel, "status": None, "level": None, "description": "",
             "tags": [], "tactics": [], "techniques": [], "logsource": None, "targets": [], "target_source": None, "conversion": {},
-            "state": "fail", "error": message, "issues": [{"severity": "error", "message": message}],
+            "state": "fail", "error": message, "issues": [{"severity": "error", "message": message, "code": "invalid-yaml", "hint": "Fix the YAML syntax of this file (indentation, `:` after keys, quotes)."}],
             "lint": {"errors": 1, "warnings": 0}, "tests": {"total": 0, "passed": 0},
         })
     return sorted(out, key=lambda r: r["id"])
@@ -225,7 +237,7 @@ def rule_detail(cfg: Config, rid: str) -> dict:
             rf = load_rule(path, cfg)
         except RuleLoadError as exc:
             return {"id": rid, "file": cfg.rel(path), "text": path.read_text(encoding="utf-8"), "summary": summarize(None),
-                    "state": "fail", "lint": [{"severity": "error", "message": str(exc)}], "conversions": {}, "targets": [], "target_source": None,
+                    "state": "fail", "lint": [{"severity": "error", "message": str(exc), "code": "invalid-yaml", "hint": "Fix the YAML syntax of this file (indentation, `:` after keys, quotes)."}], "conversions": {}, "targets": [], "target_source": None,
                     "tests": {"cases_file": None, "cases_text": None, "results": [], "problems": []}}
         files.append(rf)
 
@@ -234,7 +246,7 @@ def rule_detail(cfg: Config, rid: str) -> dict:
     cpath = cases_path(cfg, rf)
     chosen = routing.resolve(cfg, rid, routing.first_detection(rf.docs))
     # the final language comes first; the other active targets are previews
-    conversions = convert_all(rf.text, list(dict.fromkeys([*chosen.targets, *cfg.targets])), _extra_pipelines(cfg))
+    conversions = convert_all(rf.text, list(dict.fromkeys([*chosen.targets, *cfg.targets])), _extra_pipelines(cfg), cfg.kql)
     conv_failed = any(not conversions[t]["ok"] for t in chosen.targets if t in conversions)
     return {
         "id": rid,
@@ -261,19 +273,21 @@ def validate_text(cfg: Config, text: str, cases_text: str | None = None, targets
     try:
         docs = [d for d in yaml.safe_load_all(text) if d is not None]
     except yaml.YAMLError as exc:
-        return {"state": "fail", "lint": [{"severity": "error", "message": f"invalid YAML: {exc}"}],
+        return {"state": "fail", "lint": [_issue(yaml_error_issue(exc))],
                 "conversions": {}, "tests": None, "targets": [], "target_source": None}
 
     issues: list[Issue] = []
     if not docs:
-        issues.append(Issue("error", rel, "empty document"))
-    for doc in docs:
-        issues.extend(lint_doc(doc, rel, set(available_targets())))
+        issues.append(Issue("error", rel, "empty document", "empty-file", None, 1, 1,
+                            "Write a Sigma rule: title, logsource and detection (see the Editor templates)."))
+    locators = Locator.for_text(text)
+    for idx, doc in enumerate(docs):
+        issues.extend(lint_doc(doc, rel, set(available_targets()), locators[idx] if len(locators) == len(docs) else None))
 
     chosen = routing.resolve(cfg, None, routing.first_detection(docs)) if docs else routing.Resolved(list(cfg.targets), "all")
     counted = list(targets) if targets else chosen.targets  # only the final language fails the rule
     names = list(dict.fromkeys([*counted, *([] if targets else cfg.targets)]))
-    conversions = convert_all(text, names, _extra_pipelines(cfg)) if docs else {}
+    conversions = convert_all(text, names, _extra_pipelines(cfg), cfg.kql) if docs else {}
 
     tests = None
     results: list[CaseResult] = []

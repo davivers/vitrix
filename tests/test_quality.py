@@ -202,8 +202,16 @@ def test_dataset_fora_da_pasta_nao_e_lido(tmp_path):
 # --------------------------------------------------------------------------- quality gate
 
 
-def test_gate_bloqueia_regra_high_sem_caso_de_falso_positivo(tmp_path):
+def test_high_rule_needs_no_false_positive_case_by_default(tmp_path):
     cfg = load_config(make_project(tmp_path, rule_text=RULE_OK.replace("level: medium", "level: high")))
+    rule = flow.quality_report(cfg)["rules"][0]
+    assert rule["ready"] is True, rule["blockers"]
+    assert not any(c["id"] == "false_positive_cases" for c in rule["checks"])  # not shown, no score cost
+
+
+def test_gate_bloqueia_regra_high_sem_caso_de_falso_positivo(tmp_path):
+    cfg = load_config(make_project(tmp_path, rule_text=RULE_OK.replace("level: medium", "level: high"),
+                                   extra_cfg="quality_gate:\n  false_positive_levels: [high]\n"))
     rule = flow.quality_report(cfg)["rules"][0]
     assert rule["ready"] is False
     assert any("False-positive" in b for b in rule["blockers"])

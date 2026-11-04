@@ -57,7 +57,7 @@ from . import drafts as drafts_mod
 from . import drift as drift_mod
 from . import replay as replay_mod
 from .backends import available_targets
-from .config import load_config
+from .config import ConfigHolder
 from .evaluator import regex_budget
 from .github import GitHubError
 from .replay import ReplayError
@@ -185,7 +185,8 @@ def _github_errors(fn):  # noqa: ANN001, ANN202
 
 
 def create_app(config_path: str | None = None) -> FastAPI:
-    cfg = load_config(config_path or os.environ.get("VITRIX_CONFIG"))
+    holder = ConfigHolder(config_path or os.environ.get("VITRIX_CONFIG"), debounce=float(os.environ.get("VITRIX_CONFIG_RELOAD_SECONDS", "1")))  # re-reads vitrix.yml when it changes
+    cfg = holder.live
     app = FastAPI(title="Vitrix API", version=__version__)
 
     origins = [o.strip() for o in os.environ.get("VITRIX_CORS_ORIGINS", "").split(",") if o.strip()]
@@ -195,7 +196,8 @@ def create_app(config_path: str | None = None) -> FastAPI:
     store = auth.AuthStore(cfg.data_dir / "vitrix.db", cfg.auth) if cfg.auth.enabled and cfg.data_dir else None
     oauth = auth_api.github_oauth_from_env() if store is not None and cfg.auth.github_login else None
     setup_token = auth_api.setup_token_for(cfg) if store is not None else None
-    if setup_token and cfg.auth.bootstrap_token == "auto" and store is not None and store.user_count() == 0:  # nosec B105
+    auto_generated = bool(setup_token) and (cfg.auth.bootstrap_token or "auto") == "auto"
+    if setup_token and auto_generated and store is not None and store.user_count() == 0:  # nosec B105
         auth_api.announce_setup_token(setup_token, os.environ.get("VITRIX_PUBLIC_URL") or os.environ.get("VITRIX_SERVE_URL") or "http://localhost:8000")
 
     @app.middleware("http")
@@ -207,7 +209,8 @@ def create_app(config_path: str | None = None) -> FastAPI:
             denied = auth_api.authorize(store, request)  # sessions and roles; sets request.state.identity
             if denied is not None:
                 return denied
-        response = await call_next(request)
+        with holder.snapshot():  # one config version for the whole request
+            response = await call_next(request)
         response.headers.setdefault("X-Content-Type-Options", "nosniff")
         response.headers.setdefault("X-Frame-Options", "DENY")
         response.headers.setdefault("Referrer-Policy", "no-referrer")
@@ -228,7 +231,7 @@ def create_app(config_path: str | None = None) -> FastAPI:
 
     @app.get("/api/config")
     def config() -> dict:
-        return service.config_view(cfg)
+        return {**service.config_view(cfg), **holder.status()}
 
     @app.post("/api/config/validate")
     def config_validate(req: ConfigTextRequest) -> dict:

@@ -10,6 +10,7 @@ Decision order, from the most specific to the most general:
 
 from __future__ import annotations
 
+import re
 from dataclasses import dataclass
 from fnmatch import fnmatchcase
 from pathlib import Path
@@ -18,7 +19,7 @@ from .config import Config
 from .loader import RuleFile
 
 KEY = "vitrix"
-RULE_KEYS = {"target", "owner", "review_by", "suppressions"}  # governance keys: see governance.py
+RULE_KEYS = {"target", "owner", "review_by", "suppressions", "kql_table"}  # governance keys: see governance.py
 
 
 @dataclass(frozen=True)
@@ -56,6 +57,9 @@ def problems(doc: object) -> list[str]:
     out = [f"unknown key in '{KEY}': {k}" for k in block if k not in RULE_KEYS]
     if "target" in block and declared(doc) is None:
         out.append(f"'{KEY}.target' must be a target name or a non-empty list of names")
+    table = block.get("kql_table")
+    if "kql_table" in block and not (isinstance(table, str) and re.match(r"^[A-Za-z_][A-Za-z0-9_]{0,63}$", table.strip())):
+        out.append(f"'{KEY}.kql_table' must be a table name such as Event or SecurityEvent")
     return out
 
 

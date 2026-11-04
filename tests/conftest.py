@@ -19,4 +19,6 @@ def user_repo(tmp_path):
 
     repo = tmp_path / "my-detections"
     assert main(["init", str(repo)]) == 0
+    with (repo / "vitrix.yml").open("a", encoding="utf-8") as fh:  # accounts are ON by default; API tests act as one local user
+        fh.write("\nauth:\n  enabled: false\n")
     return repo / "vitrix.yml"

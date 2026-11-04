@@ -123,11 +123,12 @@ def evaluate_rule(
 
     # 3/4 · Analyze
     level = doc.get("level")
-    needs_fp = level in gate.false_positive_levels
-    fp = kinds.count("false_positive")
-    add("false_positive_cases", "analyze", 3,
-        f"False-positive case (required for level {', '.join(gate.false_positive_levels)})" if needs_fp else "False-positive case",
-        fp > 0, blocking=needs_fp, detail=f"{fp} false_positive case(s)" if fp else "add a case with kind: false_positive")
+    # Opt-in only (quality_gate.false_positive_levels, empty by default): a false-positive case is
+    # required just for the levels a team lists; otherwise the check is not shown and costs no score.
+    if level in gate.false_positive_levels:
+        fp = kinds.count("false_positive")
+        add("false_positive_cases", "analyze", 3, f"False-positive case (required for level {level})",
+            fp > 0, blocking=True, detail=f"{fp} false_positive case(s)" if fp else "add a case with kind: false_positive")
     add("falsepositives_doc", "analyze", 3, "False positives documented (falsepositives)", bool(doc.get("falsepositives")),
         blocking=False)
     if has_exclusions:

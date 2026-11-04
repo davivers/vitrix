@@ -1,6 +1,13 @@
 import { yaml } from "@codemirror/lang-yaml";
 import { HighlightStyle, syntaxHighlighting } from "@codemirror/language";
+import { lintGutter, setDiagnostics, type Diagnostic } from "@codemirror/lint";
+import type { EditorState } from "@codemirror/state";
 import { EditorView } from "@codemirror/view";
+import { HintText } from "./Issues";
+import type { LintIssue } from "../types";
+import { createElement } from "react";
+import { flushSync } from "react-dom";
+import { createRoot } from "react-dom/client";
 import { tags as t } from "@lezer/highlight";
 
 interface Palette {
@@ -88,5 +95,43 @@ function build(p: Palette) {
 
 /** YAML editor extensions for the current theme (create with useMemo keyed on the theme). */
 export function yamlExtensions(dark = false) {
-  return [yaml(), ...build(dark ? DARK : LIGHT), EditorView.lineWrapping];
+  return [yaml(), lintGutter(), ...build(dark ? DARK : LIGHT), EditorView.lineWrapping];
+}
+
+/** Offsets of an issue in the document (clamped: the text may have changed since the server validated it). */
+export function issueRange(state: EditorState, issue: LintIssue): { from: number; to: number } | null {
+  if (!issue.line || issue.line < 1) return null;
+  const line = state.doc.line(Math.min(issue.line, state.doc.lines));
+  const text = line.text;
+  const indent = text.length - text.trimStart().length;
+  let from = line.from + indent;
+  let to = line.to;
+  if (issue.column && issue.column >= 1) {
+    from = Math.min(line.from + issue.column - 1, line.to);
+    const word = /^\S+/.exec(text.slice(from - line.from));
+    to = word ? from + word[0].length : Math.min(from + 1, line.to);
+  }
+  return { from, to: Math.max(to, Math.min(from + 1, state.doc.length)) };
+}
+
+/** Paints server issues as gutter markers + underline; the tooltip shows the message and the hint. */
+export function paintIssues(view: EditorView, issues: LintIssue[]) {
+  const diags: Diagnostic[] = [];
+  for (const issue of issues) {
+    const r = issueRange(view.state, issue);
+    if (!r) continue;
+    diags.push({
+      ...r,
+      severity: issue.severity,
+      message: issue.hint ? `${issue.message} ${issue.hint}` : issue.message,
+      renderMessage: () => {
+        const el = document.createElement("div");
+        el.className = "text-[13px]";
+        const root = createRoot(el);
+        flushSync(() => root.render(createElement("div", null, createElement("p", null, issue.message), issue.hint ? createElement("p", { className: "mt-1 opacity-80" }, createElement(HintText, { text: issue.hint })) : null)));
+        return el;
+      },
+    });
+  }
+  view.dispatch(setDiagnostics(view.state, diags));
 }

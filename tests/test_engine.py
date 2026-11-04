@@ -209,6 +209,8 @@ cases:
 
 
 def make_project(tmp_path: Path, rule_text: str | None = RULE_OK, cases_text: str | None = CASES_OK, extra_cfg: str = "") -> str:
+    if "auth:" not in extra_cfg:  # accounts are ON by default; most tests drive the API as one local user
+        extra_cfg += ("" if not extra_cfg or extra_cfg.endswith("\n") else "\n") + "auth:\n  enabled: false\n"
     (tmp_path / "vitrix.yml").write_text(
         "schema_version: 1\ntargets: [splunk, kql, elastic-eql]\n" + extra_cfg, encoding="utf-8"
     )

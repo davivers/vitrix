@@ -227,7 +227,7 @@ def test_everything_except_the_public_routes_needs_a_session(tmp_path):
 def test_auth_off_keeps_the_local_mode_unchanged(tmp_path):
     c = make_client(tmp_path, extra="")
     assert c.get("/api/rules").status_code == 200
-    assert c.get("/api/auth/config").json() == {"enabled": False, "enabled_source": "default", "setup_token_required": False}
+    assert c.get("/api/auth/config").json() == {"enabled": False, "enabled_source": "config", "setup_token_required": False}
     assert c.get("/api/auth/me").json()["authenticated"] is True
     assert c.post("/api/auth/login", json={"email": "a@b.co", "password": "x"}).status_code in (404, 405)
 
@@ -526,8 +526,8 @@ def _cfg(tmp_path, extra=""):
 
 def test_env_beats_file_beats_default(tmp_path, monkeypatch, capsys):
     monkeypatch.delenv("VITRIX_AUTH", raising=False)
-    assert _cfg(_d(tmp_path, "a")).auth.enabled is False
-    assert _cfg(_d(tmp_path, "a2")).auth.enabled_source == "default"
+    assert load_config(_raw_project(_d(tmp_path, "a"), "auth:\n  enabled: false\n")).auth.enabled is False
+    assert load_config(_raw_project(_d(tmp_path, "a2"))).auth.enabled_source == "default"
     assert _cfg(_d(tmp_path, "b"), AUTH_ON).auth.enabled_source == "config"
     monkeypatch.setenv("VITRIX_AUTH", "ON")
     c = _cfg(_d(tmp_path, "c"))
@@ -700,3 +700,105 @@ def test_new_routes_are_allowed_and_denied_by_role_at_the_middleware(tmp_path):
             resp = person.request(method, path, json=body)
             denied = resp.status_code == 403 and resp.json()["detail"].startswith("This needs the")
             assert denied == (auth.ROLE_LEVEL[role] < auth.ROLE_LEVEL[need]), (method, path, role, resp.status_code)
+
+
+# --------------------------------------------------------------------------- B1: accounts ON by default
+
+
+def _raw_project(tmp_path, auth_block=""):
+    (tmp_path / "rules").mkdir(exist_ok=True)
+    (tmp_path / "vitrix.yml").write_text("schema_version: 1\ntargets: [splunk]\n" + auth_block, encoding="utf-8")
+    return str(tmp_path / "vitrix.yml")
+
+
+def test_accounts_are_on_when_there_is_no_auth_section(tmp_path, monkeypatch):
+    monkeypatch.delenv("VITRIX_AUTH", raising=False)
+    c = TestClient(create_app(_raw_project(tmp_path)), base_url="http://127.0.0.1:8000")
+    cfg = c.get("/api/auth/config").json()
+    assert cfg["enabled"] is True and cfg["enabled_source"] == "default" and cfg["bootstrap"] is True
+    assert c.get("/api/rules").status_code == 401
+    assert c.get("/api/auth/me").json()["authenticated"] is False
+    assert register(c).status_code == 201  # plain local serve: no setup token needed
+
+
+def test_explicit_opt_out_keeps_the_app_open(tmp_path, monkeypatch):
+    monkeypatch.delenv("VITRIX_AUTH", raising=False)
+    c = TestClient(create_app(_raw_project(tmp_path, "auth:\n  enabled: false\n")), base_url="http://127.0.0.1:8000")
+    assert c.get("/api/auth/config").json()["enabled"] is False
+    assert c.get("/api/rules").status_code == 200
+    monkeypatch.setenv("VITRIX_AUTH", "off")
+    d = TestClient(create_app(_raw_project(_d(tmp_path, "env"))), base_url="http://127.0.0.1:8000")
+    assert d.get("/api/rules").status_code == 200
+
+
+def test_serve_on_a_network_address_marks_the_server_exposed(tmp_path, monkeypatch):
+    import argparse
+    import os
+    import sys
+    import types
+
+    from vitrix import cli
+
+    seen = {}
+    monkeypatch.setattr(os, "environ", dict(os.environ))  # cmd_serve writes env vars: keep them out of other tests
+    monkeypatch.setitem(sys.modules, "uvicorn", types.SimpleNamespace(run=lambda *a, **k: seen.update(token=os.environ.get("VITRIX_EXPOSED"))))
+    monkeypatch.delenv("VITRIX_BOOTSTRAP_TOKEN", raising=False)
+    monkeypatch.delenv("VITRIX_AUTH", raising=False)
+    monkeypatch.setenv("VITRIX_ALLOWED_HOSTS", "x.example")
+    cfg = load_config(_raw_project(tmp_path))
+    for host, expected in (("127.0.0.1", None), ("0.0.0.0", "1")):  # noqa: S104
+        seen.clear()
+        monkeypatch.delenv("VITRIX_EXPOSED", raising=False)
+        cli.cmd_serve(cfg, argparse.Namespace(config=None, host=host, port=8000))
+        assert seen["token"] == expected
+
+
+# --------------------------------------------------------------------------- S3-1: no-token bootstrap only for a direct local client
+
+
+def _boot_client(tmp_path, monkeypatch, client=("127.0.0.1", 50000), **env):
+    for k in ("VITRIX_AUTH", "VITRIX_BOOTSTRAP_TOKEN", "VITRIX_PUBLIC_URL", "VITRIX_TRUST_PROXY", "VITRIX_EXPOSED"):
+        monkeypatch.delenv(k, raising=False)
+    for k, v in env.items():
+        monkeypatch.setenv(k, v)
+    return TestClient(create_app(_raw_project(tmp_path)), base_url="http://127.0.0.1:8000", client=client)
+
+
+def test_direct_loopback_client_can_create_the_owner_without_a_token(tmp_path, monkeypatch):
+    c = _boot_client(tmp_path, monkeypatch)
+    assert c.get("/api/auth/config").json()["setup_token_required"] is False
+    assert register(c).status_code == 201
+
+
+@pytest.mark.parametrize("header", ["X-Forwarded-For", "X-Forwarded-Host", "X-Forwarded-Proto", "X-Real-IP", "Forwarded", "Via"])
+def test_proxied_loopback_client_cannot_claim_the_owner(tmp_path, monkeypatch, header):
+    c = _boot_client(tmp_path, monkeypatch)
+    h = {header: "198.51.100.7"}
+    assert c.get("/api/auth/config", headers=h).json()["setup_token_required"] is True
+    r = c.post("/api/auth/register", json={"email": "o@example.com", "name": "O", "password": PW}, headers=h)
+    assert r.status_code == 403 and "VITRIX_BOOTSTRAP_TOKEN" in r.json()["detail"]
+    assert c.get("/api/auth/config").json()["bootstrap"] is True  # nothing was created
+    assert register(c).status_code == 201  # the same server still lets the local operator in
+
+
+def test_remote_client_cannot_claim_the_owner(tmp_path, monkeypatch):
+    c = _boot_client(tmp_path, monkeypatch, client=("203.0.113.9", 4000))
+    assert c.get("/api/auth/config").json()["setup_token_required"] is True
+    assert register(c).status_code == 403
+
+
+@pytest.mark.parametrize("env", [{"VITRIX_PUBLIC_URL": "https://vitrix.example.com"}, {"VITRIX_TRUST_PROXY": "1"},
+                                 {"VITRIX_EXPOSED": "1"}, {"VITRIX_ALLOWED_HOSTS": "vitrix.example.com"}])
+def test_exposed_conditions_generate_an_auto_token_without_cmd_serve(tmp_path, monkeypatch, env):
+    """uvicorn vitrix.api:create_app directly follows the same rule as `vitrix serve`."""
+    c = _boot_client(tmp_path, monkeypatch, **env)
+    token = c.app.state.setup_token
+    assert token and len(token) >= 24
+    assert c.get("/api/auth/config").json()["setup_token_required"] is True
+    assert register(c).status_code == 403
+    assert _first(c, token).status_code == 201
+
+
+def test_plain_local_create_app_has_no_token(tmp_path, monkeypatch):
+    monkeypatch.setenv("VITRIX_ALLOWED_HOSTS", "testserver")
+    assert _boot_client(tmp_path, monkeypatch, VITRIX_ALLOWED_HOSTS="testserver").app.state.setup_token is None

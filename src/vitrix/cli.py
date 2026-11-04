@@ -77,7 +77,7 @@ def run_convert(cfg: Config, files: list[RuleFile], override: list[str] | None =
                 results.append(ConvertResult(rf.rel, name, False, f"unknown target: {name}"))
                 continue
             try:
-                results.append(ConvertResult(rf.rel, name, True, convert_text(rf.text, registry[name], extra)))
+                results.append(ConvertResult(rf.rel, name, True, convert_text(rf.text, registry[name], extra, cfg.kql)))
             except Exception as exc:  # pySigma and plugin backend errors
                 message = " ".join(str(exc).split()) or type(exc).__name__
                 results.append(ConvertResult(rf.rel, name, False, f"{type(exc).__name__}: {message}"))
@@ -142,7 +142,9 @@ def print_issues(issues: list[Issue]) -> None:
         if issue.rule != current:
             current = issue.rule
             print(current)
-        print(f"  {issue}")
+        print(f"  {issue}" + (f"  [{'cases ' if issue.file else ''}{issue.where()}]" if issue.where() else ""))
+        if issue.hint:
+            print(f"    hint: {issue.hint}")
 
 
 def lint_summary(files: list[RuleFile], issues: list[Issue]) -> str:
@@ -162,6 +164,8 @@ def print_cases(results: list[CaseResult], problems: list[Issue]) -> None:
         if not r.passed:
             detail = r.error or f"expected: {r.expect} · got: {r.got}"
             print(f"      {detail}")
+            if r.hint:
+                print(f"      hint: {r.hint}")
     if problems:
         print_issues(problems)
 
@@ -396,11 +400,16 @@ def cmd_serve(cfg: Config, args: argparse.Namespace) -> int:
     elif (cfg.root / "vitrix.yml").is_file():
         os.environ["VITRIX_CONFIG"] = str(cfg.root / "vitrix.yml")
     if args.host not in ("127.0.0.1", "localhost", "::1"):
-        print(
-            "warning: the API has no authentication. Outside localhost anyone on the network can read your rules and "
-            "push branches with your token. Only use it behind an authenticating proxy.",
-            file=sys.stderr,
-        )
+        os.environ["VITRIX_EXPOSED"] = "1"  # create_app then generates a setup token (auth_api.exposed)
+    if os.environ.get("VITRIX_EXPOSED") == "1":
+        if cfg.auth.enabled:
+            print("note: accounts are on; the first account needs the setup token printed below.", file=sys.stderr)
+        else:
+            print(
+                "warning: the API has no authentication. Outside localhost anyone on the network can read your rules and "
+                "push branches with your token. Only use it behind an authenticating proxy.",
+                file=sys.stderr,
+            )
         if not _is_unspecified(args.host):
             current = os.environ.get("VITRIX_ALLOWED_HOSTS", "")
             os.environ["VITRIX_ALLOWED_HOSTS"] = ",".join(filter(None, [current, args.host]))

@@ -771,7 +771,17 @@ const en = {
   "rv_owner": "Owner",
   "rv_review_by": "Review by",
   "rv_gov_hint": "Set in the rule's vitrix: block (owner, review_by).",
-  "rv_save_first": "Save this rule as a draft to discuss and review it."
+  "rv_save_first": "Save this rule as a draft to discuss and review it.",
+  "is_line": "line {n}",
+  "is_go_to": "Go to line {n}",
+  "is_how_to_fix": "How to fix:",
+  "is_copy_fix": "Copy fix",
+  "is_copied": "Copied",
+  "gc_not_required": "not required",
+  "st_file": "Configuration file",
+  "st_loaded": "loaded {when}",
+  "st_reload_error": "vitrix.yml has an error, so the previous configuration is still in use:",
+  "st_restart": "Restart vitrix serve to apply these changes: {keys}"
 } as const;
 
 export type Key = keyof typeof en;
@@ -1549,7 +1559,17 @@ const pt: Record<Key, string> = {
   "rv_owner": "Responsável",
   "rv_review_by": "Revisar até",
   "rv_gov_hint": "Definidos no bloco vitrix: da regra (owner, review_by).",
-  "rv_save_first": "Salve esta regra como rascunho para comentar e revisar."
+  "rv_save_first": "Salve esta regra como rascunho para comentar e revisar.",
+  "is_line": "linha {n}",
+  "is_go_to": "Ir para a linha {n}",
+  "is_how_to_fix": "Como corrigir:",
+  "is_copy_fix": "Copiar correção",
+  "is_copied": "Copiado",
+  "gc_not_required": "não exigido",
+  "st_file": "Arquivo de configuração",
+  "st_loaded": "carregado {when}",
+  "st_reload_error": "O vitrix.yml tem um erro; a configuração anterior continua em uso:",
+  "st_restart": "Reinicie o vitrix serve para aplicar estas mudanças: {keys}"
 };
 
 const dict: Record<Lang, Record<Key, string>> = { en, pt };

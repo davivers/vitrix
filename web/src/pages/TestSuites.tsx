@@ -1,3 +1,4 @@
+import { IssueList } from "../components/Issues";
 import { useQuery } from "@tanstack/react-query";
 import clsx from "clsx";
 import { AlertTriangle, CheckCircle2, ChevronRight, Play, Search, XCircle } from "lucide-react";
@@ -117,14 +118,9 @@ function RulePanel({ rule }: { rule: SuiteRule }) {
       </ul>
 
       {rule.problems.length > 0 && (
-        <ul className="space-y-1 border-t border-line px-4 py-3 text-[12.5px]">
-          {rule.problems.map((p, i) => (
-            <li key={i} className="flex gap-2">
-              {p.severity === "error" ? <XCircle size={14} className="mt-0.5 shrink-0 text-bad" aria-hidden /> : <AlertTriangle size={14} className="mt-0.5 shrink-0 text-warn" aria-hidden />}
-              <span className="text-text">{p.message}</span>
-            </li>
-          ))}
-        </ul>
+        <div className="border-t border-line px-4 py-3 text-[12.5px]">
+          <IssueList issues={rule.problems} />
+        </div>
       )}
     </Card>
   );

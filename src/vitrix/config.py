@@ -2,10 +2,17 @@
 
 from __future__ import annotations
 
+import contextlib
+import contextvars
+import dataclasses
 import os
+import re
 import sys
+import threading
+import time
 import warnings
 from dataclasses import dataclass, field
+from datetime import datetime, timezone
 from pathlib import Path
 
 import yaml
@@ -29,7 +36,7 @@ class GateConfig:
 
     min_positive: int = 1  # cases that must fire
     min_negative: int = 1  # cases that must not fire
-    false_positive_levels: list[str] = field(default_factory=lambda: ["high", "critical"])  # require a false_positive case
+    false_positive_levels: list[str] = field(default_factory=list)  # opt-in: levels that require a false_positive case
     require_filter_test: bool = True  # a rule with an exclusion (filter*) needs a case that exercises it
     require_mitre: bool = True  # an ATT&CK technique is required
     allow_warnings: bool = True  # False: any lint warning blocks
@@ -70,9 +77,9 @@ def _parse_gate(data: object) -> GateConfig:
 
 @dataclass
 class AuthConfig:
-    """Accounts and workspace membership. Off by default: the local single-user mode is unchanged."""
+    """Accounts and workspace membership. ON by default; opt out with `auth.enabled: false` or VITRIX_AUTH=off."""
 
-    enabled: bool = False
+    enabled: bool = True
     session_days: int = 14
     github_login: bool = True  # offer "Continue with GitHub" when VITRIX_GITHUB_CLIENT_ID/SECRET are set
     workspace_name: str = "Detection workspace"
@@ -136,6 +143,39 @@ def _auth_with_env(data: object) -> AuthConfig:
     return auth
 
 
+_TABLE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]{0,63}$")
+_LOGSOURCE_KEY = re.compile(r"^[a-z0-9_.-]+/[a-z0-9_.*-]+$")
+
+
+@dataclass(frozen=True)
+class KqlConfig:
+    """Table for KQL queries when the backend cannot infer one from the rule (see backends.kql_table)."""
+
+    tables: dict[str, str] = field(default_factory=dict)  # "product/service" or "product/category" -> table
+    default_table: str | None = None
+
+
+def _parse_kql(raw: object) -> KqlConfig:
+    if raw is None:
+        return KqlConfig()
+    if not isinstance(raw, dict) or set(raw) - {"tables", "default_table"}:
+        raise ConfigError("'kql' must be a mapping with 'tables' and/or 'default_table'")
+    tables = raw.get("tables") or {}
+    if not isinstance(tables, dict):
+        raise ConfigError("kql.tables must map 'product/service' (or 'product/category') to a table name, e.g. windows/system: Event")
+    out: dict[str, str] = {}
+    for key, table in tables.items():
+        if not isinstance(key, str) or not _LOGSOURCE_KEY.match(key.strip().lower()):
+            raise ConfigError(f"kql.tables key {key!r} must look like 'product/service' or 'product/category' (e.g. windows/system)")
+        if not isinstance(table, str) or not _TABLE.match(table.strip()):
+            raise ConfigError(f"kql.tables.{key}: {table!r} is not a valid table name (letters, digits and _ only)")
+        out[key.strip().lower()] = table.strip()
+    default = raw.get("default_table")
+    if default is not None and (not isinstance(default, str) or not _TABLE.match(default.strip())):
+        raise ConfigError(f"kql.default_table: {default!r} is not a valid table name (letters, digits and _ only)")
+    return KqlConfig(out, default.strip() if default else None)
+
+
 @dataclass
 class Config:
     root: Path
@@ -155,6 +195,7 @@ class Config:
     auth: AuthConfig = field(default_factory=AuthConfig)
     data_dir: Path | None = None  # accounts database etc. (default: <root>/.vitrix)
     drafts_enabled: bool = True  # local drafts in <data_dir>/drafts.db (drafts.enabled)
+    kql: KqlConfig = field(default_factory=KqlConfig)  # fallback tables for KQL
     reviews_enabled: bool = True  # comments and review requests in <data_dir>/reviews.db (reviews.enabled; needs accounts)
 
     def rel(self, path: Path) -> str:
@@ -175,6 +216,13 @@ def load_config(path: str | Path | None = None) -> Config:
     cfg = parse_config_text(text, cfg_path.parent.resolve(), cfg_path.name)
     cfg.path = cfg_path.resolve() if cfg_path.is_file() else None
     return cfg
+
+
+def _dir(data: dict, key: str, default: str) -> str:
+    value = data.get(key, default)
+    if not isinstance(value, str) or not value.strip():
+        raise ConfigError(f"'{key}' must be a folder name (a non-empty string), not {value!r}")
+    return value
 
 
 def parse_config_text(text: str, root: Path, name: str = "vitrix.yml") -> Config:
@@ -255,9 +303,9 @@ def parse_config_text(text: str, root: Path, name: str = "vitrix.yml") -> Config
 
     return Config(
         root=root,
-        rules_dir=root / data.get("rules_dir", "rules"),
-        cases_dir=root / data.get("cases_dir", "cases"),
-        output_dir=root / data.get("output_dir", "dist"),
+        rules_dir=root / _dir(data, "rules_dir", "rules"),
+        cases_dir=root / _dir(data, "cases_dir", "cases"),
+        output_dir=root / _dir(data, "output_dir", "dist"),
         targets=targets,
         default_target=default_target.strip() if default_target else None,
         routes=routes,
@@ -265,10 +313,103 @@ def parse_config_text(text: str, root: Path, name: str = "vitrix.yml") -> Config
         require_cases=bool(data.get("require_cases", True)),
         github=github,
         github_source=github_source,
-        datasets_dir=root / data.get("datasets_dir", "datasets"),
+        datasets_dir=root / _dir(data, "datasets_dir", "datasets"),
         gate=_parse_gate(data.get("quality_gate")),
         auth=_auth_with_env(data.get("auth")),
-        data_dir=root / data.get("data_dir", ".vitrix"),
+        data_dir=root / _dir(data, "data_dir", ".vitrix"),
         drafts_enabled=raw_drafts.get("enabled", True),
         reviews_enabled=raw_reviews.get("enabled", True),
+        kql=_parse_kql(data.get("kql")),
     )
+
+
+# Settings that were used to build long-lived objects at startup (stores, routes): a reload keeps the
+# startup value and reports the key in `restart_required` instead of half-applying it.
+_STARTUP_ONLY = {"auth": "auth", "data_dir": "data_dir", "drafts.enabled": "drafts_enabled", "reviews.enabled": "reviews_enabled",
+                 "rules_dir": "rules_dir", "cases_dir": "cases_dir", "datasets_dir": "datasets_dir", "output_dir": "output_dir",
+                 "github": "github"}
+
+
+class ConfigHolder:
+    """The running server's configuration, reloaded when vitrix.yml changes on disk.
+
+    `get()` stats the file (at most once per `debounce` seconds) and re-parses it when its mtime/size
+    changed. An invalid edit keeps the last good configuration and sets `reload_error`.
+    """
+
+    def __init__(self, path: str | Path | None = None, debounce: float = 1.0, clock=time.monotonic):  # noqa: ANN001
+        self._lock = threading.RLock()
+        self._clock, self._debounce = clock, debounce
+        self._cfg = load_config(path)
+        self._startup = self._cfg
+        self.path = self._cfg.path
+        self.loaded_at = time.time()
+        self.reload_error: str | None = None
+        self.restart_required: list[str] = []
+        self._stamp = self._stat()
+        self._checked = clock()
+
+    def _stat(self) -> tuple[int, int] | None:
+        try:
+            st = self.path.stat() if self.path else None
+        except OSError:
+            return None
+        return (st.st_mtime_ns, st.st_size) if st else None
+
+    def get(self) -> Config:
+        if self.path is None:
+            return self._cfg
+        with self._lock:
+            now = self._clock()
+            if now - self._checked >= self._debounce:
+                self._checked = now
+                stamp = self._stat()
+                if stamp != self._stamp:
+                    self._stamp = stamp
+                    self._reload()
+            return self._cfg
+
+    def _reload(self) -> None:
+        try:
+            new = load_config(self.path)
+        except Exception as exc:  # a bad edit must never break the running server: keep the last good config
+            self.reload_error = str(exc) or type(exc).__name__
+            return
+        changed = [key for key, attr in _STARTUP_ONLY.items() if getattr(new, attr) != getattr(self._startup, attr)]
+        keep = {attr: getattr(self._startup, attr) for attr in (*_STARTUP_ONLY.values(), "github_source")}
+        self._cfg = dataclasses.replace(new, **keep)
+        self.restart_required = changed
+        self.reload_error = None
+        self.loaded_at = time.time()
+
+    @contextlib.contextmanager
+    def snapshot(self):  # noqa: ANN201
+        """Pin one Config for the code running inside (a request), so it never mixes two versions of the file."""
+        token = _SNAPSHOT.set(self.get())
+        try:
+            yield
+        finally:
+            _SNAPSHOT.reset(token)
+
+    @property
+    def live(self) -> Config:
+        """A stand-in for `Config` that always reads the current configuration (for code that captured `cfg`)."""
+        return _Live(self)  # type: ignore[return-value]
+
+    def status(self) -> dict:
+        self.get()
+        return {"file": str(self.path) if self.path else None, "loaded_at": datetime.fromtimestamp(self.loaded_at, timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
+                "reload_error": self.reload_error, "restart_required": list(self.restart_required)}
+
+
+_SNAPSHOT: contextvars.ContextVar[Config | None] = contextvars.ContextVar("vitrix_config_snapshot", default=None)
+
+
+class _Live:
+    __slots__ = ("_holder",)
+
+    def __init__(self, holder: ConfigHolder):
+        object.__setattr__(self, "_holder", holder)
+
+    def __getattr__(self, name: str):  # noqa: ANN204
+        return getattr(_SNAPSHOT.get() or self._holder.get(), name)

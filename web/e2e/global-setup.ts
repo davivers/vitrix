@@ -96,7 +96,7 @@ async function start(auth: boolean) {
   seedPacksCache(dir);
   const port = await freePort();
   let out = "";
-  const proc = spawn(VITRIX, ["-c", yml, "serve", "--port", String(port)], { stdio: ["ignore", "pipe", "pipe"], env: { ...process.env, PYTHONUTF8: "1", ...(auth ? { VITRIX_BOOTSTRAP_TOKEN: SETUP_TOKEN } : { VITRIX_BOOTSTRAP_TOKEN: "" }) } });
+  const proc = spawn(VITRIX, ["-c", yml, "serve", "--port", String(port)], { stdio: ["ignore", "pipe", "pipe"], env: { ...process.env, PYTHONUTF8: "1", ...(auth ? { VITRIX_AUTH: "on", VITRIX_BOOTSTRAP_TOKEN: SETUP_TOKEN } : { VITRIX_AUTH: "off", VITRIX_BOOTSTRAP_TOKEN: "" }) } });
   proc.stdout?.on("data", (d) => (out += d));
   proc.stderr?.on("data", (d) => (out += d));
   const url = `http://127.0.0.1:${port}`;

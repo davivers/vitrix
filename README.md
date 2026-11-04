@@ -157,7 +157,7 @@ vitrix serve
 
 ## Roles and security
 
-Accounts are opt-in (`auth.enabled: true` in `vitrix.yml`). One server is one workspace. The **first account becomes the owner**; after that registration is **by invitation only** (an invite is a single-use link bound to one email).
+Accounts are **on by default**: the first screen creates the owner. Opt out with `auth.enabled: false` in `vitrix.yml` or `VITRIX_AUTH=off` (single local user, no login). `VITRIX_AUTH` beats the file. When the server listens on a non-local address (`--host 0.0.0.0`) and no `VITRIX_BOOTSTRAP_TOKEN` is set, a one-time setup token is generated and its link printed in the log; on `127.0.0.1` the first account needs no token. One server is one workspace. The **first account becomes the owner**; after that registration is **by invitation only** (an invite is a single-use link bound to one email).
 
 | Role | Can do |
 |---|---|
@@ -168,7 +168,7 @@ Accounts are opt-in (`auth.enabled: true` in `vitrix.yml`). One server is one wo
 
 Role changes apply on the next request; people are not signed out.
 
-> **Warning.** Without `auth.enabled: true` the API has **no authentication**: keep it on `127.0.0.1` (the default; the Docker examples publish `127.0.0.1:8000` only). Never expose it without auth. To go beyond localhost: enable auth in `vitrix.yml`, put TLS or a reverse proxy in front, and set `VITRIX_ALLOWED_HOSTS=<public hostname>` (plus `VITRIX_PUBLIC_URL` and `VITRIX_COOKIE_SECURE=1` where applicable). The GitHub token comes only from the environment, never from `vitrix.yml`.
+> **Warning.** With accounts off (`auth.enabled: false` / `VITRIX_AUTH=off`) the API has **no authentication**: keep it on `127.0.0.1` (the default; the Docker examples publish `127.0.0.1:8000` only). Never expose it without auth. To go beyond localhost: keep accounts on, put TLS or a reverse proxy in front, and set `VITRIX_ALLOWED_HOSTS=<public hostname>` (plus `VITRIX_PUBLIC_URL` and `VITRIX_COOKIE_SECURE=1` where applicable). The GitHub token comes only from the environment, never from `vitrix.yml`.
 
 Sessions are opaque tokens in an `HttpOnly`, `SameSite=Lax` cookie (only the hash is stored); passwords use salted scrypt; every action lands in the audit log. Regexes from users run in a subprocess with a timeout.
 
@@ -206,7 +206,7 @@ quality_gate:
   min_negative: 1
   min_score: 80
 auth:
-  enabled: false      # true = accounts, roles, invites
+  enabled: true       # default; false = no accounts (localhost only)
 ```
 
 ## Project layout
@@ -372,7 +372,7 @@ my-siem = "my_package.target:target"
 
 API limits:
 - **Nothing is written to the local disk.** The only writes go to GitHub, with the token from the environment, always CI first and then the PR.
-- **Authentication is opt-in** (`auth.enabled`). Without it there is none, so the API only listens on localhost. With it, every route except the public ones needs a session and a role (reads: viewer; computing and publishing rules: editor; anything else that writes: admin). Every request is checked (`Host` against DNS rebinding; `Origin` and JSON-only bodies against CSRF; `VITRIX_ALLOWED_HOSTS` allows other hosts). `vitrix serve --host` with another address prints a warning. Do not expose it without an authenticating proxy.
+- **Authentication is on by default** (`auth.enabled`, off only by explicit opt-out), so the first visit creates the owner. With it off there is none and the API should only listen on localhost. With it on, every route except the public ones needs a session and a role (reads: viewer; computing and publishing rules: editor; anything else that writes: admin). Every request is checked (`Host` against DNS rebinding; `Origin` and JSON-only bodies against CSRF; `VITRIX_ALLOWED_HOSTS` allows other hosts). `vitrix serve --host` with another address prints a warning. Do not expose it without an authenticating proxy.
 - CORS is off. For a UI on another origin set `VITRIX_CORS_ORIGINS=http://localhost:5173`.
 
 ## Limits of this version

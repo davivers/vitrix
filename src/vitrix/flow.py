@@ -134,7 +134,7 @@ def _rule_quality(cfg: Config, rf: RuleFile, issues: list[Issue], extra: list, r
     results, problems = run_rule_cases(cfg, rf)
     doc = routing.first_detection(rf.docs)
     chosen = routing.resolve(cfg, rule_id(cfg, rf.path), doc)
-    conv = convert_all(rf.text, chosen.targets, extra)
+    conv = convert_all(rf.text, chosen.targets, extra, cfg.kql)
     detection_docs = [d for d in rf.docs if isinstance(d, dict) and "detection" in d]
     return evaluate_rule(
         cfg.gate, doc if isinstance(doc, dict) else None, None, issues, results, problems,
@@ -202,11 +202,11 @@ def draft_quality(cfg: Config, validation: dict, rule_text: str, cases_given: bo
     except yaml.YAMLError as exc:
         docs, parse_error = [], f"invalid YAML: {exc}"
     doc = routing.first_detection(docs) if docs else None
-    issues = [Issue(i["severity"], "<editor>", i["message"]) for i in validation["lint"]]
+    issues = [Issue.from_dict(i) for i in validation["lint"]]
     tests = validation.get("tests") or {"results": [], "problems": []}
     results = [CaseResult("<editor>", r["name"], r["expect"], r["got"], r["passed"], r["error"], r["kind"], r["exercises_filter"])
                for r in tests["results"]]
-    problems = [Issue(p["severity"], "<editor>", p["message"]) for p in tests["problems"]]
+    problems = [Issue.from_dict(p) for p in tests["problems"]]
     if not cases_given and cfg.require_cases:
         problems.append(Issue("error", "<editor>", "no test cases"))
     final = {t: validation["conversions"][t]["ok"] for t in validation.get("targets", []) if t in validation.get("conversions", {})}

@@ -122,9 +122,9 @@ export const GATE_LABELS: Record<string, string> = {
   min_score: t("l_minimum_health_score_to_approve"),
 };
 
-export function fmt(v: unknown): string {
+export function fmt(v: unknown, key?: string): string {
   if (typeof v === "boolean") return v ? "yes" : "no";
-  if (Array.isArray(v)) return v.length ? v.join(", ") : "—";
+  if (Array.isArray(v)) return v.length ? v.join(", ") : key === "false_positive_levels" ? t("gc_not_required") : "—"; // opt-in check
   return String(v);
 }
 

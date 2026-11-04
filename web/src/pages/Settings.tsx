@@ -1,22 +1,17 @@
 import { useQuery } from "@tanstack/react-query";
 import CodeMirror from "@uiw/react-codemirror";
-import { AlertTriangle, CheckCircle2, Loader2, RotateCcw, Rocket, XCircle } from "lucide-react";
+import { AlertTriangle, CheckCircle2, Loader2, RefreshCw, RotateCcw, Rocket, XCircle } from "lucide-react";
 import { useEffect, useMemo, useState } from "react";
 import { api } from "../api";
 import { LanguageControl, ThemeControl } from "../components/ThemeControl";
 import { useIsDark } from "../theme";
 import { yamlExtensions } from "../components/code";
-import { Section } from "../components/dash";
+import { Section, timeAgo } from "../components/dash";
 import { PublishDialog } from "../components/PublishDialog";
 import { Card, ErrorBox, PageHeader, TargetSwatch, btnPrimary } from "../components/ui";
+import { fmt } from "../components/flow";
 import type { ConfigCheck, ConfigView } from "../types";
 import { t } from "../i18n";
-
-function fmt(v: unknown): string {
-  if (typeof v === "boolean") return v ? "yes" : "no";
-  if (Array.isArray(v)) return v.length ? v.join(", ") : "—";
-  return String(v);
-}
 
 function Effective({ cfg }: { cfg: Omit<ConfigView, "path" | "text"> }) {
   const row = "grid grid-cols-[9rem_1fr] gap-3 py-2 text-[13px]";
@@ -111,7 +106,7 @@ function CheckResult({ check, pending, dirty }: { check: ConfigCheck | null; pen
 }
 
 export default function SettingsPage() {
-  const config = useQuery({ queryKey: ["config"], queryFn: api.config });
+  const config = useQuery({ queryKey: ["config"], queryFn: api.config, refetchOnWindowFocus: "always" }); // vitrix.yml is hot-reloaded: show edits made elsewhere
   const health = useQuery({ queryKey: ["health"], queryFn: api.health });
   const [text, setText] = useState<string | null>(null);
   const [check, setCheck] = useState<ConfigCheck | null>(null);
@@ -154,6 +149,26 @@ export default function SettingsPage() {
         subtitle={t("the_repository_s_vitrix_yml_nothing_is")}
       />
       {config.error && <ErrorBox message={(config.error as Error).message} />}
+      {(config.data?.file || config.data?.path) && (
+        <p className="mb-4 text-[13px] text-muted">
+          {t("st_file")}: <span className="font-mono text-text break-all">{config.data.file || config.data.path}</span>
+          {config.data.loaded_at != null && ` · ${t("st_loaded", { when: timeAgo(typeof config.data.loaded_at === "number" ? new Date(config.data.loaded_at < 1e12 ? config.data.loaded_at * 1000 : config.data.loaded_at).toISOString() : config.data.loaded_at) })}`}
+        </p>
+      )}
+      {config.data?.reload_error && (
+        <div className="mb-4 flex items-start gap-2 rounded-lg border border-warn/30 bg-warn-soft p-3 text-sm text-warn" role="alert">
+          <AlertTriangle size={16} className="mt-0.5 shrink-0" aria-hidden />
+          <div className="min-w-0 [overflow-wrap:anywhere]">
+            {t("st_reload_error")} <span className="font-mono">{config.data.reload_error}</span>
+          </div>
+        </div>
+      )}
+      {config.data?.restart_required && config.data.restart_required.length > 0 && (
+        <div className="mb-4 flex items-start gap-2 rounded-lg border border-line bg-surface p-3 text-sm text-text" role="status">
+          <RefreshCw size={16} className="mt-0.5 shrink-0 text-accent" aria-hidden />
+          {t("st_restart", { keys: config.data.restart_required.join(", ") })}
+        </div>
+      )}
 
       {config.data && (
         <div className="grid gap-5 xl:grid-cols-[1fr_1.15fr]">
@@ -166,7 +181,7 @@ export default function SettingsPage() {
                 {Object.entries((check?.config ?? config.data).quality_gate).map(([k, v]) => (
                   <div key={k} className="flex justify-between gap-3">
                     <dt className="font-mono text-muted">{k}</dt>
-                    <dd className="text-right font-mono text-text">{fmt(v)}</dd>
+                    <dd className="text-right font-mono text-text">{fmt(v, k)}</dd>
                   </div>
                 ))}
               </dl>

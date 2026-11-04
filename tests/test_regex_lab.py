@@ -46,7 +46,8 @@ def test_limites(args):
         analyze(*args)
 
 
-def test_api_regex():
+def test_api_regex(monkeypatch):
+    monkeypatch.setenv("VITRIX_AUTH", "off")
     pytest.importorskip("fastapi")
     pytest.importorskip("httpx")
     from fastapi.testclient import TestClient

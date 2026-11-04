@@ -2,12 +2,14 @@ import { useQuery, useQueryClient } from "@tanstack/react-query";
 import CodeMirror from "@uiw/react-codemirror";
 import clsx from "clsx";
 import { AlertTriangle, Check, CheckCircle2, Copy, Download, Eye, FolderOpen, Loader2, Rocket, Save, ShieldCheck, XCircle } from "lucide-react";
-import { useCallback, useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { useNavigate, useParams, useSearchParams } from "react-router-dom";
 import { ApiError, DEMO, api } from "../api";
 import { useIsDark } from "../theme";
 import { can, useMe } from "../components/auth";
-import { yamlExtensions } from "../components/code";
+import { EditorView } from "@codemirror/view";
+import { issueRange, paintIssues, yamlExtensions } from "../components/code";
+import { IssueList } from "../components/Issues";
 import { HealthMeter, formatDate, timeAgo } from "../components/dash";
 import { DraftsSheet } from "../components/DraftsSheet";
 import { DriftPanel } from "../components/Drift";
@@ -16,7 +18,7 @@ import { PublishDialog } from "../components/PublishDialog";
 import { ReplayPanel } from "../components/ReplayPanel";
 import { ReviewPanel } from "../components/ReviewPanel";
 import { Card, ErrorBox, PageHeader, StateBadge, TargetSwatch, btnPrimary, btnSecondary } from "../components/ui";
-import type { Draft, DraftQuality, Impact, Validation } from "../types";
+import type { Draft, DraftQuality, Impact, LintIssue, Validation } from "../types";
 import { locale, t, tn } from "../i18n";
 
 function newRuleTemplate(): string {
@@ -151,6 +153,36 @@ function EditorWorkspace(props: { ruleId: string | null; file: string | null; in
   }, [rule, cases, ruleId]);
 
   const extensions = useMemo(() => yamlExtensions(dark), [dark]);
+
+  // Inline diagnostics: rule issues live in the rule tab, test-case problems in the cases tab.
+  const viewRef = useRef<EditorView | null>(null);
+  const jumpRef = useRef<LintIssue | null>(null);
+  const inCases = useCallback((i: LintIssue) => (i.file ? i.file === "cases" : !result?.lint.includes(i)), [result]);
+  const tabIssues = useMemo(() => [...(result?.lint ?? []), ...(result?.tests?.problems ?? [])].filter((i) => inCases(i) === (tab === "cases")), [tab, result, inCases]);
+  const issuesRef = useRef(tabIssues);
+  issuesRef.current = tabIssues;
+  const applyJump = (view: EditorView) => {
+    const issue = jumpRef.current;
+    jumpRef.current = null;
+    const r = issue && issueRange(view.state, issue);
+    if (!r) return;
+    view.dispatch({ selection: { anchor: r.from }, effects: EditorView.scrollIntoView(r.from, { y: "center" }) });
+    view.focus();
+  };
+  const onCreateEditor = (view: EditorView) => {
+    viewRef.current = view;
+    paintIssues(view, issuesRef.current);
+    applyJump(view);
+  };
+  useEffect(() => {
+    if (viewRef.current) paintIssues(viewRef.current, tabIssues);
+  }, [tabIssues]);
+  const jumpTo = (issue: LintIssue) => {
+    jumpRef.current = issue;
+    const target = inCases(issue) ? "cases" : "rule";
+    if (target === tab && viewRef.current) applyJump(viewRef.current);
+    else setTab(target);
+  };
   const quality = result?.quality;
   const localReady: boolean | null = pending || !result ? null : result.state !== "fail" && Boolean(quality?.ready);
 
@@ -363,9 +395,9 @@ function EditorWorkspace(props: { ruleId: string | null; file: string | null; in
           </div>
           <div className="min-h-0 flex-1 overflow-auto bg-code">
             {tab === "rule" ? (
-              <CodeMirror key="rule" value={rule} onChange={setRule} extensions={extensions} theme="none" height="100%" basicSetup={{ foldGutter: false }} />
+              <CodeMirror key="rule" value={rule} onChange={setRule} onCreateEditor={onCreateEditor} extensions={extensions} theme="none" height="100%" basicSetup={{ foldGutter: false }} />
             ) : (
-              <CodeMirror key="cases" value={cases} onChange={setCases} extensions={extensions} theme="none" height="100%" basicSetup={{ foldGutter: false }} />
+              <CodeMirror key="cases" value={cases} onChange={setCases} onCreateEditor={onCreateEditor} extensions={extensions} theme="none" height="100%" basicSetup={{ foldGutter: false }} />
             )}
           </div>
         </Card>
@@ -415,7 +447,7 @@ function EditorWorkspace(props: { ruleId: string | null; file: string | null; in
                   {panel === "gate" && quality && <GatePanel quality={quality} />}
                   {panel === "replay" && <ReplayPanel rule={rule} ruleId={ruleId} invalid={result.state === "fail"} onBroken={setReplayBroken} />}
                   {panel === "queries" && <QueriesPanel result={result} />}
-                  {panel === "tests" && <TestsPanel result={result} />}
+                  {panel === "tests" && <TestsPanel result={result} onJump={jumpTo} />}
                   {panel === "impact" && <ImpactPanel rule={rule} ruleId={ruleId} />}
                   {panel === "history" && ruleId && <HistoryPanel ruleId={ruleId} />}
                   {panel === "drift" && ruleId && <DriftPanel ruleId={ruleId} />}
@@ -544,7 +576,7 @@ function GateCriteria() {
         {Object.entries(data.gate).map(([k, v]) => (
           <div key={k} className="flex justify-between gap-3">
             <dt className="text-muted">{GATE_LABELS[k] ?? k}</dt>
-            <dd className="text-right font-mono text-text">{fmt(v)}</dd>
+            <dd className="text-right font-mono text-text">{fmt(v, k)}</dd>
           </div>
         ))}
         <p className="pt-1 text-xs text-subtle">
@@ -605,11 +637,12 @@ function QueriesPanel({ result }: { result: Validation }) {
       </div>
       {conv?.ok && <pre className="overflow-auto whitespace-pre-wrap break-words rounded-[10px] border border-line bg-code p-4 font-mono text-[12.5px] leading-relaxed text-code-text">{conv.query}</pre>}
       {conv && !conv.ok && <ErrorBox message={conv.error ?? "conversion failed"} />}
+      {conv && !conv.ok && conv.issues && conv.issues.length > 0 && <IssueList issues={conv.issues} />}
     </div>
   );
 }
 
-function TestsPanel({ result }: { result: Validation }) {
+function TestsPanel({ result, onJump }: { result: Validation; onJump: (issue: LintIssue) => void }) {
   const issues = [...result.lint, ...(result.tests?.problems ?? [])];
   return (
     <div className="space-y-4">
@@ -634,14 +667,7 @@ function TestsPanel({ result }: { result: Validation }) {
       {issues.length > 0 && (
         <div>
           <h3 className="mb-1.5 text-[11px] font-semibold uppercase tracking-wider text-subtle">{t("problems")}</h3>
-          <ul className="space-y-1.5 text-sm">
-            {issues.map((i, n) => (
-              <li key={n} className="flex gap-2">
-                <span className={clsx("shrink-0 font-medium", i.severity === "error" ? "text-bad" : "text-warn")}>{i.severity === "error" ? t("l_error") : t("l_warning")}</span>
-                <span className="text-text">{i.message}</span>
-              </li>
-            ))}
-          </ul>
+          <IssueList issues={issues} onJump={onJump} />
         </div>
       )}
     </div>

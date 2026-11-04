@@ -116,10 +116,35 @@ def github_oauth_from_env() -> GitHubOAuth | None:
     return GitHubOAuth(cid, secret) if cid and secret else None
 
 
+_LOCAL_NAMES = {"127.0.0.1", "localhost", "[::1]", "::1", "testserver"}  # "testserver": the Starlette test client's Host
+_LOOPBACK_CLIENTS = {"127.0.0.1", "::1", "localhost", "testclient"}  # "testclient": the Starlette test client's peer
+BLOCKED_MESSAGE = ("The first account can only be created from the machine that runs Vitrix, without a proxy. "
+                   "Otherwise start the server with VITRIX_BOOTSTRAP_TOKEN=auto and open the setup link it prints.")
+
+
+def exposed() -> bool:
+    """True when the server may be reachable by other people: public URL, trusted proxy, extra allowed
+    hosts or a non-loopback bind (`vitrix serve --host X` sets VITRIX_EXPOSED). One rule for CLI and uvicorn."""
+    env = os.environ
+    extra = {h.strip().rsplit(":", 1)[0] if h.count(":") == 1 else h.strip() for h in env.get("VITRIX_ALLOWED_HOSTS", "").split(",") if h.strip()}
+    return bool(env.get("VITRIX_PUBLIC_URL", "").strip() or env.get("VITRIX_TRUST_PROXY") == "1" or env.get("VITRIX_EXPOSED") == "1"
+                or not extra <= _LOCAL_NAMES)
+
+
+def direct_local(request: Request) -> bool:
+    """A loopback client whose request carries no proxy header: the only caller trusted without a setup token."""
+    if (request.client.host if request.client else "") not in _LOOPBACK_CLIENTS:
+        return False
+    return not any(k in ("forwarded", "x-real-ip", "via") or k.startswith("x-forwarded-") for k in request.headers)
+
+
 def setup_token_for(cfg: Config) -> str | None:
-    """The token the first account must present, or None. `auto` is generated in memory per server start."""
-    mode = cfg.auth.bootstrap_token
-    if not cfg.auth.enabled or not mode:
+    """The token the first account must present, or None. `auto` is generated in memory per server start;
+    it is also the default when the server is exposed (see `exposed`) and no token was chosen."""
+    if not cfg.auth.enabled:
+        return None
+    mode = cfg.auth.bootstrap_token or ("auto" if exposed() else None)
+    if not mode:
         return None
     return secrets.token_urlsafe(24) if mode == "auto" else mode
 
@@ -171,14 +196,15 @@ def install(app: FastAPI, cfg: Config, store: AuthStore | None, oauth: GitHubOAu
     `setup_token`: while no account exists, registration needs it (ADR 0002); irrelevant afterwards.
     """
 
-    def setup_required() -> bool:
-        return bool(setup_token) and store is not None and store.user_count() == 0
+    def setup_required(request: Request) -> bool:
+        """No account yet and the caller cannot simply be trusted: a token is configured, or it is not a direct local client."""
+        return store is not None and store.user_count() == 0 and (bool(setup_token) or not direct_local(request))
 
     @app.get("/api/auth/config")
-    def auth_config() -> dict:
+    def auth_config(request: Request) -> dict:
         if store is None:
             return {"enabled": False, "enabled_source": cfg.auth.enabled_source, "setup_token_required": False}  # nosec B105
-        return {"enabled": True, "enabled_source": cfg.auth.enabled_source, "setup_token_required": setup_required(), "workspace": store.workspace_name, "bootstrap": store.user_count() == 0,
+        return {"enabled": True, "enabled_source": cfg.auth.enabled_source, "setup_token_required": setup_required(request), "workspace": store.workspace_name, "bootstrap": store.user_count() == 0,
                 "registration": "owner-bootstrap" if store.user_count() == 0 else "invite-only", "github": oauth is not None and cfg.auth.github_login}
 
     @app.get("/api/auth/me")
@@ -192,8 +218,10 @@ def install(app: FastAPI, cfg: Config, store: AuthStore | None, oauth: GitHubOAu
 
     @app.post("/api/auth/register", status_code=201)
     def register(req: RegisterRequest, request: Request) -> JSONResponse:
-        if setup_required():
+        if setup_required(request):
             try:
+                if not setup_token:  # nobody can present a token: only a direct local visit may create the owner
+                    raise AuthError(BLOCKED_MESSAGE, 403)
                 store.check_setup_token(setup_token, req.setup_token)  # type: ignore[arg-type]
             except AuthError as exc:
                 store.log("setup-token", "setup.failed", f"ip {_client_ip(request)}")
@@ -244,7 +272,7 @@ def install(app: FastAPI, cfg: Config, store: AuthStore | None, oauth: GitHubOAu
     def github_start(request: Request, invite: str | None = None) -> Response:
         if oauth is None or not cfg.auth.github_login:
             raise HTTPException(status_code=404, detail="GitHub sign-in is not configured.")
-        if setup_required():
+        if setup_required(request):
             raise HTTPException(status_code=409, detail=SETUP_OAUTH_MESSAGE)
         state = secrets.token_urlsafe(24)
         response = RedirectResponse(oauth.authorize_url(state, _public_url(request) + "/api/auth/github/callback"), status_code=302)
@@ -267,7 +295,7 @@ def install(app: FastAPI, cfg: Config, store: AuthStore | None, oauth: GitHubOAu
         expected, _, invite = cookie.partition(".")
         if error or not code or not expected or not hmac.compare_digest(expected, state):
             return back("The GitHub sign-in could not be verified. Start again.")  # state mismatch = possible CSRF
-        if setup_required():  # the first account must come with the setup token, which OAuth cannot carry
+        if setup_required(request):  # the first account must come with the setup token, which OAuth cannot carry
             return back(SETUP_OAUTH_MESSAGE)
         try:
             profile = oauth.profile(code, _public_url(request) + "/api/auth/github/callback")

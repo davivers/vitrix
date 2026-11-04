@@ -331,8 +331,9 @@ def test_limit_counts_per_author_with_accounts(tmp_path):
 
 
 def test_accounts_on_allows_drafts_from_any_client_address(tmp_path):
-    owner = TestClient(create_app(make_project(tmp_path, extra_cfg=AUTH_ON)), base_url=BASE, client=("203.0.113.9", 1))
-    register(owner)
+    app = create_app(make_project(tmp_path, extra_cfg=AUTH_ON))
+    register(TestClient(app, base_url=BASE, client=LOOPBACK))  # the owner is created from the machine itself
+    owner = TestClient(app, base_url=BASE, client=("203.0.113.9", 1))
     login(owner, "owner@example.com", PW)
     assert owner.post("/api/drafts", json=BODY).status_code == 201
 

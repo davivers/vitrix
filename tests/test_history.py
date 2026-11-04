@@ -117,7 +117,9 @@ def test_navigator_layer_format(tmp_path):
 
 
 def test_health_score_never_hides_a_blocker(tmp_path):
-    cfg = load_config(make_project(tmp_path, rule_text=RULE_OK.replace("level: medium", "level: high")))
+    # A blocker (here the opt-in false-positive case for high rules) caps the score below approval.
+    cfg = load_config(make_project(tmp_path, rule_text=RULE_OK.replace("level: medium", "level: high"),
+                                   extra_cfg="quality_gate:\n  false_positive_levels: [high]\n"))
     rule = flow.quality_report(cfg)["rules"][0]
     assert rule["ready"] is False and rule["score"] <= 69
 
