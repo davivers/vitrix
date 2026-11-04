@@ -200,6 +200,7 @@ export function PublishDialog({ mode, localReady, localDetail, approval, onClose
             {sub && (
               <div className="space-y-2">
                 <p className="text-[13px] text-muted">{CI_COPY[ciState ?? "none"].hint}</p>
+                {sub.mappings_included && <p className="text-xs text-text">{t("pd_mappings_included")}</p>}
                 <p className="text-xs text-subtle">
                   {t("branch")}{" "}
                   <a href={safeHref(sub.url)} target="_blank" rel="noreferrer" className="font-mono text-accent hover:underline">

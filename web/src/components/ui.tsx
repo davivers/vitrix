@@ -54,9 +54,12 @@ export function TargetSwatch({ target }: { target: string }) {
 }
 
 const SOURCE_LABEL: Record<string, string> = {
-  rule: t("l_set_in_the_rule_vitrix_target"),
-  route: t("l_set_by_a_vitrix_yml_route"),
-  default: t("l_project_default_default_target"),
+  rule: t("fl_src_rule"),
+  folder: t("fl_src_folder"),
+  workspace: t("fl_src_default"),
+  "legacy-config": t("fl_src_legacy"),
+  route: t("fl_src_legacy"),
+  default: t("fl_src_default"),
   all: t("l_no_choice_every_active_target"),
   override: t("l_forced_on_the_command_line"),
 };

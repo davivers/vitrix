@@ -65,7 +65,7 @@ def test_default_table_then_actionable_error():
     err = e.value
     assert err.code == "kql-table" and err.path == "logsource" and err.line == 7 and err.column == 1
     assert "nosuchproduct/nosuchservice" in str(err) and len(str(err)) < 200
-    assert "kql_table" in err.hint and "nosuchproduct/nosuchservice: Event" in err.hint and "vitrix.yml" in err.hint
+    assert "kql_table: NosuchproductNosuchservice_CL" in err.hint and "nosuchproduct/nosuchservice" in err.hint and "mappings.yml" in err.hint
 
 
 def test_other_targets_unaffected():

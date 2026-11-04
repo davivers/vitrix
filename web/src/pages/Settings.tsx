@@ -5,6 +5,7 @@ import { useMemo, useState } from "react";
 import { Link } from "react-router-dom";
 import { api } from "../api";
 import { useMe } from "../components/auth";
+import { FinalLanguagePanel, MappingsPanel } from "../components/MappingsPanel";
 import { LanguageControl, ThemeControl } from "../components/ThemeControl";
 import { useIsDark } from "../theme";
 import { yamlExtensions } from "../components/code";
@@ -15,7 +16,7 @@ import { EditorState } from "@codemirror/state";
 import { EditorView } from "@codemirror/view";
 import { t } from "../i18n";
 
-const NAV = ["general", "appearance", "languages", "gate", "folders", "about", "yml"] as const;
+const NAV = ["general", "appearance", "languages", "final", "mappings", "gate", "folders", "about", "yml"] as const;
 
 /** One label/value row; no card per fact (settings-v2 spec). */
 function Row({ label, children }: { label: string; children: React.ReactNode }) {
@@ -167,6 +168,14 @@ export default function SettingsPage() {
                   )}
                 </Row>
                 <Row label={t("extra_pipelines")}>{cfg.extra_pipelines.length ? <span className="font-mono text-xs">{cfg.extra_pipelines.join(", ")}</span> : <span className="text-muted">{t("none")}</span>}</Row>
+              </Block>
+
+              <Block id="final" title={t("fl_title")}>
+                <FinalLanguagePanel />
+              </Block>
+
+              <Block id="mappings" title={t("mp_title")}>
+                <MappingsPanel />
               </Block>
 
               <Block id="gate" title={t("quality_gate_criteria")}>

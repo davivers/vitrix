@@ -354,7 +354,7 @@ function Picker(props: { label: string; value: string; onChange: (v: string) => 
   );
 }
 
-function PublishBatch({ ids, titles }: { ids: string[]; titles: Record<string, string> }) {
+export function PublishBatch({ ids, titles }: { ids: string[]; titles: Record<string, string> }) {
   const [title, setTitle] = useState("");
   const publish = useMutation({ mutationFn: () => api.submitLocalRules({ paths: ids, title: title.trim() || null }) });
   const blocked: BlockedDraft[] = publish.error instanceof ApiError && publish.error.status === 422 && Array.isArray(publish.error.body?.blocked) ? (publish.error.body.blocked as BlockedDraft[]) : [];

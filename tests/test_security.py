@@ -166,6 +166,7 @@ ROLE_TABLE = [  # method, path, minimum role
     ("POST", "/api/reviews/read-all", "viewer"), ("POST", "/api/reviews/" + "a" * 32 + "/read", "viewer"),
     ("POST", "/api/reviews/" + "a" * 32 + "/unread", "viewer"),
     ("POST", "/api/reviews/" + "a" * 32 + "/decision", "editor"), ("POST", "/api/reviews", "editor"),
+    ("GET", "/api/mappings", "viewer"), ("PUT", "/api/mappings", "editor"), ("POST", "/api/ci/mappings", "editor"),
     ("POST", "/api/rules/a/b.yml", "admin"),  # no such route: unknown writes stay admin-only
     ("PATCH", "/api/rules/a/b.yml", "admin"),
 ]
@@ -256,3 +257,31 @@ def test_logout_over_http_deletes_the_users_drafts(tmp_path):
     assert c.post("/api/auth/logout", json={}).status_code == 200
     assert c.post("/api/auth/login", json={"email": "o@example.com", "password": pw}).status_code == 200
     assert c.get("/api/drafts").json()["drafts"] == []
+
+
+@pytest.mark.parametrize("bad", ["Sec'; drop", "Sec|take 1", "Sec\nx", "Sec ", "Sec;x", "a" * 65, "", "Sec\n", "[Sec]", "T//c", "9x", r"x\y", 5, None])
+def test_mapping_table_and_column_names_reject_injection(bad):
+    from vitrix import mapping_names as mn
+
+    assert not mn.valid_table(bad)
+    assert mn.problems({"tables": {"windows/security": bad}}) != []
+    assert mn.problems({"fields": {bad: {"Image": "Col"}}}) != []
+    assert not mn.valid_column(bad)
+
+
+@pytest.mark.parametrize("bad", ["x | extend a=1", 'x"y', "x'", "x;y", "x\ny", "x//c", "x()", "x.", ".x", "x..y", "a.b.c.d.e"])
+def test_mapping_columns_and_sigma_fields_reject_injection(bad):
+    from vitrix import mapping_names as mn
+
+    assert not mn.valid_column(bad)
+    assert mn.problems({"fields": {"SecurityEvent": {"Image": bad}}}) != []
+    assert mn.problems({"fields": {"SecurityEvent": {bad: "Col"}}}) != []
+
+
+def test_mapping_names_accept_normal_ones():
+    from vitrix import mapping_names as mn
+
+    ok = {"tables": {"windows/security": "SecurityEvent", "linux": "Syslog"},
+          "fields": {"SecurityEvent": {"Image": "NewProcessName", "CommandLine": "EventData.CommandLine"}}}
+    assert mn.problems(ok) == []
+    assert mn.problems({"tables": {"../etc": "T"}}) != [] and mn.problems({"tables": {"a/b/c": "T"}}) != []

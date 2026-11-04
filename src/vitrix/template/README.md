@@ -4,6 +4,7 @@ Detection-as-Code with [Vitrix](https://github.com/davivers/vitrix): Sigma rules
 
 ```
 vitrix.yml        project configuration (targets, quality gate, GitHub, accounts)
+mappings.yml      query mappings and final language defaults; written by the app (Editor / Settings), appears after the first change
 rules/            Sigma rules (the source of truth)
 cases/            test cases, same path as the rule
 datasets/         logs for replay, with <name>.expect.yml expectations

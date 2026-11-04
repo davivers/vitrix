@@ -103,6 +103,26 @@ def in_base(cfg: Config, rid: str) -> bool | None:
     return rc == 0
 
 
+def base_versions(cfg: Config, path: Path) -> tuple[str | None, str | None, bool]:
+    """(text of the file in origin/<base>, text at the merge-base of HEAD and origin/<base>, comparable).
+    `comparable` is False when there is no origin/<base> to compare with (no git, no remote)."""
+    top = _toplevel(cfg)
+    rel = _repo_rel(top, path) if top else None
+    if top is None or rel is None:
+        return None, None, False
+    ref, remote = _base_ref(cfg, top)
+    if ref is None or not remote:
+        return None, None, False
+
+    def show(rev: str) -> str | None:
+        rc, out = _git(top, "show", f"{rev}:{rel}")
+        return out.decode("utf-8", "replace") if rc == 0 else None
+
+    theirs = show(ref)
+    mb = _text(top, "merge-base", "HEAD", ref)
+    return theirs, (show(mb) if mb else None), True
+
+
 def _status(top: Path, prefixes: list[str]) -> dict[str, str]:
     rc, out = _git(top, "status", "--porcelain=v1", "-z", "--untracked-files=all", "--", *prefixes)
     parts = out.decode("utf-8", "replace").split("\0") if rc == 0 else []
@@ -175,13 +195,27 @@ def publication_map(cfg: Config, only: str | None = None) -> dict[str, dict]:
     return out
 
 
+def file_publication(cfg: Config, path: Path) -> dict:
+    """Publication info of ONE repo file (e.g. mappings.yml): same states as a rule; `absent` when the file does not exist."""
+    if not path.is_file():
+        return _info("absent", reason="the file does not exist yet")
+    top = _toplevel(cfg)
+    rel = _repo_rel(top, path) if top else None
+    if top is None or rel is None:
+        return _info("unknown", reason="not a git repository")
+    ref, remote = _base_ref(cfg, top)
+    status = _status(top, [rel])
+    has_commit = bool(_text(top, "rev-parse", "--verify", "-q", "HEAD"))
+    return _compute(cfg, top, [rel], ref, remote, status, [rel], has_commit, paths_of=lambda _rid: [rel])[rel]
+
+
 def _info(state: str, *, change: str | None = None, git: str | None = None, branch: str | None = None, pr: dict | None = None,
           base_ref: str | None = None, reason: str | None = None) -> dict:
     return {"state": state, "change": change, "git": git, "branch": branch, "pr": pr, "base_ref": base_ref, "reason": reason}
 
 
 def _compute(cfg: Config, top: Path, ids: list[str], ref: str | None, remote: bool, status: dict[str, str],
-             prefixes: list[str], has_commit: bool) -> dict[str, dict]:
+             prefixes: list[str], has_commit: bool, paths_of=None) -> dict[str, dict]:  # noqa: ANN001
     base_ref = ref if remote else None
     base_tree = _tree(top, ref, prefixes) if ref else {}
     differs = _differs(top, ref, prefixes) if ref else {}
@@ -189,7 +223,7 @@ def _compute(cfg: Config, top: Path, ids: list[str], ref: str | None, remote: bo
     result: dict[str, dict] = {}
     local: dict[str, tuple[list[str], str, str]] = {}
     for rid in ids:
-        paths = [p for p in (_repo_rel(top, cfg.rules_dir / rid), _repo_rel(top, cfg.cases_dir / rid)) if p]
+        paths = paths_of(rid) if paths_of else [p for p in (_repo_rel(top, cfg.rules_dir / rid), _repo_rel(top, cfg.cases_dir / rid)) if p]
         rule_path = paths[0] if paths else None
         existing = [p for p in paths if (top / p).is_file()]
         untracked = any(status.get(p) == "??" for p in existing)

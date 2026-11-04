@@ -92,8 +92,11 @@ def evaluate_rule(
     add("schema", "validate", 1, "Schema and lint without errors", parse_error is None and not errors,
         detail="; ".join(i.message for i in errors[:3]))
     failed_conv = [t for t, ok in final_conversion.items() if not ok]
-    add("conversion", "validate", 1, "Converts to the final query language", bool(final_conversion) and not failed_conv,
-        detail=f"failed: {', '.join(failed_conv)}" if failed_conv else ", ".join(final_conversion))
+    if final_conversion and set(final_conversion) == {"sigma"}:  # kept as Sigma: nothing to convert
+        add("conversion", "validate", 1, "Converts to the final query language", None, detail="not applicable: kept as Sigma (no conversion)")
+    else:
+        add("conversion", "validate", 1, "Converts to the final query language", bool(final_conversion) and not failed_conv,
+            detail=f"failed: {', '.join(failed_conv)}" if failed_conv else ", ".join(final_conversion))
     add("warnings", "validate", 1, "No lint warnings", not warnings, blocking=not gate.allow_warnings,
         detail="; ".join(i.message for i in warnings[:3]))
 

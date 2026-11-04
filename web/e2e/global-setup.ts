@@ -104,7 +104,7 @@ function attachBare(dir: string) {
   return { bare, branch };
 }
 
-async function start(auth: boolean, kind: "normal" | "bare" | "empty" = "normal") {
+async function start(auth: boolean, kind: "normal" | "bare" | "empty" | "nogit" = "normal") {
   const dir = mkdtempSync(path.join(tmpdir(), auth ? "vitrix-e2e-auth-" : "vitrix-e2e-local-"));
   const init = spawnSync(VITRIX, ["init", dir], { encoding: "utf8" });
   if (init.status !== 0) throw new Error(`vitrix init failed: ${init.stderr}${init.stdout}`);
@@ -112,7 +112,9 @@ async function start(auth: boolean, kind: "normal" | "bare" | "empty" = "normal"
   if (auth) writeFileSync(yml, readFileSync(yml, "utf8") + "\nauth:\n  enabled: true\n  workspace_name: E2E workspace\n", "utf8");
   let bare: { bare: string; branch: string } | null = null;
   if (kind === "empty") git(dir, "init", "-q"); // a repository without any commit
-  else {
+  else if (kind === "nogit") {
+    /* a plain folder: no git at all */
+  } else {
     gitCommit(dir); // Drift and history need a repository with a commit
     if (kind === "bare") bare = attachBare(dir);
   }
@@ -135,10 +137,11 @@ function kill(proc: ChildProcess) {
 
 /** Starts two isolated servers on temp repos: E2E_AUTH_URL (accounts on) and E2E_LOCAL_URL (accounts off). */
 export default async function globalSetup() {
-  const [auth, local, empty] = await Promise.all([start(true, "bare"), start(false), start(false, "empty")]);
+  const [auth, local, empty, nogit] = await Promise.all([start(true, "bare"), start(false), start(false, "empty"), start(false, "nogit")]);
   process.env.E2E_AUTH_URL = auth.url;
   process.env.E2E_LOCAL_URL = local.url;
   process.env.E2E_EMPTY_URL = empty.url;
+  process.env.E2E_NOGIT_URL = nogit.url;
   process.env.E2E_AUTH_DIR = auth.dir;
   process.env.E2E_AUTH_BARE = auth.bare!.bare;
   process.env.E2E_AUTH_BRANCH = auth.bare!.branch;
@@ -148,5 +151,6 @@ export default async function globalSetup() {
     kill(auth.proc);
     kill(local.proc);
     kill(empty.proc);
+    kill(nogit.proc);
   };
 }

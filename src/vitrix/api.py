@@ -54,7 +54,21 @@ from fastapi.responses import FileResponse, JSONResponse, PlainTextResponse, Res
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field
 
-from . import __version__, auth, auth_api, flow, history, local_rules, packs_api, publication, regex_lab, reviews_api, service, sync_api
+from . import (
+    __version__,
+    auth,
+    auth_api,
+    flow,
+    history,
+    local_rules,
+    mappings,
+    packs_api,
+    publication,
+    regex_lab,
+    reviews_api,
+    service,
+    sync_api,
+)
 from . import drafts as drafts_mod
 from . import drift as drift_mod
 from . import replay as replay_mod
@@ -155,6 +169,17 @@ class LocalRuleUpdate(BaseModel):
 
 class SubmitLocalRulesRequest(BaseModel):
     paths: list[str] = Field(min_length=1, max_length=50, description="local rule ids to publish as one branch")
+    title: str | None = Field(default=None, max_length=200)
+
+
+class MappingsPatch(BaseModel):
+    sha: str | None = Field(default=None, pattern=r"^[0-9a-f]{64}$", description="sha of mappings.yml you loaded (null = it did not exist)")
+    kql: dict | None = Field(default=None, description="merge patch: {tables: {'product/service': Table|null}, fields: {Table: {SigmaField: Column|null}|null}}")
+    final_language: dict | None = Field(default=None, description="merge patch: {default: id|null, folders: {glob: id|null}}")
+
+
+class SubmitMappingsRequest(BaseModel):
+    sha: str = Field(pattern=r"^[0-9a-f]{64}$")
     title: str | None = Field(default=None, max_length=200)
 
 
@@ -330,6 +355,87 @@ def create_app(config_path: str | None = None) -> FastAPI:
         if reason:
             raise HTTPException(status_code=403, detail=f"Local rules are off: {reason}")
 
+    def mappings_view() -> dict:
+        try:
+            doc, sha, text = mappings.read(cfg.root)
+        except mappings.MappingsError as exc:
+            raise HTTPException(status_code=422, detail=f"mappings.yml is invalid: {exc}") from None
+        return {"exists": sha is not None, "file": mappings.FILE, "schema_version": doc["schema_version"], "kql": doc["kql"],
+                "final_language": doc["final_language"], "sha": sha, "text": text,
+                "warnings": mappings.stale_languages(doc, {*cfg.targets, "sigma"}),
+                "from_vitrix_yml": {"tables": {k: v for k, v in cfg.kql.tables.items() if k not in doc["kql"]["tables"]}, "default_table": cfg.kql.default_table},
+                "publication": publication.file_publication(cfg, mappings.path_of(cfg.root))}
+
+    @app.get("/api/mappings")
+    def mappings_get() -> dict:
+        return mappings_view()
+
+    @app.put("/api/mappings")
+    def mappings_put(req: MappingsPatch, request: Request) -> dict:
+        local_ready(request)
+        try:
+            patch_doc = {k: v for k, v in (("kql", req.kql), ("final_language", req.final_language)) if v is not None}
+            if not patch_doc:
+                raise mappings.MappingsError("send kql and/or final_language")
+            _, sha, _ = mappings.update(cfg.root, patch_doc, req.sha, known_languages={*cfg.targets, "sigma"} if req.final_language is not None else None)
+        except mappings.MappingsError as exc:
+            raise HTTPException(status_code=exc.status, detail=str(exc)) from None
+        publication.invalidate()
+        holder.refresh()  # the next request already sees the new mappings
+        if store is not None:
+            store.log(auth_api.who(request), "mappings.saved", f"sha {sha[:7]}")
+        return mappings_view()
+
+    def mappings_for_publish() -> tuple[str, str] | None:
+        """(sha of the local file, text to publish) or None when there is nothing to publish. The text is a 3-way merge of
+        entries (merge-base / local / origin) when origin moved ahead; both sides editing one entry is a 409."""
+        path = mappings.path_of(cfg.root)
+        try:
+            local_doc, sha, local_text = mappings.read(cfg.root)  # the guarded reader, validated before anything is attached
+        except mappings.MappingsError as exc:
+            raise HTTPException(status_code=exc.status, detail=f"mappings.yml is invalid: {exc}") from None
+        if sha is None or publication.file_publication(cfg, path)["state"] != "local":
+            return None
+        theirs_text, base_text, comparable = publication.base_versions(cfg, path)
+        if not comparable or theirs_text is None:
+            return sha, local_text  # no origin to compare with, or the file is new there
+        try:
+            theirs, base = mappings.parse(theirs_text), (mappings.parse(base_text) if base_text is not None else mappings.empty())
+            merged = mappings.merge3(base, local_doc, theirs)
+        except mappings.MappingsError as exc:
+            raise HTTPException(status_code=exc.status, detail=str(exc)) from None
+        text = mappings.dump(merged)
+        return None if text == theirs_text else (sha, text)
+
+    def mappings_extra() -> dict[str, str]:
+        """mappings.yml as extra file of a rule publish, only when it is a local change (differs from origin/<base>)."""
+        got = mappings_for_publish()
+        return {mappings.FILE: got[1]} if got else {}
+
+    @app.post("/api/ci/mappings", status_code=201)
+    def ci_submit_mappings(req: SubmitMappingsRequest, request: Request) -> dict:
+        who = auth_api.who(request)
+        try:
+            _, sha, _ = mappings.read(cfg.root)
+        except mappings.MappingsError as exc:
+            raise HTTPException(status_code=exc.status, detail=f"mappings.yml is invalid: {exc}") from None
+        if sha is None:
+            raise HTTPException(status_code=404, detail="mappings.yml does not exist yet")
+        if sha != req.sha:
+            raise HTTPException(status_code=409, detail="mappings.yml changed on disk since you loaded it")
+        got = mappings_for_publish()
+        if got is None:
+            raise HTTPException(status_code=409, detail="mappings.yml has nothing to publish: it already matches GitHub")
+        try:
+            out = _github_errors(lambda: service.submit_mappings(cfg, got[1], req.title, submitted_by=auth.attribution(who) if who else ""))
+        except mappings.MappingsError as exc:
+            raise HTTPException(status_code=422, detail=f"mappings.yml is invalid: {exc}") from None
+        publication.invalidate()
+        out["sha"] = req.sha
+        if store is not None:
+            store.log(who, "mappings.ci_submitted", f"{out['branch']} @ {out['commit'][:7]}")
+        return out
+
     @app.post("/api/rules", status_code=201)
     def rules_create(req: LocalRuleCreate, request: Request) -> dict:
         local_ready(request)
@@ -367,7 +473,7 @@ def create_app(config_path: str | None = None) -> FastAPI:
             except service.ChangeError as exc:
                 raise HTTPException(status_code=422, detail=str(exc)) from None
         with regex_budget():
-            result = service.validate_text(cfg, req.rule, req.cases, req.targets)
+            result = service.validate_text(cfg, req.rule, req.cases, req.targets, rule_rel=path)
             result["quality"] = flow.draft_quality(cfg, result, req.rule, bool(req.cases and req.cases.strip()), path)
         return result
 
@@ -502,7 +608,7 @@ def create_app(config_path: str | None = None) -> FastAPI:
             published = None
         is_new = (True if req.source == "file" else None) if published is None else not published
         out = _github_errors(lambda: service.submit_rule(cfg, req.path, rule_text, cases_text, req.title, submitted_by=auth.attribution(who) if who else "",
-                                                         trailers=trailers, is_new=is_new))
+                                                         trailers=trailers, is_new=is_new, extra_files=mappings_extra()))
         publication.invalidate()
         if sha:
             out["sha"] = sha
@@ -576,7 +682,7 @@ def create_app(config_path: str | None = None) -> FastAPI:
             if len(draft_meta) > 500:
                 draft_meta.clear()
             try:
-                val = service.validate_text(cfg, row["rule"], row["cases"])
+                val = service.validate_text(cfg, row["rule"], row["cases"], rule_rel=row["path"])
                 q = flow.draft_quality(cfg, val, row["rule"], row["cases"] is not None, row["path"])
                 quality = {"ready": bool(q["ready"]), "blockers": len(q["blockers"]), "score": q["score"]}
             except Exception:  # noqa: BLE001 - a broken draft must still be listed
@@ -710,7 +816,8 @@ def create_app(config_path: str | None = None) -> FastAPI:
             rows.append({"id": disk["id"], "path": disk["id"], "title": None, "rule": disk["rule"], "cases": disk["cases"]})
         trailers = reviews.trailers({("rule", r["path"]): r["rule"] for r in rows})
         try:
-            out = _github_errors(lambda: service.submit_drafts(cfg, rows, req.title, submitted_by=auth.attribution(who) if who else "", trailers=trailers))
+            out = _github_errors(lambda: service.submit_drafts(cfg, rows, req.title, submitted_by=auth.attribution(who) if who else "", trailers=trailers,
+                                                               extra_files=mappings_extra()))
         except HTTPException as exc:
             blocked = getattr(exc, "blocked", None)
             if blocked is None:

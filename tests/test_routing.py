@@ -31,10 +31,10 @@ def test_ordem_de_decisao_regra_rota_padrao_todos(tmp_path):
     assert resolve(cfg, "windows/a.yml", doc).targets == ["elastic-eql"]
     assert resolve(cfg, "windows/a.yml", doc).source == "rule"
     assert resolve(cfg, "windows/a.yml", {}).targets == ["kql"]
-    assert resolve(cfg, "windows/a.yml", {}).source == "route"
+    assert resolve(cfg, "windows/a.yml", {}).source == "legacy-config"
     assert resolve(cfg, "linux/b.yml", {}).targets == ["splunk"]
-    assert resolve(cfg, "linux/b.yml", {}).source == "default"
-    assert resolve(cfg, None, {}).source == "default"  # regra ainda não salva: sem rota
+    assert resolve(cfg, "linux/b.yml", {}).source == "legacy-config"
+    assert resolve(cfg, None, {}).source == "legacy-config"  # regra ainda não salva: sem rota
 
     (tmp_path / "p").mkdir()
     plain = load_config(make_project(tmp_path / "p"))
@@ -171,4 +171,4 @@ def test_validate_devolve_a_escolha_e_so_ela_reprova(tmp_path):
     assert body["state"] == "ok"
 
     body = client.post("/api/validate", json={"rule": RULE_OK}).json()
-    assert body["targets"] == ["splunk"] and body["target_source"] == "default"
+    assert body["targets"] == ["splunk"] and body["target_source"] == "legacy-config"

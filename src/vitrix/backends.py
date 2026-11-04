@@ -14,6 +14,8 @@ from importlib import metadata
 from pathlib import Path
 from typing import Any
 
+from .mapping_names import valid_table
+
 
 @dataclass(frozen=True)
 class Target:
@@ -59,9 +61,17 @@ def _lucene(extra: list) -> Any:
     return LuceneBackend(processing_pipeline=_combine(extra, ecs_windows()))
 
 
+SIGMA = "sigma"  # pseudo-target: keep the Sigma rule as the final artifact (no conversion, nothing can fail)
+
+
+def _no_backend(extra: list) -> Any:
+    raise RuntimeError("the sigma target has no backend")
+
+
 BUILTIN: dict[str, Target] = {
     t.name: t
     for t in (
+        Target(SIGMA, "Keep as Sigma (no conversion)", "yml", _no_backend),
         Target("splunk", "Splunk (SPL)", "spl", _splunk),
         Target("kql", "Microsoft Defender / Sentinel (KQL)", "kql", _kql),
         Target("elastic-eql", "Elastic (EQL)", "eql", _eql),
@@ -82,6 +92,8 @@ BUILTIN_INFO: dict[str, tuple[str, str]] = {
 
 def target_info(target: Target) -> dict:
     """{backend, plugin, status: ok|missing_plugin|error, message}: can the backend be built right now?"""
+    if target.name == SIGMA:
+        return {"backend": None, "plugin": None, "status": "ok", "message": None}
     backend, plugin = BUILTIN_INFO.get(target.name, (getattr(target, "backend", "") or target.name, getattr(target, "plugin", "") or ""))
     try:
         target.factory([])
@@ -152,15 +164,35 @@ KQL_SUGGESTED_TABLES: dict[str, str] = {
 }
 
 
+def suggest_table(ls: dict) -> str | None:
+    """Table to suggest for a logsource: the known connector table when there is one, otherwise
+    `<Product><Service>_CL` (Azure Monitor custom-log naming, e.g. bitbucket/audit -> BitbucketAudit_CL)."""
+    product, category, service = ls.get("product"), ls.get("category"), ls.get("service")
+    known = next((KQL_SUGGESTED_TABLES[v] for v in (product, category, service) if v in KQL_SUGGESTED_TABLES), None)
+    if known:
+        known = known.replace("<service>", re.sub(r"[^A-Za-z0-9_]", "", service or "") or "logs")
+        if valid_table(known):
+            return known
+    parts = [re.sub(r"[^A-Za-z0-9]", "", w).capitalize() for w in (product, service or category) if w]
+    name = "".join(p for p in parts if p)
+    if not name:
+        return None
+    if name[0].isdigit():
+        name = "T" + name
+    candidate = f"{name[:60]}_CL"
+    return candidate if valid_table(candidate) else None
+
+
 class ConversionError(Exception):
     """A conversion failure with where/how-to-fix details (issue model: code, path, line, column, hint)."""
 
-    def __init__(self, message: str, *, code: str, path: str | None = None, line: int | None = None, hint: str | None = None):
+    def __init__(self, message: str, *, code: str, path: str | None = None, line: int | None = None, hint: str | None = None,
+                 fix: dict | None = None):
         super().__init__(message)
-        self.code, self.path, self.line, self.column, self.hint = code, path, line, 1 if line else None, hint
+        self.code, self.path, self.line, self.column, self.hint, self.fix = code, path, line, 1 if line else None, hint, fix
 
     def details(self) -> dict:
-        return {"code": self.code, "path": self.path, "line": self.line, "column": self.column, "hint": self.hint}
+        return {"code": self.code, "path": self.path, "line": self.line, "column": self.column, "hint": self.hint, "fix": self.fix}
 
 
 def _logsource(doc: object) -> dict:
@@ -188,11 +220,15 @@ def _first_doc(text: str) -> object:
     return next((d for d in docs if "detection" in d), docs[0] if docs else None)
 
 
-def _table_pipeline(table: str) -> Any:
+def _table_pipeline(table: str, fields: dict | None = None) -> Any:
+    """Sets the KQL table and, when mappings.yml maps fields for it, renames Sigma fields to its columns."""
     from sigma.processing.pipeline import ProcessingItem, ProcessingPipeline
-    from sigma.processing.transformations import SetStateTransformation
+    from sigma.processing.transformations import FieldMappingTransformation, SetStateTransformation
 
-    return ProcessingPipeline(items=[ProcessingItem(identifier="vitrix_kql_table", transformation=SetStateTransformation("query_table", table))])
+    items = [ProcessingItem(identifier="vitrix_kql_table", transformation=SetStateTransformation("query_table", table))]
+    if fields:
+        items.append(ProcessingItem(identifier="vitrix_kql_fields", transformation=FieldMappingTransformation(dict(fields))))
+    return ProcessingPipeline(items=items)
 
 
 def _kql_table_error(text: str, doc: object) -> ConversionError:
@@ -201,18 +237,20 @@ def _kql_table_error(text: str, doc: object) -> ConversionError:
     key = next((k for k in keys if not k.endswith("/*")), keys[0] if keys else "windows/system")
     line = next((i for i, row in enumerate(text.splitlines(), 1) if row.startswith("logsource:")), None)
     where = f" ({key})" if keys else ""
-    suggest = next((KQL_SUGGESTED_TABLES[v] for v in (ls.get("product"), ls.get("category"), ls.get("service")) if v in KQL_SUGGESTED_TABLES), None)
+    suggest = suggest_table(ls)
     tip = f" Likely table for this source: {suggest} (depends on your connector)." if suggest else ""
     return ConversionError(
         f"KQL needs a table for this rule's logsource{where} and none is configured.",
         code="kql-table", path="logsource", line=line,
-        hint=f"Add `vitrix: {{kql_table: Event}}` to the rule, or `kql: {{tables: {{{key}: Event}}}}` (or `kql: {{default_table: Event}}`) to vitrix.yml.{tip}")
+        hint=f"Pick the table in the Editor: for this rule (`vitrix: {{kql_table: {suggest or 'Event'}}}`) or for every `{key}` rule (saved in mappings.yml).{tip}",
+        fix={"kind": "kql-table", "key": key, "suggestion": suggest})
 
 
+_FIELD_TABLE = re.compile(r"for the (\w+) table")
 _FIELD_ERR = re.compile(r"Invalid SigmaDetectionItem field name encountered: (\S+?)\.")
 
 
-def _explain(exc: Exception, text: str, target: Target) -> ConversionError:
+def _explain(exc: Exception, text: str, target: Target, table: str | None = None) -> ConversionError:
     """Turn any pySigma / plugin exception into an actionable issue (never the raw exception string)."""
     msg = " ".join(str(exc).split())
     name = type(exc).__name__
@@ -220,11 +258,14 @@ def _explain(exc: Exception, text: str, target: Target) -> ConversionError:
     m = _FIELD_ERR.search(msg)
     if m:
         fld = m.group(1)
+        if table is None and (tm := _FIELD_TABLE.search(msg)):
+            table = tm.group(1)  # the backend names the table it inferred
         return ConversionError(
             f"{target.label} has no mapping for field `{fld}` in the table chosen for this rule's logsource.",
             code="kql-field", path="detection", line=line,
-            hint=f"Map it with a field-mapping pipeline listed under `pipelines:` in vitrix.yml (`transformations: [{{type: field_name_mapping, mapping: {{{fld}: <column>}}}}]`), "
-                 "or pick another table with `vitrix: {kql_table: ...}` whose columns match the rule's fields.")
+            hint=f"Map `{fld}` to a column of the table in the Editor (saved in mappings.yml), "
+                 "or pick another table with `vitrix: {kql_table: ...}` whose columns match the rule's fields.",
+            fix={"kind": "kql-field", "table": table, "field": fld, "suggestion": None})
     if "No valid hash algo" in msg:
         return ConversionError("The rule's Hashes values use an algorithm this KQL table cannot match (only MD5, SHA1 and SHA256 are supported).",
                                code="kql-hash", path="detection", line=line,
@@ -250,6 +291,8 @@ def _convert(text: str, target: Target, extra: list) -> str:
 
 
 def convert_text(text: str, target: Target, extra: list, kql: Any = None) -> str:
+    if target.name == SIGMA:
+        return text.rstrip("\n")  # the rule itself; CI copies it to dist/sigma/
     try:
         return _convert_text(text, target, extra, kql)
     except ConversionError:
@@ -275,17 +318,34 @@ def _convert_text(text: str, target: Target, extra: list, kql: Any) -> str:
     tables = getattr(kql, "tables", {}) or {}
     keys = _logsource_keys(doc)
     explicit = (block.get("kql_table") if isinstance(block, dict) else None) or next((tables[k] for k in keys if k in tables), None)
-    if isinstance(explicit, str) and explicit.strip():
-        return _convert(text, target, [_table_pipeline(explicit.strip()), *extra])
-    try:
-        return _convert(text, target, extra)
-    except Exception as exc:
-        if "Unable to determine table name" not in str(exc):
+    mapped = getattr(kql, "fields", {}) or {}
+
+    def with_table(table: str) -> str:
+        try:
+            return _convert(text, target, [_table_pipeline(table, mapped.get(table)), *extra])
+        except ConversionError:
             raise
+        except Exception as exc:
+            raise _explain(exc, text, target, table) from None
+
+    if isinstance(explicit, str) and valid_table(explicit.strip()):  # identifiers only: the name is pasted into the query
+        return with_table(explicit.strip())
+    try:
+        out = _convert(text, target, extra)
+    except Exception as exc:
+        msg = str(exc)
+        if "Unable to determine table name" not in msg:
+            tm = _FIELD_TABLE.search(msg)
+            if tm and mapped.get(tm.group(1)):  # an inferred table with mapped fields: retry with them
+                return with_table(tm.group(1))
+            raise
+    else:
+        inferred = out.split("\n", 1)[0].strip()
+        return with_table(inferred) if mapped.get(inferred) and valid_table(inferred) else out
     fallback = next((KQL_DEFAULT_TABLES[k] for k in keys if k in KQL_DEFAULT_TABLES), None) or getattr(kql, "default_table", None)
     if not fallback:
         raise _kql_table_error(text, doc) from None
-    return _convert(text, target, [_table_pipeline(fallback), *extra])
+    return with_table(fallback)
 
 
 def sha256_text(text: str) -> str:

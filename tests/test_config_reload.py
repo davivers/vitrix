@@ -42,7 +42,7 @@ def test_edit_is_seen_by_the_next_request(app):
     again = client.get("/api/config").json()
     assert again["targets"] == ["splunk"] and again["quality_gate"]["min_positive"] == 3 and again["reload_error"] is None
     assert "targets: [splunk]" in again["text"]
-    assert [t["name"] for t in client.get("/api/targets").json() if t["active"]] == ["splunk"]
+    assert [t["name"] for t in client.get("/api/targets").json() if t["active"] and not t["pseudo"]] == ["splunk"]
 
 
 def test_invalid_edit_keeps_the_last_good_config(app):

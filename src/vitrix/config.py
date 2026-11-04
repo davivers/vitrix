@@ -153,6 +153,7 @@ class KqlConfig:
 
     tables: dict[str, str] = field(default_factory=dict)  # "product/service" or "product/category" -> table
     default_table: str | None = None
+    fields: dict[str, dict[str, str]] = field(default_factory=dict)  # Table -> {SigmaField: Column} (mappings.yml only)
 
 
 def _parse_kql(raw: object) -> KqlConfig:
@@ -198,6 +199,8 @@ class Config:
     kql: KqlConfig = field(default_factory=KqlConfig)  # fallback tables for KQL
     reviews_enabled: bool = True  # comments and review requests in <data_dir>/reviews.db (reviews.enabled; needs accounts)
     local_rules_enabled: bool = True  # Save writes rule files into rules/ and cases/ (local_rules.enabled; ADR 0007)
+    final_default: str | None = None  # mappings.yml final_language.default (workspace-wide final language)
+    final_folders: dict[str, str] = field(default_factory=dict)  # mappings.yml final_language.folders: glob under rules/ -> language id
     sync_enabled: bool = True  # GitHub sync: throttled fetch + safe fast-forward (ADR 0006); `sync: false` or VITRIX_SYNC=off
     sync_interval: int = 30  # seconds between fetches, clamped 10..3600
     sync_fast_forward: bool = True
@@ -219,7 +222,24 @@ def load_config(path: str | Path | None = None) -> Config:
     text = cfg_path.read_text(encoding="utf-8") if cfg_path.is_file() else ""
     cfg = parse_config_text(text, cfg_path.parent.resolve(), cfg_path.name)
     cfg.path = cfg_path.resolve() if cfg_path.is_file() else None
+    _merge_mappings(cfg)
     return cfg
+
+
+def _merge_mappings(cfg: Config) -> None:
+    """mappings.yml (next to vitrix.yml) wins over vitrix.yml `kql.tables`; its `kql.fields` are new."""
+    from . import mappings
+
+    try:
+        doc, sha, _ = mappings.read(cfg.root)  # the one guarded reader
+    except mappings.MappingsError as exc:
+        raise ConfigError(f"mappings.yml: {exc}") from None
+    if sha is None:
+        return
+    kql = doc["kql"]
+    cfg.kql = KqlConfig({**cfg.kql.tables, **kql["tables"]}, cfg.kql.default_table, kql["fields"])
+    cfg.final_default = doc["final_language"]["default"]
+    cfg.final_folders = dict(doc["final_language"]["folders"])
 
 
 def _dir(data: dict, key: str, default: str) -> str:
@@ -388,22 +408,28 @@ class ConfigHolder:
         self._cfg = load_config(path)
         self._startup = self._cfg
         self.path = self._cfg.path
+        self._root = self._cfg.root
         self.loaded_at = time.time()
         self.reload_error: str | None = None
         self.restart_required: list[str] = []
         self._stamp = self._stat()
         self._checked = clock()
 
-    def _stat(self) -> tuple[int, int] | None:
+    def _stat(self) -> tuple | None:
+        """Stamp of vitrix.yml AND mappings.yml (a project without vitrix.yml still watches mappings.yml)."""
+        st = None
+        if self.path:
+            try:
+                st = self.path.stat()
+            except OSError:
+                return None
         try:
-            st = self.path.stat() if self.path else None
+            ms = self._root.joinpath("mappings.yml").stat()
         except OSError:
-            return None
-        return (st.st_mtime_ns, st.st_size) if st else None
+            ms = None  # an absent mappings.yml is part of the stamp
+        return (st.st_mtime_ns if st else None, st.st_size if st else None, ms.st_mtime_ns if ms else None, ms.st_size if ms else None)
 
     def get(self) -> Config:
-        if self.path is None:
-            return self._cfg
         with self._lock:
             now = self._clock()
             if now - self._checked >= self._debounce:
@@ -416,16 +442,19 @@ class ConfigHolder:
 
     def refresh(self) -> None:
         """Re-read vitrix.yml now (after a sync changed the working tree), ignoring the debounce."""
-        if self.path is None:
-            return
         with self._lock:
             self._checked = self._clock()
             self._stamp = self._stat()
             self._reload()
 
+    def _load_pathless(self) -> Config:
+        cfg = parse_config_text("", self._root)
+        _merge_mappings(cfg)
+        return cfg
+
     def _reload(self) -> None:
         try:
-            new = load_config(self.path)
+            new = load_config(self.path) if self.path else self._load_pathless()
         except Exception as exc:  # a bad edit must never break the running server: keep the last good config
             self.reload_error = str(exc) or type(exc).__name__
             return

@@ -1,7 +1,7 @@
 import { useQuery, useQueryClient } from "@tanstack/react-query";
 import CodeMirror from "@uiw/react-codemirror";
 import clsx from "clsx";
-import { AlertTriangle, Check, CheckCircle2, ChevronDown, CircleDot, Copy, Download, Eye, FilePlus, FolderOpen, GitMerge, GitPullRequest, HardDrive, Loader2, Rocket, Save, ShieldCheck, XCircle } from "lucide-react";
+import { AlertTriangle, Check, CheckCircle2, ChevronDown, Info, Copy, Download, Eye, FilePlus, FolderOpen, GitMerge, GitPullRequest, HardDrive, Loader2, Rocket, Save, ShieldCheck, XCircle } from "lucide-react";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { Link, useNavigate, useParams, useSearchParams } from "react-router-dom";
 import { ApiError, DEMO, api } from "../api";
@@ -10,6 +10,8 @@ import { can, useMe } from "../components/auth";
 import { EditorView } from "@codemirror/view";
 import { issueRange, paintIssues, yamlExtensions } from "../components/code";
 import { IssueList } from "../components/Issues";
+import { FinalLanguageSelect, SIGMA } from "../components/FinalLanguage";
+import { FixContext, removeVitrixKey, setVitrixKey } from "../components/KqlFix";
 import { HealthMeter, formatDate, timeAgo } from "../components/dash";
 import { DraftsSheet } from "../components/DraftsSheet";
 import { DriftPanel } from "../components/Drift";
@@ -122,6 +124,7 @@ function EditorWorkspace(props: { ruleId: string | null; file: string | null; in
   const [panel, setPanel] = useState<Panel>("gate");
   const [result, setResult] = useState<Validation | null>(null);
   const [pending, setPending] = useState(true);
+  const [nonce, setNonce] = useState(0);
   const [error, setError] = useState<string | null>(null);
   const [publishOpen, setPublishOpen] = useState(() => isEditor && !DEMO && new URLSearchParams(window.location.search).get("publish") === "1");
   const publishAfterSave = useRef(false);
@@ -166,7 +169,7 @@ function EditorWorkspace(props: { ruleId: string | null; file: string | null; in
       clearTimeout(timer);
       ctrl.abort();
     };
-  }, [rule, cases, ruleId]);
+  }, [rule, cases, ruleId, nonce]);
 
   const extensions = useMemo(() => yamlExtensions(dark), [dark]);
 
@@ -287,11 +290,25 @@ function EditorWorkspace(props: { ruleId: string | null; file: string | null; in
     URL.revokeObjectURL(url);
   };
 
+  const fixActions = useMemo(() => ({ applyRuleTable: (table: string) => setRule((r) => setVitrixKey(r, "kql_table", table)), revalidate: () => setNonce((n) => n + 1) }), []);
+
   return (
+    <FixContext.Provider value={fixActions}>
     <div className="flex h-full flex-col px-4 py-4 sm:px-8">
       <RuleHeader
         title={meta.title}
         meta={meta}
+        finalSelect={
+          <FinalLanguageSelect
+            finals={result?.targets ?? []}
+            labels={Object.fromEntries(Object.entries(result?.conversions ?? {}).map(([k, c]) => [k, c.label]))}
+            source={result?.final_language?.source ?? (meta.target ? "rule" : (result?.target_source ?? null))}
+            own={meta.target}
+            folder={ruleId && ruleId.includes("/") ? ruleId.slice(0, ruleId.lastIndexOf("/")) : null}
+            disabled={!isEditor}
+            onChoose={(id) => setRule((r) => (id ? setVitrixKey(r, "target", id) : removeVitrixKey(r, "target")))}
+          />
+        }
         file={file}
         result={result}
         publication={disk?.publication ?? null}
@@ -538,7 +555,7 @@ function EditorWorkspace(props: { ruleId: string | null; file: string | null; in
                       <ReplayPanel rule={rule} cases={cases} ruleId={ruleId} invalid={result.lint.some((i) => i.severity === "error" && REPLAY_BLOCKERS.has(i.code ?? ""))} onBroken={setReplayBroken} />
                     </div>
                   )}
-                  {panel === "queries" && <QueriesPanel result={result} />}
+                  {panel === "queries" && <QueriesPanel result={result} rule={rule} />}
                   {panel === "history" && ruleId && <HistoryPanel ruleId={ruleId} />}
                   {panel === "drift" && ruleId && <DriftPanel ruleId={ruleId} />}
                   {panel === "review" && <ReviewPanel kind={props.draft ? "draft" : "rule"} target={props.draft ? (saved?.id ?? props.draft.id) : ruleId} ruleText={rule} />}
@@ -549,9 +566,9 @@ function EditorWorkspace(props: { ruleId: string | null; file: string | null; in
         </div>
       </div>
     </div>
+    </FixContext.Provider>
   );
 }
-
 
 /** Always-visible summary: validation state, publish readiness and health score. */
 function StatusBar({ result, pending }: { result: Validation; pending: boolean }) {
@@ -574,7 +591,7 @@ function StatusBar({ result, pending }: { result: Validation; pending: boolean }
       </span>
       <span className="flex items-center gap-2 text-xs text-muted" aria-live="polite">
         {pending && <Loader2 size={14} className="animate-spin" aria-hidden />}
-        {pending ? t("l_validating") : `${tn("n_errors", issues.filter((i) => i.severity === "error").length)} · ${tn("n_warnings", issues.filter((i) => i.severity === "warning").length)}`}
+        {pending ? t("l_validating") : `${tn("n_errors", result.counts?.errors ?? issues.filter((i) => i.severity === "error").length)} · ${tn("n_warnings", result.counts?.warnings ?? issues.filter((i) => i.severity === "warning").length)}`}
       </span>
     </Card>
   );
@@ -677,12 +694,12 @@ function GateCriteria() {
   );
 }
 
-function QueriesPanel({ result }: { result: Validation }) {
+function QueriesPanel({ result, rule }: { result: Validation; rule: string }) {
   const [siem, setSiem] = useState<string | null>(null);
   const [copied, setCopied] = useState(false);
-  const names = Object.keys(result.conversions);
+  const names = [...new Set([...result.targets, ...Object.keys(result.conversions)])];
   const active = siem && names.includes(siem) ? siem : (names[0] ?? null);
-  const conv = active ? result.conversions[active] : null;
+  const conv = active ? (result.conversions[active] ?? (active === SIGMA ? { ok: true, label: t("fl_sigma"), query: rule } : null)) : null;
 
   const copy = async () => {
     if (!conv?.query) return;
@@ -712,9 +729,9 @@ function QueriesPanel({ result }: { result: Validation }) {
                 n === active ? "bg-accent-soft font-semibold text-strong" : "text-muted hover:text-text",
               )}
             >
-              {result.conversions[n].ok ? <CheckCircle2 size={13} className="text-good" aria-hidden /> : <XCircle size={13} className="text-bad" aria-hidden />}
+              {(result.conversions[n]?.ok ?? true) ? <CheckCircle2 size={13} className="text-good" aria-hidden /> : result.targets.includes(n) ? <XCircle size={13} className="text-bad" aria-hidden /> : <Info size={13} className="text-muted" aria-hidden />}
               <TargetSwatch target={n} />
-              {result.conversions[n].label}
+              {n === SIGMA ? t("fl_sigma") : result.conversions[n]?.label ?? n}
               {result.targets.includes(n) && <span className="rounded bg-accent-soft px-1.5 py-0.5 text-[10px] font-semibold uppercase tracking-wide text-accent">{t("final")}</span>}
             </button>
           ))}
@@ -726,7 +743,15 @@ function QueriesPanel({ result }: { result: Validation }) {
         )}
       </div>
       {conv?.ok && <pre className="overflow-auto whitespace-pre-wrap break-words rounded-[10px] border border-line bg-code p-4 font-mono text-[12.5px] leading-relaxed text-code-text">{conv.query}</pre>}
-      {conv && !conv.ok && <ErrorBox message={conv.error ?? "conversion failed"} />}
+      {conv && !conv.ok && !conv.code && <ErrorBox message={conv.error ?? "conversion failed"} />}
+      {conv && !conv.ok && active && !result.targets.includes(active) && (
+        <p className="flex items-start gap-2 rounded-[10px] border border-line bg-surface-2 p-3 text-[13px] text-muted">
+          <Info size={15} className="mt-0.5 shrink-0" aria-hidden /> {t("kf_preview_info", { l: conv.label })}
+        </p>
+      )}
+      {conv && !conv.ok && conv.code && active && (
+        <IssueList issues={[{ severity: result.targets.includes(active) ? (conv.severity ?? "error") : "info", message: conv.error ?? "conversion failed", code: conv.code, hint: conv.hint, fix: conv.fix, line: conv.line, column: conv.column, path: conv.path }]} />
+      )}
       {conv && !conv.ok && conv.issues && conv.issues.length > 0 && <IssueList issues={conv.issues} />}
     </div>
   );
@@ -788,6 +813,8 @@ interface RuleMeta {
   level: string | null;
   author: string | null;
   logsource: string | null;
+  /** The rule's own `vitrix.target` (null = follows the default). */
+  target: string | null;
 }
 
 /** Cheap read of the top-level scalar fields for the header (the server validates the real thing). */
@@ -799,7 +826,9 @@ function parseMeta(rule: string): RuleMeta {
   const ls = /^logsource:[ \t]*\r?\n((?:[ \t]+.*(?:\r?\n|$))+)/m.exec(rule)?.[1] ?? "";
   const part = (k: string) => new RegExp("^[ \t]+" + k + ":[ \t]*(.+?)[ \t]*$", "m").exec(ls)?.[1] ?? null;
   const parts = [part("product"), part("category"), part("service")].filter(Boolean);
-  return { title: top("title"), status: top("status"), level: top("level"), author: top("author"), logsource: parts.length ? parts.join("/") : null };
+  const vb = /^vitrix:[ \t]*\r?\n((?:[ \t]+.*(?:\r?\n|$))+)/m.exec(rule)?.[1] ?? "";
+  const target = /^[ \t]+target:[ \t]*(.+?)[ \t]*$/m.exec(vb)?.[1]?.replace(/^['"]|['"]$/g, "") ?? null;
+  return { title: top("title"), status: top("status"), level: top("level"), author: top("author"), logsource: parts.length ? parts.join("/") : null, target };
 }
 
 const PUB: Record<string, { Icon: typeof HardDrive; cls: string; key: "ed_pub_local" | "ed_pub_pushed" | "ed_pub_pr" | "ed_pub_merged" | "ed_pub_unknown" }> = {
@@ -807,7 +836,7 @@ const PUB: Record<string, { Icon: typeof HardDrive; cls: string; key: "ed_pub_lo
   pushed: { Icon: GitPullRequest, cls: "bg-accent-soft text-accent", key: "ed_pub_pushed" },
   in_pr: { Icon: GitPullRequest, cls: "bg-accent-soft text-accent", key: "ed_pub_pr" },
   published: { Icon: GitMerge, cls: "bg-good-soft text-good", key: "ed_pub_merged" },
-  unknown: { Icon: CircleDot, cls: "bg-surface-2 text-muted", key: "ed_pub_unknown" },
+  unknown: { Icon: HardDrive, cls: "bg-warn-soft text-warn", key: "ed_pub_unknown" },
 };
 
 /** Publication state of a rule: icon + text (never colour alone). */
@@ -821,7 +850,7 @@ export function PublicationBadge({ pub, isNew }: { pub: Publication | null; isNe
     );
   }
   const v = PUB[pub.state] ?? PUB.unknown;
-  const label = pub.state === "in_pr" && pub.pr ? t("ed_pub_pr_n", { n: pub.pr.number }) : t(v.key);
+  const label = pub.state === "in_pr" && pub.pr ? t("ed_pub_pr_n", { n: pub.pr.number }) : !PUB[pub.state] || pub.state === "unknown" ? t("ed_pub_unknown_git") : t(v.key);
   const body = (
     <>
       <v.Icon size={13} aria-hidden /> {label}
@@ -840,10 +869,8 @@ export function PublicationBadge({ pub, isNew }: { pub: Publication | null; isNe
   );
 }
 
-function RuleHeader(props: { title: string | null; meta: RuleMeta; file: string | null; result: Validation | null; publication: Publication | null; isNew: boolean; dirty: boolean; savedAt: Date | null; isEditor: boolean; actions: React.ReactNode }) {
-  const { title, meta, file, result, publication, isNew, dirty, savedAt, actions } = props;
-  const finals = result?.targets ?? [];
-  const others = Object.keys(result?.conversions ?? {}).filter((n) => !finals.includes(n));
+function RuleHeader(props: { title: string | null; meta: RuleMeta; finalSelect: React.ReactNode; file: string | null; result: Validation | null; publication: Publication | null; isNew: boolean; dirty: boolean; savedAt: Date | null; isEditor: boolean; actions: React.ReactNode }) {
+  const { title, meta, file, publication, isNew, dirty, savedAt, actions, finalSelect } = props;
   return (
     <header className="mb-3 flex flex-wrap items-start justify-between gap-3" data-testid="rule-header">
       <div className="min-w-0 flex-1 space-y-1.5">
@@ -863,12 +890,7 @@ function RuleHeader(props: { title: string | null; meta: RuleMeta; file: string 
           {meta?.status && <span>{meta.status}</span>}
           <span>{meta?.author ? t("ed_by", { a: meta.author }) : t("ed_no_author")}</span>
           {meta?.logsource && <span className="font-mono">{meta.logsource}</span>}
-          {finals.length > 0 && (
-            <span className="inline-flex items-center gap-1.5">
-              {t("ed_final_lang")} {finals.map((n) => <TargetSwatch key={n} target={n} />)} {finals.map((n) => result?.conversions[n]?.label ?? n).join(", ")}
-              {others.length > 0 && <span className="text-subtle">+{others.length}</span>}
-            </span>
-          )}
+          {finalSelect}
           <span className="font-mono">{file ?? t("ed_not_saved")}</span>
           {savedAt && <span>{t("ed_saved_at", { t: savedAt.toLocaleTimeString(locale(), { hour: "2-digit", minute: "2-digit" }) })}</span>}
         </p>

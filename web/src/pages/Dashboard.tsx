@@ -1,6 +1,6 @@
 import { useQuery } from "@tanstack/react-query";
 import clsx from "clsx";
-import { AlertTriangle, CheckCircle2, Clock, ExternalLink, GitCommitHorizontal, GitPullRequest, Plus, RefreshCw, XCircle } from "lucide-react";
+import { AlertTriangle, CheckCircle2, Clock, ExternalLink, GitCommitHorizontal, GitPullRequest, HardDrive, Plus, RefreshCw, XCircle } from "lucide-react";
 import { Link } from "react-router-dom";
 import { api } from "../api";
 import { BarList, ConnectorNotice, HealthMeter, RunBadge, Section, formatDuration, formatHours, pct, safeHref, timeAgo } from "../components/dash";
@@ -264,6 +264,15 @@ export default function DashboardPage() {
       />
       {error && <ErrorBox message={(error as Error).message} />}
       {stats.isLoading && <p className="text-sm text-muted">{t("reading_the_repository")}</p>}
+
+      {(rules.data ?? []).filter((r) => r.publication?.state === "local" || r.publication?.state === "unknown").length > 0 && (
+        <p className="mb-4 flex flex-wrap items-center gap-2 rounded-[10px] border border-warn/30 bg-warn-soft px-4 py-2.5 text-sm text-warn" role="status">
+          <HardDrive size={15} aria-hidden /> {tn("ru_only_local", (rules.data ?? []).filter((r) => r.publication?.state === "local" || r.publication?.state === "unknown").length)}
+          <Link to="/rules?publication=unmerged" className="font-semibold underline">
+            {t("ru_show_them")}
+          </Link>
+        </p>
+      )}
 
       {stats.data && <Pipeline stats={stats.data} activity={act} />}
 

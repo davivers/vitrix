@@ -1,5 +1,5 @@
 import { useQuery } from "@tanstack/react-query";
-import { CheckCircle2, ChevronDown, Download, GitCompare, Plus, Search, XCircle } from "lucide-react";
+import { CheckCircle2, ChevronDown, Download, GitCompare, HardDrive, Plus, Rocket, Search, XCircle } from "lucide-react";
 import { useEffect, useMemo, useRef, useState } from "react";
 import { Link, useNavigate, useSearchParams } from "react-router-dom";
 import { DEMO, api } from "../api";
@@ -8,9 +8,11 @@ import { DriftBadge, count, driftErrorMessage } from "../components/Drift";
 import { HealthMeter, StatTile, pct, timeAgo } from "../components/dash";
 import { FlowFunnel } from "../components/flow";
 import { PublicationBadge } from "./Editor";
+import { PublishBatch } from "./Packs";
+import { RulePublish } from "../components/RulePublish";
 import { Card, ErrorBox, LevelTag, PageHeader, StateBadge, TargetChip, btnPrimary, btnSecondary, inputCls } from "../components/ui";
-import type { QualityReport, State } from "../types";
-import { t } from "../i18n";
+import type { QualityReport, RuleSummary, State } from "../types";
+import { t, tn } from "../i18n";
 
 const FILTERS: { value: "all" | State; label: string }[] = [
   { value: "all", label: t("l_all") },
@@ -71,6 +73,8 @@ function GateStrip({ q, onBlocked, forceOpen }: { q: QualityReport; onBlocked: (
   );
 }
 
+const isUnmerged = (r: RuleSummary) => Boolean(r.publication && r.publication.state !== "published");
+
 export default function RulesPage() {
   const navigate = useNavigate();
   const { data, error, isLoading } = useQuery({ queryKey: ["rules"], queryFn: api.rules });
@@ -78,6 +82,11 @@ export default function RulesPage() {
   const [q, setQ] = useState("");
   const [filter, setFilter] = useState<"all" | State>("all");
   const [gateFilter, setGateFilter] = useState<"all" | "blocked" | "ready">("all");
+  // "Not in Git yet": local, unknown (no Git), pushed or in a PR (anything not merged).
+  const [notInGit, setNotInGit] = useState(() => new URLSearchParams(window.location.search).get("publication") === "unmerged");
+  const [selected, setSelected] = useState<Set<string>>(new Set());
+  const [publishId, setPublishId] = useState<string | null>(null);
+  const [batchOpen, setBatchOpen] = useState(false);
   // Drift needs a replay of every rule at a Git ref (seconds on big repos), so it only runs when asked.
   const [driftOn, setDriftOn] = useState(false);
   const [driftRef, setDriftRef] = useState("");
@@ -103,13 +112,22 @@ export default function RulesPage() {
     const list = (data ?? []).filter(
       (r) =>
         (filter === "all" || r.state === filter) &&
+        (!notInGit || isUnmerged(r)) &&
         (gateFilter === "all" || (gateFilter === "ready") === Boolean(gate.get(r.id)?.ready)) &&
         (!driftOn || !driftOnly || driftRows.get(r.id)?.state !== "same" || driftRows.get(r.id)?.modified) &&
         (!needle || [r.title, r.id, r.logsource ?? "", ...r.techniques, ...r.tactics].some((s) => s.toLowerCase().includes(needle))),
     );
     // Gate view: blocked rules first, lowest health first.
     return viewGate ? [...list].sort((a, b) => Number(gate.get(a.id)?.ready ?? true) - Number(gate.get(b.id)?.ready ?? true) || (gate.get(a.id)?.score ?? 100) - (gate.get(b.id)?.score ?? 100)) : list;
-  }, [data, q, filter, gateFilter, gate, viewGate, driftOn, driftOnly, driftRows]);
+  }, [data, q, filter, gateFilter, notInGit, gate, viewGate, driftOn, driftOnly, driftRows]);
+  const unmerged = (data ?? []).filter(isUnmerged);
+  const onlyLocal = (data ?? []).filter((r) => r.publication?.state === "local" || r.publication?.state === "unknown").length;
+  const toggleSel = (id: string) => {
+    const n = new Set(selected);
+    if (n.has(id)) n.delete(id);
+    else n.add(id);
+    setSelected(n);
+  };
 
   return (
     <div className="mx-auto max-w-7xl px-4 py-8 sm:px-8">
@@ -127,6 +145,15 @@ export default function RulesPage() {
           </div>
         }
       />
+
+      {onlyLocal > 0 && (
+        <p className="mb-4 flex flex-wrap items-center gap-2 rounded-[10px] border border-warn/30 bg-warn-soft px-4 py-2.5 text-sm text-warn" role="status">
+          <HardDrive size={15} aria-hidden /> {tn("ru_only_local", onlyLocal)}
+          <button type="button" className="font-semibold underline" onClick={() => setNotInGit(true)}>
+            {t("ru_show_them")}
+          </button>
+        </p>
+      )}
 
       <div ref={stripRef}>
         {quality.isLoading && <p className="mb-5 text-sm text-muted">{t("running_the_lifecycle_on_every_rule")}</p>}
@@ -162,6 +189,11 @@ export default function RulesPage() {
             </button>
           ))}
         </div>
+        {unmerged.length > 0 && (
+          <button type="button" aria-pressed={notInGit} onClick={() => setNotInGit(!notInGit)} className={`inline-flex items-center gap-1.5 rounded-[10px] border border-line px-3 py-2 text-sm ${notInGit ? "bg-accent-soft font-medium text-strong" : "bg-surface text-muted hover:text-text"}`}>
+            <HardDrive size={14} aria-hidden /> {t("ru_not_in_git")} ({unmerged.length})
+          </button>
+        )}
         {quality.data && (
           <div className="flex gap-1 rounded-[10px] border border-line bg-surface p-1" role="group" aria-label={t("filter_by_gate")}>
             {(
@@ -225,19 +257,35 @@ export default function RulesPage() {
         </p>
       )}
 
+      {notInGit && selected.size > 0 && (
+        <Card className="mb-4 space-y-3 p-4">
+          <div className="flex flex-wrap items-center gap-3">
+            <span className="text-sm text-text">{tn("ru_selected", selected.size)}</span>
+            <button type="button" className={btnPrimary} onClick={() => setBatchOpen(!batchOpen)}>
+              <Rocket size={15} aria-hidden /> {t("ru_publish_selected", { n: selected.size })}
+            </button>
+            <button type="button" className="text-sm text-muted hover:text-text" onClick={() => setSelected(new Set())}>
+              {t("cancel")}
+            </button>
+          </div>
+          {batchOpen && <PublishBatch ids={[...selected]} titles={Object.fromEntries((data ?? []).map((r) => [r.id, r.title]))} />}
+        </Card>
+      )}
+      {publishId && <RulePublish id={publishId} onClose={() => setPublishId(null)} />}
+
       <Card className="overflow-x-auto">
-        <table className="w-full min-w-[900px] text-left text-sm">
+        <table className="w-full min-w-[760px] text-left text-sm">
           <thead className="border-b border-line bg-surface text-[11.5px] uppercase tracking-wide text-subtle">
             <tr>
-              <th className="px-4 py-3 font-medium">{t("rule")}</th>
-              <th className="px-4 py-3 font-medium">{t("severity")}</th>
-              <th className="px-4 py-3 font-medium">ATT&amp;CK</th>
-              <th className="px-4 py-3 font-medium">{t("final_language")}</th>
-              <th className="px-4 py-3 font-medium">{t("tests")}</th>
-              <th className="whitespace-nowrap px-4 py-3 font-medium">{t("gate")}</th>
-              <th className="px-4 py-3 font-medium">{t("changed")}</th>
-              <th className="px-4 py-3 font-medium">{t("state")}</th>
-              {driftOn && <th className="px-4 py-3 font-medium">{t("dr_column")}</th>}
+              <th className="px-3 py-3 font-medium">{t("rule")}</th>
+              <th className="px-3 py-3 font-medium">{t("severity")}</th>
+              <th className="px-3 py-3 font-medium">ATT&amp;CK</th>
+              <th className="px-3 py-3 font-medium">{t("final_language")}</th>
+              <th className="px-3 py-3 font-medium">{t("tests")}</th>
+              <th className="whitespace-nowrap px-3 py-3 font-medium">{t("gate")}</th>
+              <th className="hidden px-3 py-3 font-medium min-[1440px]:table-cell">{t("changed")}</th>
+              <th className="px-3 py-3 font-medium">{t("state")}</th>
+              {driftOn && <th className="px-3 py-3 font-medium">{t("dr_column")}</th>}
             </tr>
           </thead>
           <tbody>
@@ -259,54 +307,70 @@ export default function RulesPage() {
               const g = gate.get(r.id);
               return (
                 <tr key={r.id} onClick={() => navigate(`/editor/${r.id}`)} className="cursor-pointer border-b border-line last:border-0 hover:bg-surface-2">
-                  <td className="px-4 py-3">
+                  <td className="px-3 py-3">
+                    {notInGit && isUnmerged(r) && (
+                      <input
+                        type="checkbox"
+                        className="mr-2 accent-accent"
+                        aria-label={t("ru_select", { t: r.title || r.id })}
+                        checked={selected.has(r.id)}
+                        onClick={(e) => e.stopPropagation()}
+                        onChange={() => toggleSel(r.id)}
+                      />
+                    )}
                     <Link to={`/editor/${r.id}`} className="font-semibold text-strong hover:text-accent" onClick={(e) => e.stopPropagation()}>
                       {r.title || r.id}
                     </Link>
                     <div className="font-mono text-xs text-subtle">{r.id}</div>
-                    {r.publication && r.publication.state !== "published" && r.publication.state !== "unknown" && (
-                      <div className="mt-1">
+                    {r.publication && r.publication.state !== "published" && (
+                      <div className="mt-1 flex flex-wrap items-center gap-2">
                         <PublicationBadge pub={r.publication} isNew={false} />
+                        {!DEMO && r.publication.state !== "in_pr" && (
+                          <button type="button" className="rounded-md border border-line px-2 py-0.5 text-xs font-medium text-accent hover:bg-surface-2" aria-label={t("ru_publish_rule", { t: r.title || r.id })} onClick={(e) => { e.stopPropagation(); setPublishId(r.id); }}>
+                            {t("publish")}
+                          </button>
+                        )}
                       </div>
                     )}
                     {r.logsource && <div className="text-xs text-subtle">{r.logsource}</div>}
                   </td>
-                  <td className="px-4 py-3">
+                  <td className="px-3 py-3">
                     <LevelTag level={r.level} />
                   </td>
-                  <td className="px-4 py-3 font-mono text-xs text-subtle">{r.techniques.join(", ") || "—"}</td>
-                  <td className="px-4 py-3">
+                  <td className="px-3 py-3 font-mono text-xs text-subtle">{r.techniques.join(", ") || "—"}</td>
+                  <td className="px-3 py-3">
                     <span className="flex flex-wrap gap-1">
                       {r.targets.map((t) => (
                         <TargetChip key={t} target={t} ok={r.conversion[t]} source={r.target_source} />
                       ))}
                     </span>
                   </td>
-                  <td className="px-4 py-3 tabular-nums">{r.tests.total ? `${r.tests.passed}/${r.tests.total}` : <span className="text-warn">{t("no_cases")}</span>}</td>
-                  <td className="whitespace-nowrap px-4 py-3">
+                  <td className="px-3 py-3 tabular-nums">{r.tests.total ? `${r.tests.passed}/${r.tests.total}` : <span className="text-warn">{t("no_cases")}</span>}</td>
+                  <td className="whitespace-nowrap px-3 py-3">
                     {g ? (
                       <span className="flex flex-nowrap items-center gap-2">
                         <span className={`inline-flex items-center gap-1 rounded-full px-2 py-0.5 text-xs font-semibold ${g.ready ? "bg-good-soft text-good" : "bg-bad-soft text-bad"}`}>
                           {g.ready ? <CheckCircle2 size={12} aria-hidden /> : <XCircle size={12} aria-hidden />}
                           {g.ready ? t("ru_row_ready") : t("ru_row_blocked")}
                         </span>
-                        <HealthMeter score={g.score} />
+                        <span className="hidden min-[1440px]:inline"><HealthMeter score={g.score} /></span>
+                        <span className="tabular-nums text-xs text-muted min-[1440px]:hidden">{g.score}</span>
                       </span>
                     ) : (
                       <span className="text-subtle">—</span>
                     )}
                   </td>
-                  <td className="px-4 py-3 text-xs text-muted">{g?.age_days !== null && g?.age_days !== undefined ? timeAgo(new Date(Date.now() - g.age_days * 86400000).toISOString()) : "—"}</td>
-                  <td className="px-4 py-3">
-                    <StateBadge state={r.state} />
+                  <td className="hidden px-3 py-3 text-xs text-muted min-[1440px]:table-cell">{g?.age_days !== null && g?.age_days !== undefined ? timeAgo(new Date(Date.now() - g.age_days * 86400000).toISOString()) : "—"}</td>
+                  <td className="px-3 py-3">
+                    <span className="whitespace-nowrap"><StateBadge state={r.state} /></span>
                     {r.state !== "ok" && r.issues[0] && (
-                      <span className="mt-1 block max-w-[240px] text-xs text-muted" title={r.issues.map((i) => `${i.message}${i.hint ? ` — ${i.hint}` : ""}`).join(" | ")}>
+                      <span className="mt-1 block max-w-[110px] truncate text-xs text-muted" title={r.issues.map((i) => `${i.message}${i.hint ? ` — ${i.hint}` : ""}`).join(" | ")}>
                         {r.issues[0].hint ? <HintText text={r.issues[0].hint} /> : r.issues[0].message}
                       </span>
                     )}
                   </td>
                   {driftOn && (
-                    <td className="whitespace-nowrap px-4 py-3">
+                    <td className="whitespace-nowrap px-3 py-3">
                       {(() => {
                         const d = driftRows.get(r.id);
                         return d ? (

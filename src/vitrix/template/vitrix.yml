@@ -12,11 +12,11 @@ targets:
   - kql
   - elastic-eql
 
-# Final query language of each rule, from the most specific to the most general:
-#   1. `vitrix: {target: kql}` inside the rule itself (string or list)
-#   2. the first route below whose `match` matches the path inside rules/
-#   3. `default_target`
-#   4. otherwise the rule is converted to every active target
+# Final query language: choose it in the app, not here. The Editor header has a "Final language" selector
+# for a rule ("Keep as Sigma (no conversion)", Splunk, KQL, ...), and Settings -> "Final language" sets the
+# workspace and per-folder defaults. They are stored in the rule (`vitrix: {target: ...}`) and in
+# `mappings.yml` (written by the app). Order: rule, mappings.yml folder, mappings.yml default, then the
+# legacy settings below, then every active target. `default_target` and `routes` still work but are legacy.
 default_target: splunk
 routes: []
 #  - match: "azure/*"
@@ -68,13 +68,12 @@ quality_gate:
 #   github_login: true
 #   workspace_name: Detection workspace
 
-# KQL needs a table. The Kusto backend infers it from the logsource category or the EventID; for
-# rules it cannot place (e.g. product: windows, service: system) Vitrix uses, in this order:
-#   1. the rule's own `vitrix: {kql_table: Event}`
-#   2. the mapping below, keyed `product/service` or `product/category`
-#   3. built-in defaults (windows/security -> SecurityEvent, windows/system|application|powershell -> Event, linux/* -> Syslog, ...)
-#   4. default_table
-# With none of these, KQL fails only for rules whose final language is KQL (others show a preview warning).
+# KQL needs a table. The Kusto backend infers it from the logsource category or the EventID. For rules it
+# cannot place, fix it in the Editor (Queries panel -> "Pick the table": for this rule, or for every rule
+# with that logsource); the app stores it in `mappings.yml` (field mappings too). You do not need to edit
+# this file or mappings.yml by hand. Resolution order: the rule's `vitrix: {kql_table: ...}`,
+# mappings.yml, the tables below, built-in defaults, default_table. KQL only fails the rule when KQL is
+# its final language; elsewhere it is an informational preview.
 # kql:
 #   tables:
 #     windows/system: Event

@@ -132,6 +132,38 @@ def resolve_rule(cfg: Config, rid: str) -> Path | None:
     return candidate
 
 
+def mark_conversions(conversions: dict, final: list[str]) -> list[dict]:
+    """Tag every conversion `final` or preview. A failure in a preview language is `severity: "info"` (shown with its
+    inline fix, never part of the gate or the score); in the final language it stays `"error"`.
+    Returns the preview failures as issue-shaped dicts."""
+    infos: list[dict] = []
+    for name, c in conversions.items():
+        c["final"] = name in final
+        if c["ok"]:
+            continue
+        c["severity"] = "error" if c["final"] else "info"
+        if not c["final"]:
+            infos.append({"severity": "info", "target": name, "label": c.get("label"), "message": c.get("error", ""), "code": c.get("code") or "conversion-failed",
+                          "path": c.get("path"), "line": c.get("line"), "hint": c.get("hint"), "fix": c.get("fix")})
+    return infos
+
+
+def final_language_view(chosen: routing.Resolved) -> dict:
+    """The resolved final language(s) and why: source rule | folder | workspace | legacy-config | all."""
+    return {"targets": chosen.targets, "source": chosen.source, "folder": chosen.folder}
+
+
+def issue_counts(lint: list, conversions: dict) -> dict:
+    """What the issue summary shows: errors = lint errors + conversion failures in the FINAL language;
+    warnings = lint warnings; info = preview-language conversion failures (never errors or warnings)."""
+    def sev(i: object) -> str:
+        return i["severity"] if isinstance(i, dict) else i.severity
+
+    return {"errors": sum(sev(i) == "error" for i in lint) + sum(1 for c in conversions.values() if not c["ok"] and c.get("final")),
+            "warnings": sum(sev(i) == "warning" for i in lint),
+            "info": sum(1 for c in conversions.values() if not c["ok"] and not c.get("final"))}
+
+
 def convert_all(text: str, target_names: list[str], extra: list, kql: object = None) -> dict:
     registry = available_targets()
     out: dict[str, dict] = {}
@@ -168,7 +200,7 @@ def _top_issues(issues: list[Issue], problems: list[Issue], results: list[CaseRe
     for c in conv.values():
         if not c["ok"]:
             found.append({"severity": "error", "message": f"conversion failed ({c['label']}): {c.get('error', '')}",
-                          "code": c.get("code") or "conversion-failed", "hint": c.get("hint")})
+                          "code": c.get("code") or "conversion-failed", "hint": c.get("hint"), "fix": c.get("fix")})
     for r in results:
         if not r.passed:
             detail = r.error or f"expected {r.expect}, got {r.got}"
@@ -206,11 +238,12 @@ def list_rules(cfg: Config) -> list[dict]:
             **summarize(_first_detection(rf.docs)),
             "logsource": " / ".join(str(ls[k]) for k in ("product", "category", "service") if ls.get(k)) or None,
             "targets": chosen.targets,  # final query language(s)
-            "target_source": chosen.source,  # rule | route | default | all
+            "target_source": chosen.source,  # rule | folder | workspace | legacy-config | all
+            "final_language": final_language_view(chosen),
             "conversion": {name: c["ok"] for name, c in conv.items()},
             "state": _state([*issues, *problems], results, any(not c["ok"] for c in conv.values())),
             "lint": {
-                "errors": sum(i.severity == "error" for i in issues),
+                "errors": sum(i.severity == "error" for i in issues) + sum(not c["ok"] for c in conv.values()),  # + final-language conversion failures
                 "warnings": sum(i.severity == "warning" for i in issues),
             },
             "tests": {"total": len(results), "passed": sum(r.passed for r in results)},
@@ -236,9 +269,10 @@ def targets_view(cfg: Config) -> list[dict]:
             for t in routing.resolve(cfg, rule_id(cfg, rf.path), routing.first_detection(rf.docs)).targets:
                 used[t] += 1
     return [
-        {"name": name, "label": t.label, "extension": t.extension, "active": name in cfg.targets, "default": name == cfg.default_target,
+        {"name": name, "label": t.label, "extension": t.extension, "active": name in cfg.targets or name == "sigma",
+         "default": name == (cfg.final_default or cfg.default_target), "pseudo": name == "sigma",
          **target_info(t), "used_by": used.get(name, 0)}
-        for name, t in sorted(available_targets().items())
+        for name, t in sorted(available_targets().items(), key=lambda kv: (kv[0] != "sigma", kv[0]))  # "Keep as Sigma" first
     ]
 
 
@@ -265,6 +299,7 @@ def rule_detail(cfg: Config, rid: str) -> dict:
     # the final language comes first; the other active targets are previews
     conversions = convert_all(rf.text, list(dict.fromkeys([*chosen.targets, *cfg.targets])), _extra_pipelines(cfg), cfg.kql)
     conv_failed = any(not conversions[t]["ok"] for t in chosen.targets if t in conversions)
+    preview_issues = mark_conversions(conversions, chosen.targets)
     return {
         "id": rid,
         "file": rf.rel,
@@ -273,8 +308,11 @@ def rule_detail(cfg: Config, rid: str) -> dict:
         "state": _state([*issues, *problems], results, conv_failed),
         "targets": chosen.targets,
         "target_source": chosen.source,
+        "final_language": final_language_view(chosen),
         "lint": [_issue(i) for i in issues],
         "conversions": conversions,
+        "preview_issues": preview_issues,
+        "counts": issue_counts([_issue(i) for i in issues], conversions),
         "tests": {
             "cases_file": cfg.rel(cpath) if cpath.is_file() else None,
             "cases_text": cpath.read_text(encoding="utf-8") if cpath.is_file() else None,
@@ -284,7 +322,7 @@ def rule_detail(cfg: Config, rid: str) -> dict:
     }
 
 
-def validate_text(cfg: Config, text: str, cases_text: str | None = None, targets: list[str] | None = None) -> dict:
+def validate_text(cfg: Config, text: str, cases_text: str | None = None, targets: list[str] | None = None, rule_rel: str | None = None) -> dict:
     """Validate an unsaved rule: lint, conversion and (optionally) test cases."""
     rel = "<editor>"
     try:
@@ -301,7 +339,7 @@ def validate_text(cfg: Config, text: str, cases_text: str | None = None, targets
     for idx, doc in enumerate(docs):
         issues.extend(lint_doc(doc, rel, set(available_targets()), locators[idx] if len(locators) == len(docs) else None))
 
-    chosen = routing.resolve(cfg, None, routing.first_detection(docs)) if docs else routing.Resolved(list(cfg.targets), "all")
+    chosen = routing.resolve(cfg, rule_rel, routing.first_detection(docs)) if docs else routing.Resolved(list(cfg.targets), "all")
     counted = list(targets) if targets else chosen.targets  # only the final language fails the rule
     names = list(dict.fromkeys([*counted, *([] if targets else cfg.targets)]))
     conversions = convert_all(text, names, _extra_pipelines(cfg), cfg.kql) if docs else {}
@@ -315,11 +353,13 @@ def validate_text(cfg: Config, text: str, cases_text: str | None = None, targets
         tests = {"results": [_case(r) for r in results], "problems": [_issue(p) for p in problems]}
 
     failed_conversion = any(not conversions[t]["ok"] for t in counted if t in conversions)
+    preview_issues = mark_conversions(conversions, counted)
     state = _state([*issues, *problems], results)
     if failed_conversion and state != "fail":
         state = "fail"
-    return {"state": state, "targets": chosen.targets, "target_source": chosen.source,
-            "lint": [_issue(i) for i in issues], "conversions": conversions, "tests": tests}
+    return {"state": state, "targets": chosen.targets, "target_source": chosen.source, "final_language": final_language_view(chosen),
+            "lint": [_issue(i) for i in issues], "conversions": conversions, "preview_issues": preview_issues,
+            "counts": issue_counts([_issue(i) for i in issues], conversions), "tests": tests}
 
 
 def repo_stats(cfg: Config) -> dict:
@@ -420,7 +460,7 @@ def _change_body(summary: dict, validation: dict, quality: dict, rule_repo_path:
 
 def submit_rule(cfg: Config, path: str, rule_text: str, cases_text: str | None, title: str | None = None,
                 client: GitHubClient | None = None, submitted_by: str = "", trailers: list[str] | None = None,
-                is_new: bool | None = None) -> dict:
+                is_new: bool | None = None, extra_files: dict[str, str] | None = None) -> dict:
     """Step 1: send the rule (and its cases) to a new branch so the real CI validates it.
 
     Rules blocked by the local quality gate are not sent: CI would fail them the same way.
@@ -444,6 +484,8 @@ def submit_rule(cfg: Config, path: str, rule_text: str, cases_text: str | None, 
         is_new = not rule_file.is_file()
     rule_repo_path = gh.repo_path(cfg.rel(rule_file))
     files = {rule_repo_path: rule_text}
+    for extra_rel, extra_text in (extra_files or {}).items():  # e.g. mappings.yml, when it changed locally
+        files[gh.repo_path(extra_rel)] = extra_text
     cases_repo_path = None
     if cases:
         cases_repo_path = gh.repo_path(cfg.rel(cfg.cases_dir / rel))
@@ -455,7 +497,22 @@ def submit_rule(cfg: Config, path: str, rule_text: str, cases_text: str | None, 
     client = client or GitHubClient(gh)
     message = f"{pr_title}\n\n{body}" + (f"\n\n{submitted_by}" if submitted_by else "") + _trailer_block(trailers)
     pushed = client.push_branch(files, message, branch_slug(rel))
-    return {**pushed, "title": pr_title, "files": sorted(files), "is_new": is_new}
+    return {**pushed, "title": pr_title, "files": sorted(files), "is_new": is_new, "mappings_included": bool(extra_files)}
+
+
+def submit_mappings(cfg: Config, text: str, title: str | None = None, client: GitHubClient | None = None, submitted_by: str = "") -> dict:
+    """Publish mappings.yml on its own (CI first, like every change)."""
+    from . import mappings
+
+    gh = _require_github(cfg)
+    mappings.parse(text)  # an invalid file is never sent
+    repo_path = gh.repo_path(mappings.FILE)
+    pr_title = ((title or "").strip() or "chore: update query mappings")[:200]
+    body = "Query mappings (`mappings.yml`) submitted from the Vitrix Editor."
+    client = client or GitHubClient(gh)
+    message = f"{pr_title}\n\n{body}" + (f"\n\n{submitted_by}" if submitted_by else "")
+    pushed = client.push_branch({repo_path: text}, message, "mappings")
+    return {**pushed, "title": pr_title, "files": [repo_path], "is_new": False, "mappings_included": True}
 
 
 def _trailer_block(trailers: list[str] | None) -> str:
@@ -471,7 +528,7 @@ class DraftsBlocked(ChangeError):
 
 
 def submit_drafts(cfg: Config, drafts: list[dict], title: str | None = None, client: GitHubClient | None = None,
-                  submitted_by: str = "", trailers: list[str] | None = None) -> dict:
+                  submitted_by: str = "", trailers: list[str] | None = None, extra_files: dict[str, str] | None = None) -> dict:
     """Publish several drafts (dicts with id, path, title, rule, cases) as ONE `vitrix/pack-...` branch.
 
     Every draft must have a path and pass validation plus the local quality gate, otherwise
@@ -508,13 +565,15 @@ def submit_drafts(cfg: Config, drafts: list[dict], title: str | None = None, cli
     if blocked:
         raise DraftsBlocked(blocked)
 
+    for extra_rel, extra_text in (extra_files or {}).items():
+        files[gh.repo_path(extra_rel)] = extra_text
     plural = "s" if len(drafts) != 1 else ""
     pr_title = ((title or "").strip() or f"feat: add {len(drafts)} rule{plural} from drafts")[:200]
     body = f"{len(drafts)} rule{plural} submitted from Vitrix drafts.\n\n" + "\n".join(lines)
     message = f"{pr_title}\n\n{body}" + (f"\n\n{submitted_by}" if submitted_by else "") + _trailer_block(trailers)
     client = client or GitHubClient(gh)
     pushed = client.push_branch(files, message, "pack-" + datetime.now(timezone.utc).strftime("%Y%m%d"))
-    return {**pushed, "title": pr_title, "files": sorted(files), "is_new": True}
+    return {**pushed, "title": pr_title, "files": sorted(files), "is_new": True, "mappings_included": bool(extra_files)}
 
 
 def submit_config(cfg: Config, text: str, title: str | None = None, client: GitHubClient | None = None, submitted_by: str = "") -> dict:

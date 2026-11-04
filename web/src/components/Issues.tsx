@@ -1,7 +1,8 @@
 import clsx from "clsx";
-import { AlertTriangle, Check, Copy, XCircle } from "lucide-react";
+import { AlertTriangle, Check, Copy, Info, XCircle } from "lucide-react";
 import { Fragment, useState, type ReactNode } from "react";
 import type { LintIssue } from "../types";
+import { KqlFixForm, isKqlFix } from "./KqlFix";
 import { t } from "../i18n";
 
 /** Renders `backticked` spans as inline code; everything else stays plain text (no HTML is ever injected). */
@@ -51,7 +52,7 @@ export function IssueItem({ issue, onJump }: { issue: LintIssue; onJump?: (issue
   const where = issueWhere(issue);
   return (
     <li className="flex items-start gap-2">
-      {err ? <XCircle size={15} className="mt-0.5 shrink-0 text-bad" aria-label={t("l_error")} /> : <AlertTriangle size={15} className="mt-0.5 shrink-0 text-warn" aria-label={t("l_warning")} />}
+      {issue.severity === "info" ? <Info size={15} className="mt-0.5 shrink-0 text-muted" aria-label={t("kf_info")} /> : err ? <XCircle size={15} className="mt-0.5 shrink-0 text-bad" aria-label={t("l_error")} /> : <AlertTriangle size={15} className="mt-0.5 shrink-0 text-warn" aria-label={t("l_warning")} />}
       <div className="min-w-0 flex-1">
         <span className={clsx("text-text [overflow-wrap:anywhere]")}>{issue.message}</span>
         {where &&
@@ -62,12 +63,13 @@ export function IssueItem({ issue, onJump }: { issue: LintIssue; onJump?: (issue
           ) : (
             <span className="ml-2 font-mono text-xs text-subtle">{where}</span>
           ))}
-        {issue.hint && (
+        {issue.hint && !isKqlFix(issue) && (
           <p className="mt-0.5 text-[12.5px] text-muted">
             <span className="font-medium text-strong">{t("is_how_to_fix")}</span> <HintText text={issue.hint} />
           </p>
         )}
-        {issue.fix?.snippet && <CopySnippet snippet={issue.fix.snippet} />}
+        {isKqlFix(issue) && <KqlFixForm issue={issue} />}
+        {issue.fix?.snippet && !isKqlFix(issue) && <CopySnippet snippet={issue.fix.snippet} />}
       </div>
     </li>
   );

@@ -4,11 +4,18 @@
 export type State = "ok" | "warn" | "fail";
 
 // How the final language was chosen: in the rule, a vitrix.yml route, default_target or "all targets".
-export type TargetSource = "rule" | "route" | "default" | "all" | "override";
+export type TargetSource = "rule" | "route" | "default" | "legacy-config" | "all" | "override";
+
+/** Resolved final language (E1): order rule > folder > workspace > legacy vitrix.yml > all. */
+export interface FinalLanguage {
+  targets: string[];
+  source: "rule" | "folder" | "workspace" | "legacy-config" | "all" | "override";
+  folder: string | null;
+}
 
 /** Contract B3: where (path/line/column) and how to fix (hint, snippet). All new fields are optional. */
 export interface LintIssue {
-  severity: "error" | "warning";
+  severity: "error" | "warning" | "info";
   message: string;
   rule?: string;
   file?: string | null; // "rule" | "cases": which editor tab the line refers to
@@ -17,7 +24,8 @@ export interface LintIssue {
   line?: number | null; // 1-based
   column?: number | null; // 1-based
   hint?: string | null;
-  fix?: { replace_path?: string; snippet?: string } | null;
+  /** `kind`/`key`/`suggestion`/`table`/`fields` drive the inline KQL fix form (E1 contract, provisional until posted). */
+  fix?: { replace_path?: string; snippet?: string; kind?: string; key?: string; suggestion?: string; table?: string; field?: string; fields?: string[] } | null;
 }
 
 export interface RuleSummary {
@@ -50,6 +58,15 @@ export interface Conversion {
   extension?: string;
   query?: string;
   error?: string;
+  /** Flat issue fields of a failed conversion (E1): code, hint, fix, position, `final` = it is the rule's final language. */
+  code?: string;
+  hint?: string | null;
+  fix?: LintIssue["fix"];
+  line?: number | null;
+  column?: number | null;
+  path?: string | null;
+  final?: boolean;
+  severity?: "error" | "warning" | "info";
 }
 
 export type CaseKind = "positive" | "negative" | "false_positive" | "edge";
@@ -74,6 +91,10 @@ export interface Validation {
   state: State;
   targets: string[];
   target_source: TargetSource | null;
+  final_language?: FinalLanguage;
+  /** errors include final-language conversion failures; info = preview-language failures. */
+  counts?: { errors: number; warnings: number; info: number };
+  preview_issues?: LintIssue[];
   lint: LintIssue[];
   conversions: Record<string, Conversion>;
   tests: TestReport | null;
@@ -190,6 +211,7 @@ export interface Submission {
   title: string;
   files: string[];
   is_new: boolean;
+  mappings_included?: boolean;
 }
 
 export type CiState = "none" | "pending" | "failure" | "success";
@@ -838,4 +860,31 @@ export interface RelatedRule {
   shared_fields: string[];
   same_logsource: boolean;
   level: string | null;
+}
+
+/** Final-language defaults kept in mappings.yml (Sprint 5 addendum, provisional shape). */
+export interface FinalLanguageCfg {
+  default: string | null;
+  folders: Record<string, string>;
+}
+
+export interface FinalLanguagePatch {
+  default?: string | null;
+  folders?: Record<string, string | null>;
+}
+
+/** Merge-patch for PUT /api/mappings: `null` removes an entry, absent keys stay. */
+export interface MappingsPatch {
+  tables?: Record<string, string | null>;
+  fields?: Record<string, Record<string, string | null> | null>;
+}
+
+/** `mappings.yml` (E1): KQL table per product/service and field -> column per table. */
+export interface MappingsView {
+  schema_version: number;
+  kql: { tables: Record<string, string>; fields: Record<string, Record<string, string>> };
+  final_language?: FinalLanguageCfg;
+  sha?: string | null;
+  file?: string | null;
+  publication?: Publication | null;
 }

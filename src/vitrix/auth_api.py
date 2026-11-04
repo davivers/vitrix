@@ -34,7 +34,7 @@ PUBLIC = {
 VIEWER_POSTS = {"/api/regex", "/api/validate", "/api/impact", "/api/replay", "/api/replay/draft", "/api/config/validate", "/api/related"}
 # POSTs that write or publish (CI, pull requests, local drafts): editor and above.
 EDITOR_POSTS = {"/api/ci/rules", "/api/ci/drafts", "/api/pull-requests", "/api/drafts", "/api/packs/jobs", "/api/reviews",
-                "/api/rules", "/api/ci/local-rules"}
+                "/api/rules", "/api/ci/local-rules", "/api/ci/mappings"}
 # Writes any signed-in viewer may do: comments change no rule (ADR 0005). Author/admin checks live in the routes.
 VIEWER_WRITES = {"/api/comments", "/api/sync", "/api/reviews/read-all"}  # /api/sync: `force` needs editor, checked in the route
 VIEWER_WRITE_PREFIXES = ("/api/comments/",)  # PATCH / DELETE one comment
@@ -55,6 +55,8 @@ def required_role(method: str, path: str) -> str:
         return "viewer"
     if _REVIEW_OWN_STATE.match(path):
         return "viewer"
+    if method in ("PUT", "POST") and path == "/api/mappings":  # query mappings file (ADR 0007 guards); GET is viewer
+        return "editor"
     if method in ("PUT", "DELETE") and path.startswith("/api/rules/"):  # local rule files (ADR 0007)
         return "editor"
     if path.startswith(EDITOR_WRITE_PREFIXES):  # PUT/DELETE a draft, review decisions; ownership checked in the route
