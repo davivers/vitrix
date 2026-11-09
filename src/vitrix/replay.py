@@ -1,21 +1,20 @@
 """Log replay: run every rule against a set of events, locally.
 
-It serves three purposes:
-
-- **threat simulation**: a dataset with the events of an attack (encoded PowerShell,
-  credential dumping, persistence...) shows which rules catch what;
-- **false positives**: a dataset of normal activity in the environment should fire nothing;
-- **regression**: each dataset may have an expectations file with how many events each rule
-  must match. If a change moves that number, replay reports it.
+It shows which events a rule matches, like a logtest tool: an attack dataset shows which rules
+catch what, a dataset of normal activity shows the noise. It is information only and never
+blocks a rule, a run or a pull request.
 
 Datasets live in `datasets/` (`datasets_dir` in vitrix.yml), one per file: JSON (a list of
 events or `{"events": [...]}`), JSON Lines (`.jsonl`, one event per line) or YAML (a list or
-`events:`). Expectations sit next to them, in `<name>.expect.yml`:
+`events:`). Optional notes sit next to them, in `<name>.expect.yml` (shown by `vitrix replay`):
 
     expect:
       windows/powershell_encoded.yml: 2          # exactly 2 events
       windows/schtasks_system.yml: {min: 1}       # at least 1
     others: 0                                     # every other rule: 0 (default: no limit)
+
+`others` suits a dataset of normal activity. On an attack dataset it would fail every new rule
+that correctly detects the attack.
 """
 
 from __future__ import annotations
@@ -215,7 +214,7 @@ def check_expectations(result: dict, rules: dict[str, dict], others: int | None)
         for rule, n in sorted(got.items()):
             if rule not in rules and n > others:
                 spec = {"min": 0, "max": others}
-                checks.append({"rule": rule, "expected": spec, "got": n, "passed": False, "message": _describe(spec, n)})
+                checks.append({"rule": rule, "expected": spec, "got": n, "passed": False, "message": _describe_others(spec, n)})
     return checks
 
 
@@ -227,6 +226,12 @@ def _describe(spec: dict, n: int) -> str:
     else:
         want = f"between {spec['min']} and {spec['max']}"
     return f"expected {want} event(s), got {n}"
+
+
+def _describe_others(spec: dict, n: int) -> str:
+    """The same failure when the limit is the dataset's `others`, not an expectation for this rule."""
+    return (f"{_describe(spec, n)}: this rule is not listed under `expect:`, so the dataset's `others: {spec['max']}` limit applies. "
+            "If these matches are correct, list the rule under `expect:` in the .expect.yml or remove `others`.")
 
 
 # --------------------------------------------------------------------------- draft replay (Editor)
@@ -406,11 +411,12 @@ def replay_draft(cfg: Config, rule_text: str, names: list[str] | None = None, pa
             item["added_total"], item["removed_total"] = len(add), len(rem)
         if item["error"] is None:
             spec = expect_rules.get(rid) if path else None
+            describe = _describe
             if spec is None and others is not None:
-                spec = {"min": 0, "max": others}
+                spec, describe = {"min": 0, "max": others}, _describe_others
             if spec is not None:
                 ok = item["matches"] >= spec["min"] and (spec["max"] is None or item["matches"] <= spec["max"])
-                item.update(expectation=spec, passed=ok, message=None if ok else _describe(spec, item["matches"]))
+                item.update(expectation=spec, passed=ok, message=None if ok else describe(spec, item["matches"]))
         results.append(item)
     cases_ok = all(c["passed"] for c in cases) if cases else None
     return {"rule": rid, "duration_ms": round((time.perf_counter() - started) * 1000, 2), "datasets": results,

@@ -31,6 +31,7 @@
   --color-on-brand: #ffffff;
   --color-accent: #1d4ed8;
   --color-accent-soft: #e3ecfd;
+  --color-selection: #add6ff; /* selected text: must stand out on white and on code blocks */
   --color-glow: #1d4ed8; /* = accent (no glow); editor cursor */
 
   /* status: reserved, never a series colour, always with icon + text */
@@ -87,6 +88,7 @@
   --color-brand: #2563eb;
   --color-accent: #60a5fa;
   --color-accent-soft: #16264a;
+  --color-selection: #264f78;
   --color-glow: #60a5fa;
   --color-good: #4ade80;
   --color-good-soft: #12281b;
@@ -127,7 +129,7 @@ body {
   -webkit-font-smoothing: antialiased;
 }
 :focus-visible { outline: 2px solid var(--color-accent); outline-offset: 2px; }
-::selection { background: var(--color-accent-soft); }
+::selection { background: var(--color-selection); }
 
 /* Code and mono text: no ligatures (JetBrains Mono renders "/=" as a not-equal glyph, which misleads in regexes). */
 code, pre, kbd, samp, .font-mono, .cm-editor, .cm-content {

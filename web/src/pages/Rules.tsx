@@ -62,8 +62,8 @@ function GateStrip({ q, onBlocked, forceOpen }: { q: QualityReport; onBlocked: (
             <StatTile
               label={t("replay_datasets")}
               value={q.datasets.length}
-              sub={q.datasets.length ? t("ru_no_regress", { n: q.datasets.filter((d) => d.passed).length }) : t("ru_none_ds")}
-              status={q.datasets.some((d) => !d.passed) ? "fail" : q.datasets.length ? "ok" : "none"}
+              sub={q.datasets.length ? t("ru_ds_info") : t("ru_none_ds")}
+              status="none"
             />
           </div>
           <FlowFunnel q={q} />

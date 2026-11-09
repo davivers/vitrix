@@ -97,7 +97,7 @@ vitrix init ..\my-detections; cd ..\my-detections
 vitrix serve                         # http://127.0.0.1:8000
 ```
 
-PyPI (soon, not published yet): `pip install vitrix` will work once the first release is out.
+Vitrix is distributed from GitHub only. Do not run `pip install vitrix`: that name on PyPI is not ours.
 
 Without cloning, install straight from GitHub: `scripts/install.sh "vitrix[api] @ git+https://github.com/davivers/vitrix"` (Windows: `scripts\install.ps1 -Target "vitrix[api] @ git+https://github.com/davivers/vitrix"`).
 `vitrix: command not found` means the virtual environment is not active; activate it in each new terminal.
@@ -138,7 +138,7 @@ vitrix serve
 | **Editor** | One rule, everything live: validation with the exact line and a fix hint, the **final language** chosen from a menu (or "Sigma, no conversion"), queries per language with inline fixes (e.g. pick the KQL table), **Test & Replay** (cases and datasets in one table, field-level diff, compare with the saved version) and the quality gate |
 | **Quality gate** | Blocking checks plus a 0-100 health score; a rule is approved only with no blocker and a score at or above `min_score` (default 80) |
 | **Test cases** | Typed cases (positive, negative, false positive, edge) run by a local evaluator; exclusions are proven |
-| **Log replay** | Run rules on JSON/JSONL/YAML logs with `<dataset>.expect.yml` regression expectations |
+| **Log replay** | Try rules on JSON/JSONL/YAML logs and see which events match; never blocks a pull request |
 | **MITRE ATT&CK coverage** | Matrix of tactics and techniques from your rule tags, drill-down to rules, ATT&CK Navigator export |
 | **CI-first publishing** | Pushes a `vitrix/*` branch; the pull request opens only after the real CI passed for that exact commit (checked again server-side) |
 | **Save locally** | Rules are saved as files in `rules/`; the Rules tab shows every rule not yet in Git, with a filter and Publish per rule or in batch |
@@ -184,9 +184,9 @@ Sessions are opaque tokens in an `HttpOnly`, `SameSite=Lax` cookie (only the has
 | `vitrix lint [--strict]` | Schema, modifiers, regex, condition, ATT&CK tags, duplicated logic |
 | `vitrix convert [-t target] [--stdout]` | Convert to the configured SIEMs and write `dist/` |
 | `vitrix test` | Run `cases/` with the local evaluator |
-| `vitrix check [--strict] [--gate] [--markdown FILE]` | Lint + convert + test for CI; `--gate` adds replay and the quality gate |
+| `vitrix check [--strict] [--gate] [--markdown FILE]` | Lint + convert + test for CI; `--gate` adds the quality gate |
 | `vitrix gate` | Lifecycle and quality gate per rule, with health score |
-| `vitrix replay [dataset] [-f file]` | Run rules on logs and check expected match counts |
+| `vitrix replay [dataset] [-f file]` | Run rules on logs and show which events match |
 | `vitrix report [--format md\|json] [-o file]` | Full report in one document |
 | `vitrix targets` | List available SIEM targets |
 | `vitrix serve [--host H] [--port N]` | Local API and web UI |
@@ -218,7 +218,7 @@ Your detections repository (created by `vitrix init`):
 
 ```
 vitrix.yml          configuration           rules/      Sigma rules (source of truth)
-cases/              test cases (same path)  datasets/   replay logs + <name>.expect.yml
+cases/              test cases (same path)  datasets/   replay logs
 dist/               compiled queries (CI)   .github/    the CI workflow
 mappings.yml        KQL tables/columns and final-language defaults (edited from the app)
 .vitrix/            accounts, drafts, reviews, pack cache (git-ignored)
@@ -277,7 +277,7 @@ If the rule has an exclusion (`filter_*`, or a selection negated in the conditio
 |---|---|
 | Validate | YAML, schema and types, modifiers, invalid or catastrophic regex, complexity, ATT&CK tags, duplicated logic across rules, conversion to the final language |
 | Test | positive, negative and edge cases; test data quality (repeated event, event without any field the rule uses) |
-| Replay | logs in `datasets/` against every rule, with time per rule and expected counts (regression) |
+| Replay | logs in `datasets/` against every rule, with the matching events and time per rule (information only) |
 | Analyze | false-positive case, exclusion tested, ATT&CK technique, documented `falsepositives`, periodic review (age from Git) |
 | Quality gate | every blocking check passes: "is the rule ready to be published?" |
 | Merged PR | validated by the real CI and merged; the CI builds `dist/`. Deploying to a SIEM is your own CI's job, never the app's |
@@ -293,21 +293,13 @@ quality_gate:               # defaults shown
   require_mitre: true
   allow_warnings: true                      # false: any lint warning blocks
   blocked_status: [deprecated, unsupported]
-  require_replay: false                     # true: the rule needs an expectation in some dataset
   review_days: 180                          # recommend a review after N days without a change (0 = off)
   min_score: 80                             # health score a rule needs to be APPROVED (0 = no threshold)
 ```
 
 ### Log replay
 
-A dataset is a file in `datasets/` (JSON, JSON Lines or YAML). Next to it, `<name>.expect.yml` says how many events each rule must match; if a change moves that number, replay and the gate report it:
-
-```yaml
-expect:
-  windows/powershell_encoded.yml: 2       # exactly 2
-  windows/schtasks_system.yml: {min: 1}   # at least 1
-others: 0                                 # no other rule may fire
-```
+A dataset is a file in `datasets/` (JSON, JSON Lines or YAML). Replay shows which events each rule matches, like a logtest tool, and for a saved rule compares the matches with the saved version automatically. There is nothing to configure, and replay never blocks a rule, a CI run or a pull request.
 
 The example repository ships `datasets/windows_attack_simulation.jsonl`: an attack simulation (encoded PowerShell, persistence through a scheduled task, LSASS dump) mixed with legitimate activity.
 

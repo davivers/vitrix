@@ -32,7 +32,7 @@ def test_lists_datasets_with_event_counts(client):
     c, _ = client
     out = c.get("/api/replay/datasets").json()
     ds = next(d for d in out if d["name"] == "windows_attack_simulation.jsonl")
-    assert ds["events"] > 0 and ds["has_expectations"] is True and ds["error"] is None
+    assert ds["events"] > 0 and ds["has_expectations"] is False and ds["error"] is None
 
 
 def test_draft_replay_all_datasets(client):
@@ -49,7 +49,8 @@ def test_draft_replay_all_datasets(client):
 
 
 def test_expectation_pass_and_fail_by_path(client):
-    c, _ = client
+    c, ds = client
+    (ds / "windows_attack_simulation.expect.yml").write_text("expect:\n  windows/powershell_encoded.yml: 2\n", encoding="utf-8")
     ok = c.post("/api/replay/draft", json={"rule": DRAFT, "path": "windows/powershell_encoded.yml"}).json()
     d = ok["datasets"][0]
     assert d["expectation"] is not None and d["passed"] in (True, False)

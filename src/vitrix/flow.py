@@ -109,10 +109,9 @@ def replay_text(cfg: Config, text: str, rule_text: str | None = None) -> dict:
     return replay(_with_ids(cfg, files), events)
 
 
-def _replay_index(cfg: Config, files: list[RuleFile]) -> tuple[list[dict], dict[str, list[dict]]]:
-    """Run every dataset once: (summary per dataset, checks per rule)."""
+def _replay_summary(cfg: Config, files: list[RuleFile]) -> list[dict]:
+    """Run every dataset once and summarise it (information only: the gate does not read it)."""
     datasets: list[dict] = []
-    by_rule: dict[str, list[dict]] = {}
     for path in dataset_files(cfg):
         name = dataset_name(cfg, path)
         try:
@@ -121,16 +120,13 @@ def _replay_index(cfg: Config, files: list[RuleFile]) -> tuple[list[dict], dict[
             datasets.append({"dataset": name, "error": str(exc), "passed": False, "checks": [], "events": 0, "rules_matched": 0})
             continue
         datasets.append({k: v for k, v in res.items() if k != "rules"})
-        for c in res["checks"]:
-            by_rule.setdefault(c["rule"], []).append({**c, "dataset": name})
-    return datasets, by_rule
+    return datasets
 
 
 # --------------------------------------------------------------------------- quality gate
 
 
-def _rule_quality(cfg: Config, rf: RuleFile, issues: list[Issue], extra: list, replay_checks: list[dict],
-                  age_days: float | None = None) -> dict:
+def _rule_quality(cfg: Config, rf: RuleFile, issues: list[Issue], extra: list, age_days: float | None = None) -> dict:
     results, problems = run_rule_cases(cfg, rf)
     doc = routing.first_detection(rf.docs)
     chosen = routing.resolve(cfg, rule_id(cfg, rf.path), doc)
@@ -138,7 +134,7 @@ def _rule_quality(cfg: Config, rf: RuleFile, issues: list[Issue], extra: list, r
     detection_docs = [d for d in rf.docs if isinstance(d, dict) and "detection" in d]
     return evaluate_rule(
         cfg.gate, doc if isinstance(doc, dict) else None, None, issues, results, problems,
-        {t: c["ok"] for t, c in conv.items()}, any(exclusion_selections(d) for d in detection_docs), replay_checks, age_days,
+        {t: c["ok"] for t, c in conv.items()}, any(exclusion_selections(d) for d in detection_docs), age_days,
         rule_governance(doc),
     )
 
@@ -155,7 +151,7 @@ def quality_report(cfg: Config, only: str | None = None) -> dict:
     lint_by_rule: dict[str, list[Issue]] = {}
     for issue in lint_files(files, set(available_targets())):
         lint_by_rule.setdefault(issue.rule, []).append(issue)
-    datasets, replay_by_rule = _replay_index(cfg, files)
+    datasets = _replay_summary(cfg, files)
     ages = _ages(cfg)
 
     rules: list[dict] = []
@@ -163,14 +159,14 @@ def quality_report(cfg: Config, only: str | None = None) -> dict:
         rid = rule_id(cfg, rf.path)
         if only is not None and rid != only:
             continue
-        q = _rule_quality(cfg, rf, lint_by_rule.get(rf.rel, []), extra, replay_by_rule.get(rid, []), ages.get(rid))
+        q = _rule_quality(cfg, rf, lint_by_rule.get(rf.rel, []), extra, ages.get(rid))
         s = summarize(_first_detection(rf.docs))
         rules.append({"id": rid, "file": rf.rel, "title": s["title"], "level": s["level"], "status": s["status"],
                       "age_days": ages.get(rid), **q})
     for rel, message in broken.items():
         if only is not None and rel != only:
             continue
-        q = evaluate_rule(cfg.gate, None, message, [], [], [], {}, False, [])
+        q = evaluate_rule(cfg.gate, None, message, [], [], [], {}, False)
         rules.append({"id": rel, "file": rel, "title": rel, "level": None, "status": None, "age_days": ages.get(rel), **q})
     rules.sort(key=lambda r: (r["ready"], r["score"], r["id"]))
     return {
@@ -192,7 +188,7 @@ def quality_report(cfg: Config, only: str | None = None) -> dict:
 def draft_quality(cfg: Config, validation: dict, rule_text: str, cases_given: bool, path: str | None = None) -> dict:
     """Quality gate of a rule being edited (Editor), built from the validate_text result.
 
-    With `path` (an existing rule), replay expectations and Git age for that rule apply too.
+    With `path` (an existing rule), its Git age applies too. `datasets` is information only.
     """
     from .cases import CaseResult
 
@@ -213,23 +209,19 @@ def draft_quality(cfg: Config, validation: dict, rule_text: str, cases_given: bo
     detection_docs = [d for d in docs if isinstance(d, dict) and "detection" in d]
 
     datasets: list[dict] = []
-    replay_checks: list[dict] = []
     if detection_docs:
         draft = RuleFile(Path("<editor>"), path or "<editor>", rule_text, docs)
         for dpath in dataset_files(cfg):
             name = dataset_name(cfg, dpath)
             try:
                 res = replay([(path or "<editor>", draft)], load_events(dpath.read_text(encoding="utf-8"), dpath.name))
-                expectations, _ = load_expectations(dpath)
             except ReplayError as exc:
                 datasets.append({"dataset": name, "error": str(exc)})
                 continue
             r = res["rules"][0]
             datasets.append({"dataset": name, "events": res["events"], "matches": r["matches"], "duration_ms": r["duration_ms"], "error": r["error"]})
-            if path and path in expectations:
-                replay_checks += [{**c, "dataset": name} for c in check_expectations(res, {path: expectations[path]}, None)]
     q = evaluate_rule(cfg.gate, doc if isinstance(doc, dict) else None, parse_error, issues, results, problems,
-                      final, any(exclusion_selections(d) for d in detection_docs), replay_checks,
+                      final, any(exclusion_selections(d) for d in detection_docs),
                       _ages(cfg).get(path) if path else None, rule_governance(doc))
     return {**q, "datasets": datasets}
 
@@ -442,8 +434,7 @@ def report_markdown(data: dict) -> str:
     lines += ["", "## Replay", ""]
     if q["datasets"]:
         for d in q["datasets"]:
-            state = d.get("error") or ("expectations met" if d["passed"] else "expectations failed")
-            lines.append(f"- `{d['dataset']}`: {d.get('events', 0)} events, {d.get('rules_matched', 0)} rules fired · {state}")
+            lines.append(f"- `{d['dataset']}`: " + (d.get("error") or f"{d.get('events', 0)} events, {d.get('rules_matched', 0)} rules fired"))
     else:
         lines.append("No dataset in datasets/.")
     lines += ["", "## Rule set", "",

@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import re
+
 import yaml
 from test_engine import run
 
@@ -47,6 +49,27 @@ def test_the_template_workflow_runs_on_the_branches_the_ui_pushes():
     assert "vitrix/**" in wf[True]["push"]["branches"]  # `on` is parsed as the boolean True by YAML 1.1
     steps = " ".join(str(s.get("run", "")) for s in wf["jobs"]["validate"]["steps"])
     assert "vitrix check --strict --gate" in steps
+
+
+def test_the_template_ci_installs_vitrix_only_from_a_pinned_commit(tmp_path):
+    """A bare `vitrix` resolves on PyPI, where whoever registers the name would run code in the user's CI."""
+    repo = tmp_path / "detections"
+    assert main(["init", str(repo)]) == 0
+    workflow = (repo / ".github" / "workflows" / "vitrix.yml").read_text(encoding="utf-8")
+    assert "pip install -r requirements-ci.txt" in workflow
+    assert not re.search(r"pip3? install\s+[\"']?vitrix", workflow)
+    lines = [ln for ln in (repo / "requirements-ci.txt").read_text(encoding="utf-8").splitlines() if ln and not ln.startswith("#")]
+    assert len(lines) == 1 and re.fullmatch(r"vitrix @ git\+https://github\.com/davivers/vitrix\.git@[0-9a-f]{40}", lines[0])
+
+
+def test_install_hints_never_send_people_to_the_pypi_name():
+    """Vitrix ships from GitHub only and the PyPI name is unregistered: a bare install could run anyone's code."""
+    from pathlib import Path
+
+    root = Path(__file__).resolve().parents[1]
+    bare = re.compile(r"pip3? install\s+['\"]?vitrix(\[\w+\])?['\"]?(?!\s*@)\s*$", re.M)
+    assert not bare.search((root / "src" / "vitrix" / "cli.py").read_text(encoding="utf-8").replace("') from exc", "'\n"))
+    assert "will work once the first release" not in (root / "README.md").read_text(encoding="utf-8")
 
 
 def test_the_project_itself_has_no_example_detections_in_its_root():

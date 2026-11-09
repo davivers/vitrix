@@ -319,7 +319,7 @@ def print_gate(cfg: Config) -> int:
             print(f"replay {d['dataset']}: {d['error']}")
     s = q["summary"]
     print(f"{s['ready']} of {s['total']} rules ready to publish")
-    return 0 if s["blocked"] == 0 and not any(d.get("error") for d in q["datasets"]) else 1
+    return 0 if s["blocked"] == 0 else 1
 
 
 def cmd_gate(cfg: Config, args: argparse.Namespace) -> int:
@@ -350,7 +350,6 @@ def cmd_replay(cfg: Config, args: argparse.Namespace) -> int:
     except ReplayError as exc:
         raise UsageError(str(exc)) from None
 
-    failed = False
     for res in results:
         print(f"== {res['dataset']}: {res['events']} events in {res['duration_ms']} ms")
         for r in res["rules"]:
@@ -361,11 +360,8 @@ def cmd_replay(cfg: Config, args: argparse.Namespace) -> int:
                 print(f"  {r['matches']:>5}  {r['rule']}  (events {', '.join(map(str, r['sample']))}{more}) · {r['duration_ms']} ms")
         for c in res["checks"]:
             if not c["passed"]:
-                failed = True
-                print(f"  ✗ regression · {c['rule']}: {c['message']}")
-        if res["checks"] and all(c["passed"] for c in res["checks"]):
-            print(f"  ✓ {len(res['checks'])} expectations met")
-    return 1 if failed else 0
+                print(f"  note · {c['rule']}: {c['message']}")
+    return 0  # replay shows what matches; it never fails a run
 
 
 def cmd_report(cfg: Config, args: argparse.Namespace) -> int:
@@ -393,7 +389,7 @@ def cmd_serve(cfg: Config, args: argparse.Namespace) -> int:
     try:
         import uvicorn
     except ImportError as exc:
-        raise UsageError("the API needs extra dependencies: pip install 'vitrix[api]'") from exc
+        raise UsageError("the API needs extra dependencies: pip install 'vitrix[api] @ git+https://github.com/davivers/vitrix'") from exc
 
     if args.config:
         os.environ["VITRIX_CONFIG"] = str(Path(args.config).resolve())
@@ -635,13 +631,13 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("-t", "--target", action="append")
     p.add_argument("--strict", action="store_true")
     p.add_argument("--markdown", metavar="FILE", help="append a Markdown summary (e.g. $GITHUB_STEP_SUMMARY)")
-    p.add_argument("--gate", action="store_true", help="also apply the quality gate (replay, false positives, exclusions)")
+    p.add_argument("--gate", action="store_true", help="also apply the quality gate (false positives, exclusions, health score)")
     p.set_defaults(func=cmd_check)
 
     p = sub.add_parser("gate", help="quality gate: is each rule ready to be published?")
     p.set_defaults(func=cmd_gate)
 
-    p = sub.add_parser("replay", help="run the rules against local logs (datasets/) and check the expectations")
+    p = sub.add_parser("replay", help="run the rules against local logs (datasets/) and show what matches")
     p.add_argument("dataset", nargs="?", help="dataset name in datasets/ (default: all)")
     p.add_argument("-f", "--file", help="an events file outside datasets/ (JSON, JSONL or YAML)")
     p.set_defaults(func=cmd_replay)
