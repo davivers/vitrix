@@ -8,12 +8,12 @@ import pytest
 import yaml
 from test_engine import CASES_OK, RULE_OK, make_project, run
 
-from vitrix import flow
+from vitrix import flow, service
 from vitrix.cases import parse_cases, run_cases
 from vitrix.config import ConfigError, load_config
 from vitrix.evaluator import evaluate, exclusion_selections
 from vitrix.lint import lint_doc
-from vitrix.replay import ReplayError, check_expectations, load_events
+from vitrix.replay import ReplayError, check_expectations, load_events, replay_draft
 
 BS = chr(92) * 2  # o fixture RULE_OK usa barra invertida dupla nos caminhos
 
@@ -183,13 +183,34 @@ def test_regressao_quando_a_contagem_muda(tmp_path):
     res = flow.run_dataset(cfg, "sim.jsonl")
     assert res["passed"] is False
     assert "exactly 2" in res["checks"][0]["message"]
-    assert run(make_project(tmp_path), "replay") == 1
+    assert run(make_project(tmp_path), "replay") == 0  # a mismatch is a note, never a failed run
 
 
 def test_expectativas_min_max_e_others():
     result = {"rules": [{"rule": "a.yml", "matches": 3}, {"rule": "b.yml", "matches": 1}]}
     checks = check_expectations(result, {"a.yml": {"min": 1, "max": None}}, 0)
     assert [c["passed"] for c in checks] == [True, False]  # b.yml disparou sem estar previsto
+    assert "`others: 0`" in checks[1]["message"]  # the failure names the limit that caused it
+
+
+def test_draft_failing_on_others_says_where_the_limit_comes_from(tmp_path):
+    cfg = load_config(make_project(tmp_path))
+    write_dataset(tmp_path, [EVIL, GOOD], "others: 0\n")
+    item = replay_draft(cfg, RULE_OK)["datasets"][0]
+    assert item["passed"] is False
+    assert "exactly 0" in item["message"] and "`others: 0`" in item["message"]
+
+
+def test_new_rule_detecting_the_template_attack_passes_replay(user_repo):
+    cfg = load_config(user_repo)
+    new_rule = (
+        "title: New rule\nlogsource:\n  category: process_creation\n  product: windows\n"
+        "detection:\n  selection:\n    Image|endswith: '\\powershell.exe'\n    CommandLine|contains: ' -enc '\n"
+        "  condition: selection\nlevel: medium\n"
+    )
+    item = replay_draft(cfg, new_rule, ["windows_attack_simulation.jsonl"])["datasets"][0]
+    assert item["matches"] > 0
+    assert item["passed"] is None  # no expectation applies to a rule the dataset does not list
 
 
 def test_dataset_fora_da_pasta_nao_e_lido(tmp_path):
@@ -237,12 +258,18 @@ def test_gate_exige_teste_da_exclusao(tmp_path):
 
 
 def test_gate_configuravel(tmp_path):
-    extra = "quality_gate:\n  allow_warnings: false\n  require_replay: true\n  min_positive: 2\n"
+    extra = "quality_gate:\n  allow_warnings: false\n  min_positive: 2\n"
     cfg = load_config(make_project(tmp_path, rule_text=RULE_OK.replace("falsepositives: [none]\n", ""), extra_cfg=extra))
     blockers = flow.quality_report(cfg)["rules"][0]["blockers"]
     assert "No lint warnings" in blockers
-    assert "Expectation in a replay dataset" in blockers
     assert "At least 2 positive case(s)" in blockers
+
+
+def test_retired_require_replay_is_ignored_not_fatal(tmp_path):
+    cfg_path = make_project(tmp_path, extra_cfg="quality_gate:\n  require_replay: true\n")
+    with pytest.warns(UserWarning, match="require_replay"):
+        cfg = load_config(cfg_path)
+    assert flow.quality_report(cfg)["rules"][0]["ready"] is True
 
 
 @pytest.mark.parametrize("bad", ["quality_gate: 1\n", "quality_gate:\n  nao_existe: 1\n", "quality_gate:\n  min_positive: -1\n",
@@ -252,14 +279,32 @@ def test_gate_invalido_no_vitrix_yml(tmp_path, bad):
         load_config(make_project(tmp_path, extra_cfg=bad))
 
 
-def test_gate_regressao_de_replay_bloqueia(tmp_path):
+def test_replay_never_affects_the_gate(tmp_path):
     cfg_path = make_project(tmp_path)
-    write_dataset(tmp_path, [EVIL], "expect:\n  r.yml: 2\n")
+    baseline = flow.quality_report(load_config(cfg_path))["rules"][0]
+    write_dataset(tmp_path, [EVIL], "expect:\n  r.yml: 2\nothers: 0\n")  # an expectation the rule does not meet
     rule = flow.quality_report(load_config(cfg_path))["rules"][0]
-    assert rule["stages"]["replay"] == "fail"
-    assert run(cfg_path, "gate") == 1
-    assert run(cfg_path, "check", "--gate") == 1
-    assert run(cfg_path, "check") == 0  # sem --gate, o check continua como antes
+    assert rule["ready"] is True and rule["stages"]["replay"] == "skip"
+    assert rule["score"] == baseline["score"]
+    assert not any(c["stage"] == "replay" for c in rule["checks"])
+    assert run(cfg_path, "gate") == 0
+    assert run(cfg_path, "check", "--gate") == 0
+
+
+def test_unreadable_dataset_does_not_fail_the_gate(tmp_path):
+    cfg_path = make_project(tmp_path)
+    (tmp_path / "datasets").mkdir()
+    (tmp_path / "datasets" / "broken.json").write_text("[1, 2]", encoding="utf-8")
+    assert run(cfg_path, "gate") == 0
+    assert run(cfg_path, "check", "--gate") == 0
+
+
+def test_draft_gate_ignores_replay_expectations(tmp_path):
+    cfg = load_config(make_project(tmp_path))
+    write_dataset(tmp_path, [EVIL], "expect:\n  r.yml: 2\n")
+    validation = service.validate_text(cfg, RULE_OK, CASES_OK, rule_rel="r.yml")
+    quality = flow.draft_quality(cfg, validation, RULE_OK, True, "r.yml")
+    assert quality["ready"] is True and quality["datasets"][0]["matches"] == 1
 
 
 def test_relatorio_markdown_e_json(tmp_path, capsys):

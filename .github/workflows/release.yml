@@ -1,7 +1,7 @@
 name: release
 
-# Push a tag like v0.1.0 (must equal `version` in pyproject.toml) to publish to PyPI
-# (Trusted Publishing, no token) and create a GitHub Release.
+# Push a tag like v0.1.0 (must equal `version` in pyproject.toml) to create a GitHub Release.
+# Vitrix ships from GitHub only: nothing is published to PyPI.
 on:
   push:
     tags: ['v*']
@@ -58,21 +58,8 @@ jobs:
           path: dist/
           if-no-files-found: error
 
-  publish-pypi:
-    needs: build
-    runs-on: ubuntu-latest
-    environment: pypi          # must match the Trusted Publisher config on PyPI
-    permissions:
-      id-token: write          # OIDC token for Trusted Publishing
-    steps:
-      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
-        with:
-          name: dist
-          path: dist/
-      - uses: pypa/gh-action-pypi-publish@7245906fb61fa33a13554f9d5fb856fe61758086 # release/v1
-
   github-release:
-    needs: publish-pypi
+    needs: build
     runs-on: ubuntu-latest
     permissions:
       contents: write          # create the release

@@ -91,7 +91,7 @@ test("Test & Replay: one table with cases and datasets; Compare with saved versi
   await expect(ds).toContainText("3 / 4");
   await expect(ds).toContainText("before 2");
   await ds.getByRole("button", { name: /e2e_events/ }).click();
-  await expect(page.getByText(/Now match:\s*#2/)).toBeVisible();
+  await expect(page.getByText(/Now match:\s*#3/)).toBeVisible();
 });
 
 // Regression (was a frontend bug): the Replay panel must stay usable when the gate state is

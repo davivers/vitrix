@@ -20,32 +20,6 @@ const readAuto = () => {
   }
 };
 
-const expectText = (d: DraftReplayDataset) => {
-  const e = d.expectation;
-  if (!e) return "";
-  return e.max === e.min ? `exactly ${e.min}` : `${e.min}–${e.max ?? "∞"}`;
-};
-
-function Verdict({ d }: { d: DraftReplayDataset }) {
-  if (d.error)
-    return <span className="text-warn">{t("not_evaluated")}</span>;
-  if (d.passed === null)
-    return (
-      <span className="inline-flex items-center gap-1.5 text-muted">
-        <Minus size={14} aria-hidden /> {t("no_expectation_for_this_rule")}
-      </span>
-    );
-  return d.passed ? (
-    <span className="inline-flex items-center gap-1.5 text-good">
-      <CheckCircle2 size={14} aria-hidden /> {t("meets")}{expectText(d)})
-    </span>
-  ) : (
-    <span className="inline-flex items-center gap-1.5 text-bad">
-      <XCircle size={14} aria-hidden /> {t("breaks")}{expectText(d)})
-    </span>
-  );
-}
-
 function EventViewer({ d, start }: { d: DraftReplayDataset; start: number }) {
   const [pos, setPos] = useState(start);
   const [copied, setCopied] = useState(false);
@@ -136,14 +110,26 @@ export function ErrorCard({ err, onJump }: { err: ReplayError; onJump?: () => vo
   );
 }
 
-const statusCell = (ok: boolean | null, errored: boolean) =>
-  errored ? (
+/** A dataset is not pass or fail: it only says whether the rule matched (neutral colours, not status). */
+const matchCell = (d: DraftReplayDataset) =>
+  d.error ? (
     <span className="inline-flex items-center gap-1.5 font-medium text-warn">
       <AlertTriangle size={14} aria-hidden /> {t("rp_error")}
     </span>
-  ) : ok === null ? (
+  ) : d.matches > 0 ? (
+    <span className="inline-flex items-center gap-1.5 font-medium text-strong">
+      <Check size={14} aria-hidden /> {t("rp_match")}
+    </span>
+  ) : (
     <span className="inline-flex items-center gap-1.5 text-muted">
-      <Minus size={14} aria-hidden /> {t("rp_no_expect")}
+      <Minus size={14} aria-hidden /> {t("rp_no_match")}
+    </span>
+  );
+
+const statusCell = (ok: boolean, errored: boolean) =>
+  errored ? (
+    <span className="inline-flex items-center gap-1.5 font-medium text-warn">
+      <AlertTriangle size={14} aria-hidden /> {t("rp_error")}
     </span>
   ) : ok ? (
     <span className="inline-flex items-center gap-1.5 font-medium text-good">
@@ -196,7 +182,7 @@ function CaseDetail({ c }: { c: ReplayCase }) {
 
 function ResultTable({ res, compare }: { res: DraftReplay; compare: boolean }) {
   const cases = res.cases ?? [];
-  const failingKeys = [...cases.filter((c) => !c.passed).map((c) => `c:${c.name}`), ...res.datasets.filter((d) => d.passed === false || d.error).map((d) => `d:${d.dataset}`)];
+  const failingKeys = [...cases.filter((c) => !c.passed).map((c) => `c:${c.name}`), ...res.datasets.filter((d) => d.error).map((d) => `d:${d.dataset}`)];
   const [open, setOpen] = useState<Set<string>>(() => new Set(failingKeys.slice(0, 3)));
   const [chip, setChip] = useState<Record<string, number>>({});
   const [filter, setFilter] = useState<"all" | "fail" | "pass">("all");
@@ -207,8 +193,7 @@ function ResultTable({ res, compare }: { res: DraftReplay; compare: boolean }) {
     setOpen(n);
   };
   const casesFailed = cases.filter((c) => !c.passed).length;
-  const dsWithExpect = res.datasets.filter((d) => d.passed !== null);
-  const dsFailed = dsWithExpect.filter((d) => !d.passed).length + res.datasets.filter((d) => d.error).length;
+  const dsFailed = res.datasets.filter((d) => d.error).length;
   const show = (ok: boolean) => filter === "all" || (filter === "pass") === ok;
   const events = res.datasets.reduce((s, d) => s + d.events, 0);
   const allGood = casesFailed === 0 && dsFailed === 0;
@@ -257,15 +242,14 @@ function ResultTable({ res, compare }: { res: DraftReplay; compare: boolean }) {
   if (res.datasets.length > 0) {
     rows.push(head("hd", t("ed_datasets_head")));
     res.datasets.forEach((d) => {
-      const ok = d.passed !== false && !d.error;
-      if (!show(ok)) return;
+      if (!show(!d.error)) return;
       const k = `d:${d.dataset}`;
       const on = open.has(k);
       const pos = chip[k] ?? 0;
       const expandable = d.sample.length > 0 || Boolean(d.error) || (compare && ((d.added?.length ?? 0) > 0 || (d.removed?.length ?? 0) > 0));
       rows.push(
         <tr key={k} className="border-t border-line align-top">
-          <td className="px-2 py-2">{statusCell(d.passed, Boolean(d.error))}</td>
+          <td className="px-2 py-2">{matchCell(d)}</td>
           <td className="py-2 pr-3">
             <button type="button" aria-expanded={on} disabled={!expandable} onClick={() => toggle(k)} className="inline-flex items-center gap-1.5 text-left font-mono text-xs text-text disabled:cursor-default">
               <ChevronDown size={13} className={clsx("shrink-0 transition-transform", !on && "-rotate-90", !expandable && "opacity-30")} aria-hidden />
@@ -274,7 +258,6 @@ function ResultTable({ res, compare }: { res: DraftReplay; compare: boolean }) {
             {on && (
               <div className="space-y-2 pl-5 pt-2">
                 {d.error && <ErrorCard err={d.error} />}
-                {d.passed === false && !d.error && d.message && <p className="text-xs text-bad">{d.message}</p>}
                 {compare && ((d.added?.length ?? 0) > 0 || (d.removed?.length ?? 0) > 0) && (
                   <p className="text-xs text-muted">
                     {t("rp_added")} {(d.added ?? []).map((e) => `#${e.index}`).join(" ") || "-"} · {t("rp_removed")} {(d.removed ?? []).map((e) => `#${e.index}`).join(" ") || "-"}
@@ -296,9 +279,7 @@ function ResultTable({ res, compare }: { res: DraftReplay; compare: boolean }) {
               </div>
             )}
           </td>
-          <td className="py-2 pr-3 text-xs text-muted">
-            <Verdict d={d} />
-          </td>
+          <td />
           <td className="py-2 pr-3 text-xs tabular-nums text-muted">
             {d.error ? "-" : `${d.matches} / ${d.events.toLocaleString(locale())}`}
             {compare && d.before !== null && d.before !== undefined && <span className="block text-subtle">{t("rp_before")} {d.before}</span>}
@@ -418,8 +399,8 @@ function PastedEvents({ rule }: { rule: string }) {
 }
 
 /**
- * Replays the unsaved draft on the local datasets (pure compute, nothing leaves the machine) and
- * compares the matches with `<dataset>.expect.yml`. Reports to the Editor whether an expectation broke.
+ * Replays the unsaved draft on the local datasets (pure compute, nothing leaves the machine) and shows
+ * which events match. Datasets are information only; `onBroken` reports failing test cases to the Editor.
  */
 export function ReplayPanel(props: { rule: string; cases: string; ruleId: string | null; invalid: boolean; onBroken: (broken: boolean | null) => void }) {
   const { rule, cases, ruleId, invalid, onBroken } = props;
@@ -430,7 +411,7 @@ export function ReplayPanel(props: { rule: string; cases: string; ruleId: string
   const [ranRule, setRanRule] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<ReplayError | null>(null);
-  const [compare, setCompare] = useState(false);
+  const [compare, setCompare] = useState(Boolean(ruleId)); // a saved rule compares with its saved version by default
   const ctrl = useRef<AbortController | null>(null);
 
   const run = () => {
@@ -445,7 +426,7 @@ export function ReplayPanel(props: { rule: string; cases: string; ruleId: string
         setRanRule(rule);
         setError(null);
         setBusy(false);
-        onBroken(r.datasets.some((d) => d.passed === false) || (r.cases ?? []).some((x) => !x.passed));
+        onBroken((r.cases ?? []).some((x) => !x.passed));
       })
       .catch((e: Error) => {
         if (e.name === "AbortError") return;
@@ -484,7 +465,7 @@ export function ReplayPanel(props: { rule: string; cases: string; ruleId: string
       {list.error && (forbidden ? <p className="text-sm text-muted">{forbidden}</p> : <ErrorBox message={(list.error as Error).message} />)}
       {list.data && datasets.length === 0 && (
         <p className="text-sm text-muted">
-          {t("no_dataset_in")} <span className="font-mono">datasets/</span>{t("add_json_jsonl_or_yaml_logs_there_and_")} <span className="font-mono">name.expect.yml</span> {t("with_the_expected_counts")}
+          {t("no_dataset_in")} <span className="font-mono">datasets/</span>{t("add_json_jsonl_or_yaml_logs_there_and_")}
         </p>
       )}
       {datasets.length > 0 && (
@@ -496,7 +477,6 @@ export function ReplayPanel(props: { rule: string; cases: string; ruleId: string
               {datasets.map((d) => (
                 <option key={d.name} value={d.name}>
                   {d.name}
-                  {d.has_expectations ? "" : " (no expectations)"}
                 </option>
               ))}
             </select>

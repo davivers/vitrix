@@ -1,0 +1,3 @@
+# The exact Vitrix version CI installs. Keep it pinned to a full commit SHA: a bare
+# "vitrix" would come from PyPI, where anyone who registers that name could run code in your CI.
+vitrix @ git+https://github.com/davivers/vitrix.git@f02a98c42d0310c651a4821291aa6d0dfd5fe1ea

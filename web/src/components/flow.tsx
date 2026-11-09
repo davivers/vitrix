@@ -117,7 +117,6 @@ export const GATE_LABELS: Record<string, string> = {
   require_mitre: t("l_att_ck_technique_required"),
   allow_warnings: t("l_lint_warnings_allowed"),
   blocked_status: t("l_blocking_statuses"),
-  require_replay: t("l_replay_expectation_required"),
   review_days: t("l_review_window_days"),
   min_score: t("l_minimum_health_score_to_approve"),
 };

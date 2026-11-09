@@ -7,14 +7,16 @@ vitrix.yml        project configuration (targets, quality gate, GitHub, accounts
 mappings.yml      query mappings and final language defaults; written by the app (Editor / Settings), appears after the first change
 rules/            Sigma rules (the source of truth)
 cases/            test cases, same path as the rule
-datasets/         logs for replay, with <name>.expect.yml expectations
+datasets/         logs to try the rules on (Replay shows what matches; it never blocks a PR)
 .github/          the CI workflow that validates every change
+requirements-ci.txt  the exact Vitrix commit CI installs
 ```
 
 ## Work on it
 
 ```bash
-vitrix check --strict --gate   # lint + conversion + tests + replay + quality gate
+vitrix check --strict --gate   # lint + conversion + tests + quality gate
+vitrix replay                  # which events of datasets/ each rule matches
 vitrix serve                   # the web UI on http://127.0.0.1:8000
 ```
 

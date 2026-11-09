@@ -9,8 +9,10 @@ Every check belongs to a stage and answers one of five questions:
     1. Is the rule syntactically correct?              (validate)
     2. Does the detection logic work?                  (test)
     3. Are there known false positives?                (analyze)
-    4. Does the rule detect the expected behaviour?    (test, replay, analyze)
+    4. Does the rule detect the expected behaviour?    (test, analyze)
     5. Is the rule ready to be published?              (gate: every blocking check passes)
+
+Replay is a tool to try a rule on real logs: it has no checks here and never affects approval.
 
 Criteria come from `quality_gate` in vitrix.yml (see config.GateConfig). A failed `blocking`
 check stops publication; non-blocking ones show up as recommendations. A rule is **approved**
@@ -65,7 +67,6 @@ def evaluate_rule(
     problems: list[Issue],
     final_conversion: dict[str, bool],
     has_exclusions: bool,
-    replay_checks: list[dict],
     age_days: float | None = None,
     governance: dict | None = None,
 ) -> dict:
@@ -114,15 +115,6 @@ def evaluate_rule(
         detail=f"{negatives} negative")
     add("edge_cases", "test", 2, "Edge case (missing or null field, casing)", "edge" in kinds, blocking=False,
         detail="add a case with kind: edge" if "edge" not in kinds else f"{kinds.count('edge')} edge")
-
-    # 4 · Replay
-    if replay_checks:
-        bad = [c for c in replay_checks if not c["passed"]]
-        add("replay", "replay", 4, "Replay matches the expectations", not bad,
-            detail="; ".join(f"{c['dataset']}: {c['message']}" for c in bad[:3]) or f"{len(replay_checks)} dataset(s)")
-    else:
-        add("replay", "replay", 4, "Expectation in a replay dataset", None if not gate.require_replay else False,
-            blocking=gate.require_replay, detail="no dataset sets an expectation for this rule")
 
     # 3/4 · Analyze
     level = doc.get("level")

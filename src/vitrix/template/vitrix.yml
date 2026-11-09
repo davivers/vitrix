@@ -39,7 +39,6 @@ quality_gate:
   require_mitre: true
   allow_warnings: true                      # false: any lint warning blocks
   blocked_status: [deprecated, unsupported]
-  require_replay: false                     # true: the rule needs an expectation in some dataset
   review_days: 180                          # recommend reviewing rules unchanged for longer (0 = off)
   min_score: 80                             # health score (0-100) a rule needs to be approved (0 = no threshold)
 

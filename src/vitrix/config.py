@@ -41,7 +41,6 @@ class GateConfig:
     require_mitre: bool = True  # an ATT&CK technique is required
     allow_warnings: bool = True  # False: any lint warning blocks
     blocked_status: list[str] = field(default_factory=lambda: ["deprecated", "unsupported"])
-    require_replay: bool = False  # True: the rule needs an expectation in some replay dataset
     review_days: int = 180  # recommend reviewing rules unchanged in Git for more than N days (0 = off)
     min_score: int = 80  # health score (0-100) a rule needs to be approved (0 = no threshold)
     require_owner: bool = False  # True: a rule without vitrix.owner is blocked
@@ -56,6 +55,9 @@ def _parse_gate(data: object) -> GateConfig:
         raise ConfigError("'quality_gate' must be a mapping")
     gate = GateConfig()
     for key, value in data.items():
+        if key == "require_replay":  # still in the vitrix.yml of existing repositories
+            warnings.warn("quality_gate.require_replay is no longer supported and is ignored (replay never affects approval)", stacklevel=2)
+            continue
         if not hasattr(gate, key):
             raise ConfigError(f"quality_gate.{key}: unknown option (use {', '.join(GateConfig.__dataclass_fields__)})")
         default = getattr(gate, key)

@@ -22,13 +22,11 @@ jobs:
         with:
           python-version: '3.12'
 
-      # Installs from PyPI; falls back to the GitHub repository while a release is not published
-      # yet. Pin for reproducible runs: pip install "vitrix==0.1.0".
+      # Installs the commit pinned in requirements-ci.txt. Never install a bare "vitrix" here.
       - name: Install Vitrix
-        run: |
-          pip install vitrix || pip install "vitrix @ git+https://github.com/davivers/vitrix.git"
+        run: pip install -r requirements-ci.txt
 
-      # Lint, conversion, test cases, replay and the quality gate.
+      # Lint, conversion, test cases and the quality gate.
       # The summary shows up in the run's "Summary" tab.
       - name: Validate
         run: vitrix check --strict --gate --markdown "$GITHUB_STEP_SUMMARY"
